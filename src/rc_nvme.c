@@ -1,3 +1,4 @@
+#include "patch_prototypes.h"
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * AMD-RAID Linux driver — NVMe controller + RAID0/RAID1 volume I/O path

@@ -1,3 +1,4 @@
+#include "patch_prototypes.h"
 /**
  * ==============================================================================
  * CLEANROOM ARCHITECTURE: INDEPENDENT PARITY GENERATION LAYER (RAID 5 / RAID 6)

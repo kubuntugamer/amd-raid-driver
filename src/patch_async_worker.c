@@ -1,3 +1,4 @@
+#include "patch_prototypes.h"
 /**
  * ==============================================================================
  * UPSTREAM PATCH VECTOR: ASYNCHRONOUS COMPLETION ENGINE BINDINGS
