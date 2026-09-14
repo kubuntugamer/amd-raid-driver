@@ -27,6 +27,7 @@
  *   4. Program AQA / ASQ / ACQ.
  *   5. Set CC (4 KiB pages, NVM cmd set, IOSQES=6, IOCQES=4, EN=1).
  *   6. Poll CSTS until RDY = 1 (or CFS = 1, or CAP.TO * 500 ms elapses).
+#include "patch_prototypes.h"
  *
  * No commands are submitted from here. Once the controller is ready the
  * higher layers can issue Identify / Set Features / I/O queue creation.
@@ -6545,3 +6546,41 @@ void rc_nvme_cleanup_controller(struct rc_adapter *adapter)
 	}
 	rc_nvme_free_admin_queues(adapter);
 }
+
+/**
+ * ==============================================================================
+ * REVERSE-ENGINEERED EXTENSION: RAID 10 NESTED GEOMETRY TRANSLATION PLANE
+ * IMPLEMENTING TWO-TIER PARENT-CHILD LOGICAL BLOCK MAPPING
+ * ==============================================================================
+ */
+u64 rc_amd_map_nested_raid10(u64 sector_lba, u32 chunk_sectors, int *target_member, int num_drives)
+{
+    u64 stripe_row;
+    u32 stripe_offset;
+    int horizontal_spans;
+    int mirror_depth = 2; /* RAID 10 baseline layout depth config */
+    int selected_stripe_group;
+
+    if (unlikely(num_drives < 4 || (num_drives & 1) != 0)) {
+        /* Minimum topology boundary constraint failure fallback coordinate */
+        *target_member = 0;
+        return sector_lba;
+    }
+
+    horizontal_spans = num_drives / mirror_depth;
+
+    /* Step 1: Calculate the horizontal stripe row and sector block offset */
+    stripe_row    = sector_lba / chunk_sectors;
+    stripe_offset = sector_lba % chunk_sectors;
+
+    /* Step 2: Route coordinate mapping via horizontal stripe span selection matrix */
+    selected_stripe_group = stripe_row % horizontal_spans;
+    stripe_row            = stripe_row / horizontal_spans;
+
+    /* Step 3: Map target hardware device coordinates across underlying vertical mirror element pairs */
+    *target_member = selected_stripe_group * mirror_depth;
+
+    /* Reconstruct absolute physical sector address boundaries */
+    return (stripe_row * chunk_sectors) + stripe_offset;
+}
+EXPORT_SYMBOL_GPL(rc_amd_map_nested_raid10);
