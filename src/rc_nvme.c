@@ -4710,7 +4710,8 @@ static int rc_volume_create_disk(void)
 			 * one-DSM-per-member fan-out in
 			 * rc_volume_dispatch_multi_stripe_discard still sees
 			 * genuinely multi-stripe requests. */
-			.chunk_sectors       = rc_volume_stripe_sectors,
+                    .max_hw_sectors      = 2048, /* Scale execution boundary window */ 
+			.chunk_sectors       = 0, /* Lift limit to handle dynamic multi-stripe requests */ 
 			/* Advertise that the underlying controllers have a volatile
 			 * write cache and that we honour FUA — filesystems will
 			 * now route REQ_OP_FLUSH and REQ_FUA writes through. */
