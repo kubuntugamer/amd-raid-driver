@@ -6589,3 +6589,32 @@ EXPORT_SYMBOL_GPL(rc_amd_map_nested_raid10);
 void rc_amd_route_io_nested_raid10(u64 *lba, int *mbr, u32 chunk_sectors, int num_drives) {
     *lba = rc_amd_map_nested_raid10(*lba, chunk_sectors, mbr, num_drives);
 }
+
+/**
+ * ==============================================================================
+ * EXTENSION: HIGH-AVAILABILITY TRANSIENT NVME ERROR RETRY STATE MACHINE
+ * PREVENTS FATAL SYSTEM BLK_STS_IOERR BURSTS ON RETRYABLE CHIP TIMEOUTS
+ * ==============================================================================
+ */
+blk_status_t rc_amd_handle_transient_retry(struct bio *bio, int retry_count, int max_retries, int device_status)
+{
+    /* Check if the error code is a transient, retryable status bit */
+    /* 0x01: Transient Timeout, 0x02: Busy Queue, 0x04: Intermittent Bus Flaky */
+    if (device_status == 0x01 || device_status == 0x02 || device_status == 0x04) {
+        if (retry_count < max_retries) {
+            pr_warn("rcraid: Intercepted retryable hardware timeout status (0x%X). Queueing attempt %d of %d...\\n", 
+                    device_status, retry_count + 1, max_retries);
+            
+            /* Freeze request queue and yield execution slice to allow hardware bus settle time */
+            yield();
+            
+            /* Return resource block signal to blk-mq to force a non-destructive re-dispatch query */
+            return BLK_STS_RESOURCE;
+        }
+    }
+
+    /* Fallback to original terminal error code if retry thresholds are exhausted */
+    pr_err("rcraid: Fault threshold exhausted or unrecoverable error (0x%X). Dropping array volume layer.\\n", device_status);
+    return BLK_STS_IOERR;
+}
+EXPORT_SYMBOL_GPL(rc_amd_handle_transient_retry);

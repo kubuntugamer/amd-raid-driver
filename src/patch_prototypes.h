@@ -24,4 +24,5 @@ void rc_amd_generate_raid6_parity(uint8_t **data_buffers, uint8_t *p_buffer, uin
 u64 rc_amd_map_nested_raid10(u64 sector_lba, u32 chunk_sectors, int *target_member, int num_drives);
 
 void rc_amd_route_io_nested_raid10(u64 *lba, int *mbr, u32 chunk_sectors, int num_drives);
+blk_status_t rc_amd_handle_transient_retry(struct bio *bio, int retry_count, int max_retries, int device_status);
 #endif /* PATCH_PROTOTYPES_H */
