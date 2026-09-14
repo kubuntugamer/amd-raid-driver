@@ -1,9 +1,9 @@
 # ==============================================================================
-# FORK WORKSPACE MASK MATRIX: AMX RAIDXPERT2 OUT-OF-TREE MODULES
-# TARGET FOOTPRINT: https://github.com
+# HARDENED FORK WORKSPACE MASK MATRIX: OUT-OF-TREE COMPILATION TARGETS
+# TARGET REPOSITORY PATH: /home/chazz/amd-raid-driver
 # ==============================================================================
 
-# Core Kernel Binary Objects (Root and src/)
+# Root and Subfolder Binary Objects
 *.o
 *.ko
 *.mod
@@ -11,18 +11,18 @@
 *.mod.o
 .*.cmd
 .module-common.o
+
+# Local Directory Target Filters
 src/*.o
 src/.*.cmd
+build/artifacts/
+.tmp_versions/
 
 # System Allocation Tracking Logs
 modules.order
 Module.symvers
 
-# Local Dynamic Build Directories
-.tmp_versions/
-build/
-
-# Core Cache & System Hidden Dumps
+# Temporary Editor/System Files
 .cache/
-.swp
+*.swp
 *~

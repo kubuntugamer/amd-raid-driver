@@ -1,0 +1,121 @@
+=== AUDITING AMD SOURCE STRINGS FOR HIDDEN ROADMAP GAPS ===
+--------------------------------------------------------
+src/rc_nvme.c:66: * Everything level-specific (map_lba, mirror fan-out in queue_rq) keys off
+src/rc_nvme.c:116:/* Write-fan-out mask: live members PLUS members currently resyncing.  A
+src/rc_nvme.c:175: * context, in-flight fan-out requests waiting on it must be drained
+src/rc_nvme.c:272:		 * the STATE says RESYNCING (drop out of the write fan-out)
+src/rc_nvme.c:482:	 * counted in rc_volume_wgen_count[wgen] (RAID1 write/discard fan-out
+src/rc_nvme.c:530: *   - RAID1 fan-out (WRITE/DISCARD/FLUSH) where only a SUBSET of the
+src/rc_nvme.c:761:					 * fan-out op race here, but each
+src/rc_nvme.c:2555:	 * every size assumption in the mirror fan-out (per-member sg arrays,
+src/rc_nvme.c:2594:	u32 chunk_sectors;
+src/rc_nvme.c:2638:		chunk_sectors = rc_volume_chunk_sectors_for(nvme->ld_level,
+src/rc_nvme.c:2641:		if (!chunk_sectors) {
+src/rc_nvme.c:2668:		    (chunk_sectors < 16u ||
+src/rc_nvme.c:2669:		     chunk_sectors > (RC_VOLUME_DATA_BYTES / 512u) ||
+src/rc_nvme.c:2670:		     (chunk_sectors & (chunk_sectors - 1)))) {
+src/rc_nvme.c:2673:				  pci_name(adapter->pdev), chunk_sectors,
+src/rc_nvme.c:2680:		chunk_sectors = nvme->md_stripe_sectors;
+src/rc_nvme.c:2684:			  nvme->ld_my_position, chunk_sectors);
+src/rc_nvme.c:2690:			  pci_name(adapter->pdev), chunk_sectors,
+src/rc_nvme.c:2692:		chunk_sectors = rc_volume_stripe_override;
+src/rc_nvme.c:2700:		rc_volume_stripe_sectors   = chunk_sectors;
+src/rc_nvme.c:2720:		if (chunk_sectors != rc_volume_stripe_sectors) {
+src/rc_nvme.c:2724:				  chunk_sectors, rc_volume_stripe_sectors);
+src/rc_nvme.c:3107: * blk-mq split at chunk_sectors keeps each discard request to one stripe,
+src/rc_nvme.c:3166:/* blk-mq request handler.  chunk_sectors=stripe_sectors in queue_limits
+src/rc_nvme.c:3179: * walks (mirror fan-out, multi-stripe split) MUST do this too: buffer-head
+src/rc_nvme.c:3270:			u32 chunk_sectors = min(seg_len_sectors,
+src/rc_nvme.c:3272:			u32 chunk_bytes = chunk_sectors * 512u;
+src/rc_nvme.c:3316:			member_sectors[mbr] += chunk_sectors;
+src/rc_nvme.c:3320:			seg_len_sectors -= chunk_sectors;
+src/rc_nvme.c:3321:			cur_lba         += chunk_sectors;
+src/rc_nvme.c:3563: * WRITE size is bounded by queue_limits.chunk_sectors (512 sectors for
+src/rc_nvme.c:3867:	 * filesystem on power loss.  The fan-out already runs in parallel and
+src/rc_nvme.c:3871:		/* Snapshot the live mask once for the whole fan-out (same
+src/rc_nvme.c:3952:	 * chunk_sectors — a large mirror discard would otherwise wander into
+src/rc_nvme.c:3953:	 * the RAID0 stripe-math discard fan-out.  READs fall through: the
+src/rc_nvme.c:4452:	 * RAID1 fan-out killing BOTH mirrors for one stuck command would
+src/rc_nvme.c:4691:			 * request crosses a chunk_sectors-aligned boundary, so
+src/rc_nvme.c:4700:			 * chunk_sectors set to the stripe size that fan-out is
+src/rc_nvme.c:4703:			 * ready path for a future change that raises chunk_sectors
+src/rc_nvme.c:4709:			 * max_hw_discard_sectors, not chunk_sectors, so the
+src/rc_nvme.c:4710:			 * one-DSM-per-member fan-out in
+src/rc_nvme.c:4713:			.chunk_sectors       = rc_volume_stripe_sectors,
+src/patch_async_worker.c:15:/* Relational context tracking frame for parallel multi-disk fan-out mirror elements */
+src/rc_nvme.c:258:/* Fail a member from any context (ISR, timeout, queue_rq).  Clearing the
+src/rc_nvme.c:449: * the timeout safety-net) can dma_unmap_sg.  nents=0 means no mapping is
+src/rc_nvme.c:456:					    * .timeout uses it to derive the
+src/rc_nvme.c:487:	/* Bounded .timeout re-arm count: how many times the EH handler has
+src/rc_nvme.c:496:	 * drain, the .timeout handler, and queue_rq's own inline error/hit
+src/rc_nvme.c:501:	 * path performs the cleanup + end.  Observed unclaimed: mass-timeout
+src/rc_nvme.c:519: * completion (ISR, drain, timeout, queue_rq inline paths) must call this
+src/rc_nvme.c:552:		return BLK_STS_IOERR;
+src/rc_nvme.c:557:		return BLK_STS_IOERR;
+src/rc_nvme.c:569:		return BLK_STS_IOERR;
+src/rc_nvme.c:796:					 * (A lost claim means the drain/timeout
+src/rc_nvme.c:870:/* Cheap dead-controller probe usable from process context (timeout callback).
+src/rc_nvme.c:925:				  "rc_nvme_wait_csts: timeout waiting for CSTS & 0x%x == 0x%x (CSTS=0x%08x)\n",
+src/rc_nvme.c:953: * called BEFORE clearing CC.EN.  Best-effort: on timeout we log and let
+src/rc_nvme.c:1108:				  "rc_nvme_admin_cmd: timeout waiting for CQE (opc=0x%02x CID=0x%x)\n",
+src/rc_nvme.c:1146: * -errno (timeout, controller error). The caller fills opc/nsid/prp1/cdwN;
+src/rc_nvme.c:1148: * the admin_mutex serialises against teardown and against timeout-issued
+src/rc_nvme.c:1574:	 * controller: each admin command would burn the full admin timeout
+src/rc_nvme.c:1856:			  "rc_nvme_io_cmd_sync: timeout waiting for CQE (opc=0x%02x)\n",
+src/rc_nvme.c:2901: * timeout safety-net) can unmap.  Returns 0 on success or a blk_status_t
+src/rc_nvme.c:2913:		return BLK_STS_IOERR;
+src/rc_nvme.c:2921:		return BLK_STS_IOERR;
+src/rc_nvme.c:2927:		return BLK_STS_IOERR;
+src/rc_nvme.c:3132: * (the flag writers — ISR CSTS check, timeout, PM, reset — don't know
+src/rc_nvme.c:3151:		 * 30s blk-mq timeout. */
+src/rc_nvme.c:3249:		return BLK_STS_IOERR;
+src/rc_nvme.c:3280:				return BLK_STS_IOERR;
+src/rc_nvme.c:3293:					return BLK_STS_IOERR;
+src/rc_nvme.c:3314:				return BLK_STS_IOERR;
+src/rc_nvme.c:3329:		return BLK_STS_IOERR;	/* shouldn't reach here for single-member */
+src/rc_nvme.c:3369:			return BLK_STS_IOERR;
+src/rc_nvme.c:3421:				return BLK_STS_IOERR;
+src/rc_nvme.c:3474:		return BLK_STS_IOERR;
+src/rc_nvme.c:3506:		return BLK_STS_IOERR;
+src/rc_nvme.c:3585:		return BLK_STS_IOERR;
+src/rc_nvme.c:3604:		return BLK_STS_IOERR;
+src/rc_nvme.c:3637:				return BLK_STS_IOERR;
+src/rc_nvme.c:3653:			return BLK_STS_IOERR;
+src/rc_nvme.c:3683:				return BLK_STS_IOERR;
+src/rc_nvme.c:3735:					return BLK_STS_IOERR;
+src/rc_nvme.c:3850:			blk_mq_end_request(req, BLK_STS_IOERR);
+src/rc_nvme.c:3889:				blk_mq_end_request(req, BLK_STS_IOERR);
+src/rc_nvme.c:3928:			blk_mq_end_request(req, BLK_STS_IOERR);
+src/rc_nvme.c:3944:			blk_mq_end_request(req, BLK_STS_IOERR);
+src/rc_nvme.c:4048:			blk_mq_end_request(req, BLK_STS_IOERR);
+src/rc_nvme.c:4087:			blk_mq_end_request(req, BLK_STS_IOERR);
+src/rc_nvme.c:4158:		blk_mq_end_request(req, BLK_STS_IOERR);
+src/rc_nvme.c:4171: * The .timeout path only flags `dead`; without this, drain would
+src/rc_nvme.c:4276: * already queued, so multiple .timeout invocations during one death
+src/rc_nvme.c:4287: * that is currently dead.  Called from .timeout after marking adapters
+src/rc_nvme.c:4333: * member(s) — without this they'd sit until the 30 s blk-mq timeout — and
+src/rc_nvme.c:4350:/* blk-mq .timeout callback.  Fires at the default 30 s when a request's
+src/rc_nvme.c:4356: *      end this request with BLK_STS_IOERR.
+src/rc_nvme.c:4399:		 * full extra timeout periods the silent member is treated as
+src/rc_nvme.c:4409:				  "rc_volume_timeout: tag=%u members 0x%lx never completed across %u timeout periods without asserting CFS — declaring dead\n",
+src/rc_nvme.c:4423:			blk_mq_end_request(req, BLK_STS_IOERR);
+src/rc_nvme.c:4505:	.timeout    = rc_volume_timeout,
+src/rc_nvme.c:5753: * death episode; the next .timeout for a fresh death still fires after
+src/rc_nvme.c:5796: *      .timeout-issued Abort can't collide.
+src/rc_nvme.c:6034:	 * attempts.  If the controller dies again later, .timeout will get
+src/rc_nvme.c:6123: * controller is genuinely wedged, .timeout fires and fails the stragglers,
+src/rc_nvme.c:6157:	 * timeout/eh_retries budget (~90s) on a wedged member, and holding
+src/rc_nvme.c:6174:		 * timeout/eh_retries budget on a wedged member, and holding
+src/rc_nvme.c:6197:	 * .timeout → rc_nvme_auto_reset_fn if a request times out mid-PM.
+src/patch_async_worker.c:47:        bi_status = BLK_STS_IOERR;
+src/rc_linux.h:214:    // on controller reset (requests ended by drain/timeout without a CQE
+src/rc_linux.h:284:    // hard-code CID 0, so after an admin timeout the late CQE was consumed
+src/rc_linux.h:295:    u8             timeout_500ms;     // CAP.TO * 500 ms = boot timeout
+src/rc_linux.h:358:    // .timeout callback drains every in-flight request that targeted it.
+src/rc_linux.h:360:    // (timeout without a controller-reset path means we can't safely recycle
+src/rc_linux.h:364:    // Serializes rc_nvme_admin_cmd so a timeout-issued Abort can't collide
+src/rc_linux.h:365:    // with module teardown or with another timeout's admin issue.  Held
+src/rc_linux.h:379:    // latch a genuinely-fried controller would thrash 30 s per timeout
+src/rc_linux.h:820:/* Admin command timeout — generous enough for cold controllers but bounded
+src/rc_nvme.c:2066: * (RAID10, >2-way mirrors, count/device mismatches) — the caller must
+src/rc_nvme.c:2606:		/* Refuse layouts with no dispatch path (RAID10, >2-way

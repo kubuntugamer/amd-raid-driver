@@ -1,0 +1,4 @@
+rc_*.c usr/src/amd-raid-driver-1.0.0/
+rc_*.h usr/src/amd-raid-driver-1.0.0/
+Makefile usr/src/amd-raid-driver-1.0.0/
+dkms.conf usr/src/amd-raid-driver-1.0.0/
