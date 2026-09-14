@@ -6585,3 +6585,7 @@ u64 rc_amd_map_nested_raid10(u64 sector_lba, u32 chunk_sectors, int *target_memb
     return (stripe_row * chunk_sectors) + stripe_offset;
 }
 EXPORT_SYMBOL_GPL(rc_amd_map_nested_raid10);
+
+void rc_amd_route_io_nested_raid10(u64 *lba, int *mbr, u32 chunk_sectors, int num_drives) {
+    *lba = rc_amd_map_nested_raid10(*lba, chunk_sectors, mbr, num_drives);
+}
