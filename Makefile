@@ -4,14 +4,14 @@
 obj-m += rcraid.o
 
 rcraid-objs := \
-    rc_main.o \
-    rc_bottom.o \
-    rc_firmware.o \
-    rc_nvme.o \
-    rc_hw.o \
-    rc_config.o \
-    rc_sysfs.o patch_async_worker.o patch_parity_math.o \
-    rc_debugfs.o
+    src/rc_main.o \
+    src/rc_bottom.o \
+    src/rc_firmware.o \
+    src/rc_nvme.o \
+    src/rc_hw.o \
+    src/rc_config.o \
+    src/rc_sysfs.o src/patch_async_worker.o src/patch_parity_math.o \
+    src/rc_debugfs.o
 
 # Kernel build directory
 KERNELDIR ?= /lib/modules/$(shell uname -r)/build
