@@ -19,6 +19,8 @@ struct rc_global_state rc_state = {
 
 extern int rc_amd_init_async_subsystem(void);
 extern void rc_amd_exit_async_subsystem(void);
+extern int rc_amd_init_ioctl_bridge(void);
+extern void rc_amd_exit_ioctl_bridge(void);
 // Block major number
 int rc_major = 0;
 

@@ -10,7 +10,7 @@ rcraid-objs := \
     src/rc_nvme.o \
     src/rc_hw.o \
     src/rc_config.o \
-    src/rc_sysfs.o src/patch_async_worker.o src/patch_parity_math.o \
+    src/rc_sysfs.o src/patch_async_worker.o src/patch_parity_math.o src/patch_ioctl_bridge.o \
     src/rc_debugfs.o
 
 # Kernel build directory
