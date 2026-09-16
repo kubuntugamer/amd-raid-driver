@@ -11,14 +11,12 @@ public:
     ~TaskManagerWidget();
 
 public slots:
-    // Restores the exact function signature required by mainwindow_actions.cpp
-    void registerNewSyncTask(const QString &volumeName, int diskCount, int totalCapacityMb);
+    // Satisfies the internal link references expected by the moc engine
+    void registerNewSyncTask(const QString &taskName, int targetVolumeId, int initialProgress = 0);
 
 private:
     void setupUiLayout();
-
     QTableWidget *taskTable;
-    int taskCounter;
 };
 
 #endif

@@ -11,8 +11,12 @@
 #include "modules/statuspanelwidget.h"
 #include "modules/dashboardwidget.h"
 #include "modules/taskmanagerwidget.h"
+#include "modules/smartmonitorwidget.h"
 
 void MainWindow::setupLayout() {
+    setWindowFlags(Qt::Window | Qt::WindowMinimizeButtonHint | Qt::WindowCloseButtonHint);
+    setFixedSize(1280, 720);
+
     QMenuBar *mainMenuBar = menuBar();
     mainMenuBar->clear();
     
@@ -29,7 +33,7 @@ void MainWindow::setupLayout() {
     QWidget *centralWidget = new QWidget(this);
     setCentralWidget(centralWidget);
     QVBoxLayout *rootLayout = new QVBoxLayout(centralWidget);
-    rootLayout->setContentsMargins(4, 4, 4, 4);
+    rootLayout->setContentsMargins(6, 6, 6, 6);
 
     QSplitter *masterVerticalSplitter = new QSplitter(Qt::Vertical, this);
     rootLayout->addWidget(masterVerticalSplitter);
@@ -46,7 +50,6 @@ void MainWindow::setupLayout() {
     arrayTreeView->setModel(treeModel);
     arrayTreeView->header()->setVisible(true);
     
-    // Pristine slate initialization: mock folders are completely removed
     treeModel->clear();
     treeModel->setHorizontalHeaderLabels({"AMD RAIDXpert2 Managed Tree Topology"});
 
@@ -57,7 +60,7 @@ void MainWindow::setupLayout() {
     
     QWidget *configurationTab = new QWidget(this);
     QVBoxLayout *configLayout = new QVBoxLayout(configurationTab);
-    configLayout->setContentsMargins(2, 2, 2, 2);
+    configLayout->setContentsMargins(4, 4, 4, 4);
 
     arrayOptions = new ArrayOptionsWidget(this);
     arrayOptions->raidTypeCombo->clear();
@@ -73,13 +76,17 @@ void MainWindow::setupLayout() {
     configLayout->addWidget(arrayOptions, 1);
     configLayout->addWidget(diskTable, 3);
     
-    mainTabs->addTab(configurationTab, "Array Creation & Properties Profiles");
+    mainTabs->addTab(configurationTab, "Array Creation & Properties");
 
     dashboardTab = new DashboardWidget(this);
     mainTabs->addTab(dashboardTab, "System Controller Dashboard");
 
     tasksTab = new TaskManagerWidget(this);
     mainTabs->addTab(tasksTab, "Logical Task Manager");
+
+    // Seamlessly embed the formatted S.M.A.R.T telemetry matrix panel tab
+    SmartMonitorWidget *smartTab = new SmartMonitorWidget(this);
+    mainTabs->addTab(smartTab, "S.M.A.R.T. Telemetry Logs");
 
     upperHorizontalSplitter->addWidget(mainTabs);
     upperHorizontalSplitter->setStretchFactor(0, 1);
@@ -89,8 +96,8 @@ void MainWindow::setupLayout() {
     QVBoxLayout *bottomLayout = new QVBoxLayout(bottomLogContainer);
     bottomLayout->setContentsMargins(0, 0, 0, 0);
 
-    QLabel *logTitleLabel = new QLabel("System Events Monitor Logging Interface Plane:", this);
-    logTitleLabel->setStyleSheet("font-weight: bold; background-color: #2b2b2b; color: #00FF00; padding: 4px; font-family: 'Monospace';");
+    QLabel *logTitleLabel = new QLabel("System Events Monitor Console Logging Panel", this);
+    logTitleLabel->setStyleSheet("font-weight: bold; padding: 4px 6px; border-bottom: 1px solid rgba(128,128,128,0.3);");
     bottomLayout->addWidget(logTitleLabel);
 
     statusPanel = new StatusPanelWidget(this);
@@ -99,8 +106,11 @@ void MainWindow::setupLayout() {
     QHBoxLayout *actionFooterLayout = new QHBoxLayout();
     enableWritesCheck = new QCheckBox("Opt-In Write Access Mode (enable_writes=1)", this);
     commitButton = new QPushButton("Commit Configuration Vector", this);
-    commitButton->setStyleSheet("font-weight: bold;");
+    commitButton->setStyleSheet("font-weight: bold; padding: 4px 12px;");
     cancelButton = new QPushButton("Discard Changes", this);
+
+    // Map "Discard Changes" to flush selections and poll real hardware state clean
+    connect(cancelButton, &QPushButton::clicked, this, &MainWindow::triggerControllerRescan);
 
     actionFooterLayout->addWidget(enableWritesCheck);
     actionFooterLayout->addStretch();

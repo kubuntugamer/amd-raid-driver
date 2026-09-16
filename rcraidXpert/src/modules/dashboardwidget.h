@@ -2,9 +2,6 @@
 #define DASHBOARDWIDGET_H
 
 #include <QWidget>
-#include <QTextEdit>
-#include <QLabel>
-#include <QTableWidget>
 
 class DashboardWidget : public QWidget {
     Q_OBJECT
@@ -13,19 +10,11 @@ public:
     ~DashboardWidget();
 
 public slots:
-    void appendSimulatedLog(const QString &type, const QString &message);
+    // Satisfies the internal link references expected by the moc engine
+    void appendSimulatedLog(const QString &message, const QString &type = "INFO");
 
 private:
     void setupUiLayout();
-
-    QTextEdit *consoleLogView;
-    QTableWidget *registerTable;
-    
-    // Static driver state tracking registers
-    QLabel *lblKthreadPool;
-    QLabel *lblXorThroughput;
-    QLabel *lblGfThroughput;
-    QLabel *lblTrappedFaults;
 };
 
 #endif

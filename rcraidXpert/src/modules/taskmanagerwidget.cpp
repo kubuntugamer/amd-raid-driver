@@ -2,55 +2,39 @@
 #include <QVBoxLayout>
 #include <QLabel>
 #include <QHeaderView>
-#include <QProgressBar>
 
-TaskManagerWidget::TaskManagerWidget(QWidget *parent) : QWidget(parent), taskCounter(0) {
+TaskManagerWidget::TaskManagerWidget(QWidget *parent) : QWidget(parent) {
     setupUiLayout();
 }
 
 TaskManagerWidget::~TaskManagerWidget() {}
 
 void TaskManagerWidget::setupUiLayout() {
-    QVBoxLayout *rootLayout = new QVBoxLayout(this);
-    
-    QLabel *titleLabel = new QLabel("Active Background Storage Tasks", this);
-    titleLabel->setStyleSheet("font-weight: bold; font-size: 13px;");
-    rootLayout->addWidget(titleLabel);
+    QVBoxLayout *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(4, 4, 4, 4);
+
+    QLabel *headerLabel = new QLabel("Logical Task Manager Background Progress Subsystem", this);
+    headerLabel->setStyleSheet("font-weight: bold; padding-bottom: 4px;");
+    layout->addWidget(headerLabel);
 
     taskTable = new QTableWidget(this);
-    taskTable->setColumnCount(5);
-    taskTable->setHorizontalHeaderLabels({"Task ID / Type", "Target Volume", "Progress Matrix", "Processed Sectors", "Calculated ETA"});
+    taskTable->setColumnCount(4);
+    taskTable->setHorizontalHeaderLabels({"Task ID", "Array Background Operation", "Target Storage volume", "Execution Progress / State"});
     taskTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    taskTable->setAlternatingRowColors(true);
+    taskTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    taskTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     
-    rootLayout->addWidget(taskTable);
+    // Starts completely clean. Active arrays will mount background operations here dynamically.
+    taskTable->setRowCount(0);
+
+    layout->addWidget(taskTable);
 }
 
-/**
- * [AI_FUNC_MAP]: TaskManagerWidget::registerNewSyncTask
- * - Objective: Registers an un-simulated hardware task block at a static 0% baseline state.
- */
-void TaskManagerWidget::registerNewSyncTask(const QString &volumeName, int diskCount, int totalCapacityMb) {
-    taskCounter++;
-    int currentRow = taskTable->rowCount();
-    taskTable->insertRow(currentRow);
-
-    // Column 0: Task Signature Identification
-    taskTable->setItem(currentRow, 0, new QTableWidgetItem(QString("TASK_0%1 (Pending Sync)").arg(taskCounter)));
-
-    // Column 1: Associated Target Identity
-    taskTable->setItem(currentRow, 1, new QTableWidgetItem(volumeName));
-
-    // Column 2: Static Progress Bar Node
-    QProgressBar *bar = new QProgressBar(this);
-    bar->setRange(0, 100);
-    bar->setValue(0);
-    bar->setTextVisible(true);
-    taskTable->setCellWidget(currentRow, 2, bar);
-
-    // Column 3: Processing Capacity Boundaries
-    taskTable->setItem(currentRow, 3, new QTableWidgetItem(QString("0 / %1 MB").arg(totalCapacityMb)));
-
-    // Column 4: Execution State Identifier
-    taskTable->setItem(currentRow, 4, new QTableWidgetItem("QUEUED_IN_DRIVER"));
+void TaskManagerWidget::registerNewSyncTask(const QString &taskName, int targetVolumeId, int initialProgress) {
+    int row = taskTable->rowCount();
+    taskTable->insertRow(row);
+    taskTable->setItem(row, 0, new QTableWidgetItem(QString("TSK_%1").arg(row + 101)));
+    taskTable->setItem(row, 1, new QTableWidgetItem(taskName));
+    taskTable->setItem(row, 2, new QTableWidgetItem(QString("LD_%1").arg(targetVolumeId)));
+    taskTable->setItem(row, 3, new QTableWidgetItem(QString("%1% Running").arg(initialProgress)));
 }
