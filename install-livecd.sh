@@ -124,7 +124,7 @@ mkdir -p "$TARGET_MNT/tmp/pkg" && cp -r "$SRC_DIR/packaging" "$TARGET_MNT/tmp/pk
 chroot "$TARGET_MNT" /bin/bash -c "
     echo '    Installing target tools inside the chroot environment...'
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq && apt-get install -y -qq build-essential linux-headers-\$(uname -r) dkms initramfs-tools pciutils efibootmgr >/dev/null
+    apt-get update -qq && apt-get install -y --no-install-recommends -qq build-essential linux-headers-\$(uname -r) dkms initramfs-tools pciutils efibootmgr >/dev/null
     
     if [ -z \"\$(dkms status -m rcraid -v \$(cat /usr/src/rcraid-/VERSION) 2>/dev/null)\" ]; then
         dkms add -m rcraid -v \$(cat /usr/src/rcraid-/VERSION) --quiet || true
