@@ -83,3 +83,44 @@ EXPORT_SYMBOL_GPL(rc_amd_generate_raid6_parity);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Independent Cleanroom Parity Architecture Team");
+
+/**
+ * ==============================================================================
+ * AMD-SPECIFIC ROTATION ROUTING PLANE (RAID 5 / RAID 6)
+ * Calculates Left-Asymmetric Distributed Parity offsets across member slots.
+ * ==============================================================================
+ */
+
+u64 rc_amd_map_distributed_raid5(u64 sector_lba, u32 chunk_sectors, int *target_member, int *parity_member, int num_drives)
+{
+    u64 stripe_row;
+    u32 stripe_offset;
+    int data_drives = num_drives - 1;
+    int data_stripe_index;
+
+    /* Step 1: Breakdown the logical sector block address into row coordinates */
+    stripe_row    = sector_lba / chunk_sectors;
+    stripe_offset = sector_lba % chunk_sectors;
+
+    /* Step 2: Extract the data group index offset for this specific row slot */
+    data_stripe_index = stripe_row % data_drives;
+    stripe_row        = stripe_row / data_drives;
+
+    /* Step 3: Compute the rotating Parity device slot coordinate (Left-Asymmetric) */
+    *parity_member = (num_drives - 1) - (stripe_row % num_drives);
+
+    /* Step 4: Route the data target device index to prevent parity block overlap collisions */
+    if (data_stripe_index >= *parity_member) {
+        *target_member = data_stripe_index + 1;
+    } else {
+        *target_member = data_stripe_index;
+    }
+
+    /* Return the absolute physical sector destination boundary address mapping */
+    return (stripe_row * chunk_sectors) + stripe_offset;
+}
+EXPORT_SYMBOL_GPL(rc_amd_map_distributed_raid5);
+
+void rc_amd_route_io_distributed_raid5(u64 *lba, int *mbr, int *parity_mbr, u32 chunk_sectors, int num_drives) {
+    *lba = rc_amd_map_distributed_raid5(*lba, chunk_sectors, mbr, parity_mbr, num_drives);
+}

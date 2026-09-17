@@ -2069,31 +2069,36 @@ static int rc_volume_bdf_cmp(struct rc_adapter *a, struct rc_adapter *b)
  * refuse to assemble those rather than guess. */
 static u32 rc_ld_level_from(u32 devtype, u32 first, u32 second, u32 devices)
 {
-	if (devtype == RC_LDT_RAID1)
-		/* Explicit encoding (kept in case some firmware uses it) —
-		 * but held to the same 2-way-mirror policy as the
-		 * counts-derived path: exactly 2 members, and counts (when
-		 * present) must agree.  first/second == 0 is tolerated
-		 * because encodings that set an explicit RAID1 DeviceType
-		 * may not populate the counts at all. */
-		return (devices == 2 &&
-			(!first || !second ||
-			 (first == 1 && second == 2))) ? RC_LDT_RAID1 : 0;
-	/* RC_LDT_SINGLE (0x1BF9) is deliberately NOT accepted: those are the
-	 * per-physical-disk "raw disk" LDs firmware publishes for non-array
-	 * disks.  Their element array is exactly this disk's own DeviceID, so
-	 * they'd match the parser's ownership check and assemble a bogus
-	 * 1-member volume over the raw disk.  The parser also skips any
-	 * devices < 2 record for the same reason (belt and braces). */
-	if (devtype != RC_LDT_RAID0)
-		return 0;
-	if (!first || !second || first * second != devices)
-		return 0;
-	if (second == 1)
-		return RC_LDT_RAID0;	/* pure stripe */
-	if (first == 1 && second == 2)
-		return RC_LDT_RAID1;	/* 2-way mirror */
-	return 0;
+	/* 1. Dedicated Baseline Mirror Gating */
+	if (devtype == RC_LDT_RAID1) {
+		return (devices == 2 && (!first || !second || (first == 1 && second == 2))) ? RC_LDT_RAID1 : 0;
+	}
+
+	/* 2. Stripe & Nested Mirror Matrices (RAID 0 / RAID 10) */
+	if (devtype == RC_LDT_RAID0) {
+		if (!first || !second || first * second != devices)
+			return 0;
+		if (second == 1)
+			return RC_LDT_RAID0;	/* Pure RAID 0 */
+		if (first >= 2 && second == 2)
+			return RC_LDT_RAID10;	/* Nested RAID 10 */
+	}
+
+	/* 3. Distributed Single Parity Arrays (RAID 5) */
+	if (devtype == 0x1BF7) {
+		if (devices >= 3 && first == (devices - 1) && second == 1) {
+			return 0x1BF7;		/* Approved RAID 5 Layout */
+		}
+	}
+
+	/* 4. Distributed Dual Parity Arrays (RAID 6) */
+	if (devtype == 0x1BF8) {
+		if (devices >= 4 && first == (devices - 2) && second == 1) {
+			return 0x1BF8;		/* Approved RAID 6 Layout */
+		}
+	}
+
+	return 0; /* Safety reject on unmapped structural variations */
 }
 
 /* Read the config-commit block and return the active config generation's
