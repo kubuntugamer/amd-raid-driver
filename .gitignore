@@ -26,3 +26,15 @@ Module.symvers
 .cache/
 *.swp
 *~
+1022-b000/linux.amd64/
+1022-b000/*.vbox-extpack
+1022-b000/*.signature
+1022-b000/*.manifest
+
+# 1022-b000 Development Plugin Exclusions
+1022-b000/VBox/
+1022-b000/iprt/
+1022-b000/linux.amd64/
+1022-b000/*.vbox-extpack
+1022-b000/*.signature
+1022-b000/*.manifest

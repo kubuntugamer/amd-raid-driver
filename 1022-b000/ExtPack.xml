@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VirtualBoxExtensionPack xmlns="http://virtualbox.org" version="1.0">
+    <Name>ChazzCustomPluginPack</Name>
+    <Description>Custom Developer Hardware Emulation Extension Module</Description>
+    <Version revision="175117">7.2.18</Version>
+    <MainModule>libmy_plugin</MainModule>
+    <Components>
+        <VRDEModule name="ChazzCustomPluginPack"/>
+    </Components>
+</VirtualBoxExtensionPack>
