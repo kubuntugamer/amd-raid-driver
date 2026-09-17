@@ -8,7 +8,7 @@ SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 echo "==> [1/3] Compiling and Launching Phase 1 TUI Menu..."
 sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends -qq build-essential "linux-headers-$(uname -r)" dkms pciutils dialog >/dev/null
 
-make -C "$SRC_DIR" clean all >/dev/null
+make -C "$SRC_DIR" clean all
 
 # Execute the compressed modular TUI layout parameters
 eval $("$SRC_DIR/scripts/phase1-tui.sh")
