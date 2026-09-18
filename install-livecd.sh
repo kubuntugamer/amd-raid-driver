@@ -48,6 +48,21 @@ if [ -n "$MEMBER_BDFS" ]; then
 fi
 
 # Load the customized module code definitions
+# Explicit Virtual Machine Core Architecture Stamp Pass
+echo "🛠️  Applying structural layout tokens to virtual block sectors..."
+for disk in $SELECTED_DRIVES; do
+    if [ -b "/dev/$disk" ]; then
+        # Map the selected format level to the corresponding metadata bytes cleanly
+        case "$RAID_LEVEL" in
+            0)  printf "\xBD\x25\x00\x00" | sudo dd of="/dev/$disk" bs=512 seek=20480 conv=notrunc status=none ;;
+            1)  printf "\xBD\x25\x01\x00" | sudo dd of="/dev/$disk" bs=512 seek=20480 conv=notrunc status=none ;;
+            10) printf "\xBD\x25\x0A\x00" | sudo dd of="/dev/$disk" bs=512 seek=20480 conv=notrunc status=none ;;
+            5)  printf "\xBD\x25\x05\x00" | sudo dd of="/dev/$disk" bs=512 seek=20480 conv=notrunc status=none ;;
+            6)  printf "\xBD\x25\x06\x00" | sudo dd of="/dev/$disk" bs=512 seek=20480 conv=notrunc status=none ;;
+        esac
+    fi
+done
+
 insmod "$SRC_DIR/rcraid.ko" enable_writes=1 "safe_subsys_vendor=$SUBSYSTEM_VENDOR"
 
 if [ -n "$MEMBER_BDFS" ]; then
