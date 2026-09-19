@@ -1,6 +1,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/printk.h>
+#include <linux/version.h>
 #include <asm/byteorder.h>
 #include "../../staging_includes/fabriczc_staging.h"
 
@@ -65,7 +66,7 @@ u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_
 
 static int __init fabriczc_init(void)
 {
-    printk(KERN_INFO "FabricZC Standalone: 4-Disk RAID 0 Array Engine + XFS Spoofing Subsystem Loaded.\n");
+    printk(KERN_INFO "FabricZC Standalone: Universal 4-Disk RAID 0 Engine + XFS Spoofing Subsystem Loaded.\n");
     return 0;
 }
 
