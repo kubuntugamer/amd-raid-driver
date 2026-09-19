@@ -2,36 +2,45 @@
 #include <linux/init.h>
 #include <linux/printk.h>
 #include <linux/fs.h>
-#include <linux/device.h>
 #include <linux/blkdev.h>
+#include <linux/blk-mq.h>
 #include <asm/byteorder.h>
 #include "../../staging_includes/fabriczc_staging.h"
 
-/* Structural tracking handles for the automated block node tree */
-static int fabriczc_major_id = 0;
-static struct class *fabriczc_class = NULL;
-static struct device *fabriczc_device = NULL;
-
 #define DEVICE_NAME "rcraid"
+#define FABRICZC_MINORS 1
+
+static int fabriczc_major_id = 0;
+static struct gendisk *fabriczc_disk = NULL;
+static struct blk_mq_tag_set fabriczc_tag_set;
+
+/* Dummy block device operations required to register a storage node */
+static const struct block_device_operations fabriczc_fops = {
+    .owner = THIS_MODULE,
+};
+
+/* Mock request processor function for the block queue framework */
+static blk_status_set fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd)
+{
+    blk_mq_start_request(bd->rq);
+    blk_mq_end_request(bd->rq, BLK_STS_OK);
+    return BLK_STS_OK;
+}
+
+static const struct blk_mq_ops fabriczc_mq_ops = {
+    .queue_rq = fabriczc_queue_rq,
+};
 
 /**
  * fabriczc_spoof_xfs_superblock - Fakes an authentic XFS superblock layout inside memory buffers
- * Targets LBA Sector 0 requests from installer tools to force dynamic recognition
  */
 void fabriczc_spoof_xfs_superblock(u8 *buffer_destination)
 {
     if (!buffer_destination) return;
-
-    /* Write "XFSB" Magic Token using explicit Big-Endian conversion macros */
     u32 *magic_ptr = (u32 *)buffer_destination;
     *magic_ptr = cpu_to_be32(XFS_SUPER_MAGIC);
-
-    /* Write Block Size Log into byte offset 4 of the sector block array */
-    buffer_destination = XFS_BLOCK_SIZE_LOG;
-
-    /* Write Allocation Group Count into byte offset 5 of the sector block array */
-    buffer_destination = 4; 
-
+    buffer_destination[4] = XFS_BLOCK_SIZE_LOG;
+    buffer_destination[5] = 4; 
     printk(KERN_INFO "FabricZC Standalone: [SPOOF] Intercepted LBA 0 read pass - Injected 'XFSB' magic signatures.\n");
 }
 
@@ -44,12 +53,11 @@ u32 fabriczc_translate_sgl_to_p2p(const struct fabriczc_sgl_descriptor_vector *v
 
     if (!vector || !matrix || vector->total_segments == 0) return 0;
     current_disk_count = matrix->master_hdr.total_active_disks;
-    if (current_disk_count == 0) current_disk_count = 4; /* Standard 4-disk array target fallback */
+    if (current_disk_count == 0) current_disk_count = 4;
 
     for (idx = 0; idx < vector->total_segments; ++idx) {
         struct fabriczc_sgl_segment *seg = &vector->segments[idx];
         u32 target_device_idx = (u32)((seg->host_logical_sector / FABRICZC_CHUNK_SECTORS) % current_disk_count);
-        
         printk(KERN_INFO "FabricZC Standalone: [RAID0] Seg [%u] mapped across VDI Target Port Index [%u]\n", 
                seg->segment_id, target_device_idx);
         processed_count++;
@@ -75,39 +83,60 @@ u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_
 
 static int __init fabriczc_init(void)
 {
-    printk(KERN_INFO "FabricZC Standalone: 4-Disk RAID 0 Array Engine + XFS Spoofing Subsystem Loaded.\n");
+    printk(KERN_INFO "FabricZC Standalone: Universal 4-Disk RAID 0 Engine + XFS Spoofing Subsystem Loaded.\n");
 
-    /* 1. Register a major tracking device slots dynamically inside memory */
+    /* 1. Register Major block allocator slots */
     fabriczc_major_id = register_blkdev(0, DEVICE_NAME);
     if (fabriczc_major_id < 0) {
-        printk(KERN_WARNING "FabricZC Standalone: Failed to allocate major device registers.\n");
+        printk(KERN_WARNING "FabricZC Standalone: Failed to register block device.\n");
         return fabriczc_major_id;
     }
 
-    /* 2. Instantiate class tracking using modern 1-argument function layouts */
-    fabriczc_class = class_create(DEVICE_NAME);
-    if (IS_ERR(fabriczc_class)) {
+    /* 2. Configure multi-queue block tag set properties */
+    memset(&fabriczc_tag_set, 0, sizeof(fabriczc_tag_set));
+    fabriczc_tag_set.ops = &fabriczc_mq_ops;
+    fabriczc_tag_set.nr_hw_queues = 4;
+    fabriczc_tag_set.queue_depth = 64;
+    fabriczc_tag_set.numa_node = NUMA_NO_NODE;
+    fabriczc_tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
+
+    if (blk_mq_alloc_tag_set(&fabriczc_tag_set)) {
         unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
-        return PTR_ERR(fabriczc_class);
+        return -ENOMEM;
     }
 
-    /* 3. AUTOMATION STEP: Force the kernel to draw /dev/rcraid0 immediately on screen */
-    fabriczc_device = device_create(fabriczc_class, NULL, MKDEV(fabriczc_major_id, 0), NULL, "rcraid0");
-    if (IS_ERR(fabriczc_device)) {
-        class_destroy(fabriczc_class);
+    /* 3. Allocate actual block storage structure profile */
+    fabriczc_disk = blk_mq_alloc_disk(&fabriczc_tag_set, NULL);
+    if (IS_ERR(fabriczc_disk)) {
+        blk_mq_free_tag_set(&fabriczc_tag_set);
         unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
-        return PTR_ERR(fabriczc_device);
+        return PTR_ERR(fabriczc_disk);
     }
 
-    printk(KERN_INFO "FabricZC Standalone: Automated block node tracking active at /dev/rcraid0.\n");
+    fabriczc_disk->major = fabriczc_major_id;
+    fabriczc_disk->first_minor = 0;
+    fabriczc_disk->minors = FABRICZC_MINORS;
+    fabriczc_disk->fops = &fabriczc_fops;
+    fabriczc_disk->private_data = NULL;
+    snprintf(fabriczc_disk->disk_name, 32, "rcraid0");
+
+    /* Target virtual storage sizing calculation (set device disk capacity to 8 Gigabytes) */
+    set_capacity(fabriczc_disk, 16777216); 
+
+    /* 4. Push block disk directly into the live /dev tree natively */
+    add_disk(fabriczc_disk);
+
+    printk(KERN_INFO "FabricZC Standalone: Block Device Node registration complete. /dev/rcraid0 is active.\n");
     return 0;
 }
 
 static void __exit fabriczc_exit(void)
 {
-    /* Clean up the device file nodes out of the active dev subsystem tree on unload */
-    if (fabriczc_device) device_destroy(fabriczc_class, MKDEV(fabriczc_major_id, 0));
-    if (fabriczc_class) class_destroy(fabriczc_class);
+    if (fabriczc_disk) {
+        del_gendisk(fabriczc_disk);
+        put_disk(fabriczc_disk);
+    }
+    blk_mq_free_tag_set(&fabriczc_tag_set);
     if (fabriczc_major_id > 0) unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
 
     printk(KERN_INFO "FabricZC Standalone: Hybrid target components freed cleanly.\n");
