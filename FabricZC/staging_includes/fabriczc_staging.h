@@ -16,6 +16,11 @@ typedef long long          s64;
 /* Freestanding Primitive Type Alignment Definition */
 typedef unsigned long      size_t;
 
+/* Atomic Synchronization Primitive Forgery for Standalone Compiles */
+typedef struct {
+    volatile int counter;
+} atomic_t;
+
 #define FABRICZC_MAGIC_HEALTHY   0x48435a21
 #define FABRICZC_MAX_DEVICES     8
 #define FABRICZC_CHUNK_SECTORS   2048
@@ -46,23 +51,6 @@ struct fabriczc_subsystem_matrix {
     void *administration_lock;
 };
 
-#endif
-
-/* Phase 3: P2PDMA Hardware Routing Mapping Structures */
-struct fabriczc_p2p_mapping {
-    u64 pcie_device_vram_address;
-    u32 target_pci_device_id;
-    u32 page_allocation_status;
-    u8  is_p2p_capable;
-    u8  channel_bus_alignment_padding[7];
-};
-
-/* Expand the main system matrix tracking parameters to hold hardware maps */
-struct fabriczc_p2p_engine {
-    struct fabriczc_p2p_mapping active_mappings[FABRICZC_MAX_DEVICES];
-    atomic_t total_p2p_allocated_pages;
-};
-
 /* Phase 3: P2PDMA Hardware Routing Mapping Structures */
 struct fabriczc_p2p_mapping {
     u64 pcie_device_vram_address;
@@ -77,3 +65,5 @@ struct fabriczc_p2p_engine {
     struct fabriczc_p2p_mapping active_mappings[FABRICZC_MAX_DEVICES];
     atomic_t total_p2p_allocated_pages;
 };
+
+#endif

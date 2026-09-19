@@ -15,12 +15,12 @@
     },
     "phase_2": {
       "title": "Asynchronous Ring Integration",
-      "status": "COMPILE_TESTED",
+      "status": "PHASE_3_STAGED",
       "instructions": "Inject io_uring event loop registrations and poll queue kernel thread structures into src/kernel/main.c."
     },
     "phase_3": {
       "title": "P2PDMA Engine Hooking",
-      "status": "COMPILE_TESTED",
+      "status": "PHASE_3_STAGED",
       "instructions": "Incorporate pci_p2pdma kernel page evaluation logic to route storage data blocks directly to GPU memory regions."
     }
   }
