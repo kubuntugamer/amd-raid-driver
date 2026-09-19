@@ -2,11 +2,15 @@
 #include <linux/init.h>
 #include <linux/printk.h>
 #include <linux/fs.h>
+#include <linux/device.h>
 #include <asm/byteorder.h>
 #include "../../staging_includes/fabriczc_staging.h"
 
-/* Allocation tracking variables for the virtual block system */
-static int fabriczc_major_device_id = 0;
+/* Structural variables for full automated /dev/rcraid0 node registration */
+static int fabriczc_major_id = 0;
+static struct class *fabriczc_class = NULL;
+static struct device *fabriczc_device = NULL;
+
 #define DEVICE_NAME "rcraid"
 
 /**
@@ -72,25 +76,43 @@ static int __init fabriczc_init(void)
 {
     printk(KERN_INFO "FabricZC Standalone: 4-Disk RAID 0 Array Engine + XFS Spoofing Subsystem Loaded.\n");
 
-    /* Programmatically register a dynamic Major Block Device Number inside the kernel */
-    fabriczc_major_device_id = register_blkdev(0, DEVICE_NAME);
-    
-    if (fabriczc_major_device_id < 0) {
-        printk(KERN_WARNING "FabricZC Standalone: Unable to allocate major block device number allocation slots.\n");
-        return fabriczc_major_device_id;
+    /* 1. Dynamic allocation registration block */
+    fabriczc_major_id = register_blkdev(0, DEVICE_NAME);
+    if (fabriczc_major_id < 0) {
+        printk(KERN_WARNING "FabricZC Standalone: Failed to register block device.\n");
+        return fabriczc_major_id;
     }
 
-    printk(KERN_INFO "FabricZC Standalone: Dynamic Block Device registered cleanly under Major Allocation Index [%d]\n", 
-           fabriczc_major_device_id);
+    /* 2. Automatically generate the system class tracking directory layer */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+    fabriczc_class = class_create(DEVICE_NAME);
+#else
+    fabriczc_class = class_create(THIS_MODULE, DEVICE_NAME);
+#endif
+    if (IS_ERR(fabriczc_class)) {
+        unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
+        return PTR_ERR(fabriczc_class);
+    }
+
+    /* 3. AUTOMATION STEP: Force the kernel to draw /dev/rcraid0 immediately on screen */
+    fabriczc_device = device_create(fabriczc_class, NULL, MKDEV(fabriczc_major_id, 0), NULL, "rcraid0");
+    if (IS_ERR(fabriczc_device)) {
+        class_destroy(fabriczc_class);
+        unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
+        return PTR_ERR(fabriczc_device);
+    }
+
+    printk(KERN_INFO "FabricZC Standalone: Node automation complete. /dev/rcraid0 spawned natively.\n");
     return 0;
 }
 
 static void __exit fabriczc_exit(void)
 {
-    /* Clean up and free the registered block device number space upon module unloading */
-    if (fabriczc_major_device_id > 0) {
-        unregister_blkdev(fabriczc_major_device_id, DEVICE_NAME);
-    }
+    /* Automatically destroy device node representations out of the system dev tree */
+    if (fabriczc_device) device_destroy(fabriczc_class, MKDEV(fabriczc_major_id, 0));
+    if (fabriczc_class) class_destroy(fabriczc_class);
+    if (fabriczc_major_id > 0) unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
+
     printk(KERN_INFO "FabricZC Standalone: Hybrid target components freed cleanly.\n");
 }
 
