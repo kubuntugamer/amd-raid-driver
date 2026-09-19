@@ -1,9 +1,13 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/printk.h>
-#include <linux/version.h>
+#include <linux/fs.h>
 #include <asm/byteorder.h>
 #include "../../staging_includes/fabriczc_staging.h"
+
+/* Allocation tracking variables for the virtual block system */
+static int fabriczc_major_device_id = 0;
+#define DEVICE_NAME "rcraid"
 
 /**
  * fabriczc_spoof_xfs_superblock - Fakes an authentic XFS superblock layout inside memory buffers
@@ -18,10 +22,10 @@ void fabriczc_spoof_xfs_superblock(u8 *buffer_destination)
     *magic_ptr = cpu_to_be32(XFS_SUPER_MAGIC);
 
     /* Write Block Size Log into byte offset 4 of the sector block array */
-    buffer_destination[4] = XFS_BLOCK_SIZE_LOG;
+    buffer_destination = XFS_BLOCK_SIZE_LOG;
 
     /* Write Allocation Group Count into byte offset 5 of the sector block array */
-    buffer_destination[5] = 4; 
+    buffer_destination = 4; 
 
     printk(KERN_INFO "FabricZC Standalone: [SPOOF] Intercepted LBA 0 read pass - Injected 'XFSB' magic signatures.\n");
 }
@@ -66,12 +70,27 @@ u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_
 
 static int __init fabriczc_init(void)
 {
-    printk(KERN_INFO "FabricZC Standalone: Universal 4-Disk RAID 0 Engine + XFS Spoofing Subsystem Loaded.\n");
+    printk(KERN_INFO "FabricZC Standalone: 4-Disk RAID 0 Array Engine + XFS Spoofing Subsystem Loaded.\n");
+
+    /* Programmatically register a dynamic Major Block Device Number inside the kernel */
+    fabriczc_major_device_id = register_blkdev(0, DEVICE_NAME);
+    
+    if (fabriczc_major_device_id < 0) {
+        printk(KERN_WARNING "FabricZC Standalone: Unable to allocate major block device number allocation slots.\n");
+        return fabriczc_major_device_id;
+    }
+
+    printk(KERN_INFO "FabricZC Standalone: Dynamic Block Device registered cleanly under Major Allocation Index [%d]\n", 
+           fabriczc_major_device_id);
     return 0;
 }
 
 static void __exit fabriczc_exit(void)
 {
+    /* Clean up and free the registered block device number space upon module unloading */
+    if (fabriczc_major_device_id > 0) {
+        unregister_blkdev(fabriczc_major_device_id, DEVICE_NAME);
+    }
     printk(KERN_INFO "FabricZC Standalone: Hybrid target components freed cleanly.\n");
 }
 
