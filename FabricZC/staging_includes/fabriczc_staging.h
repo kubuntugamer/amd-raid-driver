@@ -38,3 +38,34 @@ struct fabriczc_subsystem_matrix {
     void *administration_lock;
 };
 #endif
+
+/* Phase 5 Additions: Direct-to-Disk Linear Extent Layout Core Models */
+struct fabriczc_linear_extent {
+    u64 logical_start_sector;
+    u64 extent_total_sectors;
+    u64 physical_base_offset;
+    u32 mapped_member_disk_idx;
+    u32 active_extent_flags;
+};
+
+struct fabriczc_extent_table {
+    struct fabriczc_linear_extent extents[16];
+    u32 total_registered_extents;
+    u32 active_table_id;
+};
+
+/* Phase 5 Additions: Direct-to-Disk Linear Extent Layout Core Models */
+struct fabriczc_linear_extent {
+    u64 logical_start_sector;
+    u64 extent_total_sectors;
+    u64 physical_base_offset;
+    u32 mapped_member_disk_idx;
+    u32 active_extent_flags;
+};
+
+struct fabriczc_extent_table {
+    struct fabriczc_linear_extent extents;
+    u32 total_registered_extents;
+    u32 active_table_id;
+};
+#endif
