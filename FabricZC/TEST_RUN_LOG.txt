@@ -1,0 +1,17 @@
+=== FABRICZC OFFLINE TESTING INITIALIZED: Sat Sep 19 03:21:40 PM CDT 2026 ===
+[+] STEP 1: Building Storage Module Target Matrix...
+src/kernel/main.c: In function ‘fabriczc_translate_sgl_to_p2p’:
+src/kernel/main.c:32:13: warning: unused variable ‘target_device_idx’ [-Wunused-variable]
+   32 |         u32 target_device_idx = (u32)((seg->host_logical_sector / FABRICZC_CHUNK_SECTORS) % current_disk_count);
+      |             ^~~~~~~~~~~~~~~~~
+[+] STEP 2: Auditing Generated Binary Layout Parameters...
+[SUCCESS] fabriczc_mod.ko artifact exists.
+-rw-rw-r-- 1 chazz chazz 3.2K Sep 19 15:21 fabriczc_mod.ko
+[+] STEP 3: Tracking Dynamic System Topology...
+--- Guest Kernel Architecture Environment ---
+Linux hp17cp2xxx 7.2.6-1-liquorix-amd64 #1 ZEN SMP PREEMPT liquorix 7.2-11ubuntu1~resolute (2026-09-14) x86_64 GNU/Linux
+--- Virtual PCIe Device Storage Node Trace ---
+01:00.0 Non-Volatile memory controller [0108]: Phison Electronics Corporation PS5027-E27T PCIe4 NVMe Controller (DRAM-less) [1987:5027] (rev 01)
+================================================================================
+[+] SUCCESS: Telemetry saved cleanly to FabricZC/TEST_RUN_LOG.txt
+================================================================================

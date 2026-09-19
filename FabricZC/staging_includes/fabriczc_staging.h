@@ -36,35 +36,6 @@ struct fabriczc_container_header {
     uint32_t extent_chunk_sectors;
 } __attribute__((packed));
 
-struct fabriczc_allocation_group {
-    u32 group_index;
-    void *poll_kthread;
-    void *event_wait_queue;
-};
-
-struct fabriczc_subsystem_matrix {
-    struct fabriczc_container_header master_hdr;
-    void *member_bdevs[FABRICZC_MAX_DEVICES];
-    struct fabriczc_allocation_group *alloc_groups;
-    u32 total_registered_cpus;
-    void *administration_lock;
-};
-
-/* Phase 3: P2PDMA Hardware Routing Mapping Structures */
-struct fabriczc_p2p_mapping {
-    u64 pcie_device_vram_address;
-    u32 target_pci_device_id;
-    u32 page_allocation_status;
-    u8  is_p2p_capable;
-    u8  channel_bus_alignment_padding;
-};
-
-struct fabriczc_p2p_engine {
-    struct fabriczc_p2p_mapping active_mappings[FABRICZC_MAX_DEVICES];
-    atomic_t total_p2p_allocated_pages;
-};
-
-/* Phase 4: Freestanding Scatter-Gather List Descriptor Structure Mapping */
 struct fabriczc_sgl_segment {
     u64 host_logical_sector;
     u64 target_buffer_length;
@@ -78,7 +49,6 @@ struct fabriczc_sgl_descriptor_vector {
     u32 active_vector_id;
 };
 
-/* Phase 5: Direct-to-Disk Linear Extent Layout Core Models (Fixed Array Allocation) */
 struct fabriczc_linear_extent {
     u64 logical_start_sector;
     u64 extent_total_sectors;
@@ -91,6 +61,21 @@ struct fabriczc_extent_table {
     struct fabriczc_linear_extent extents[FABRICZC_MAX_EXTENTS];
     u32 total_registered_extents;
     u32 active_table_id;
+};
+
+/* Phase 6 Additions: Asynchronous Ring Fault Tracking Parameters */
+struct fabriczc_fault_registry {
+    u64 last_recorded_timestamp;
+    u32 total_timeout_aborts;
+    u32 active_fault_flags;
+};
+
+struct fabriczc_subsystem_matrix {
+    struct fabriczc_container_header master_hdr;
+    void *member_bdevs[FABRICZC_MAX_DEVICES];
+    struct fabriczc_extent_table extent_map;
+    struct fabriczc_fault_registry fault_log[FABRICZC_MAX_DEVICES];
+    u32 total_registered_cpus;
 };
 
 #endif /* __FABRICZC_STAGING_H__ */
