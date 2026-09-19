@@ -42,3 +42,9 @@ The function signature must accept a memory address descriptor vector, translate
 
 ### 3. Verification Script Generation Task
 "Following successful compilation of the `fabriczc_mod.ko` object binary, autonomously output a localized user-space verification script named `verify_sgl_matrix.sh` inside the sandbox folder to test memory mapping registers via fake software transaction streams."
+
+---
+
+## 🤖 PHASE 5 AUTOMATED PROGRESSION TARGETS
+* **Active Milestone:** Phase 5 (Direct-to-Disk Linear Extent Stripe Mapping)
+* **AI Ingestion Rule:** Load 'src/kernel/main.c', implement lock-free extent linear logic mapping calculations, and pass compilation using the standalone './run_pure_local_compile.sh' wrapper flags.
