@@ -1,5 +1,6 @@
 #include "../../staging_includes/fabriczc_staging.h"
 
+/* Prototype core print macros natively */
 extern int pr_info(const char *fmt, ...);
 
 int init_module(void);
@@ -13,14 +14,14 @@ void fabriczc_spoof_xfs_superblock(u8 *buffer_destination)
 {
     if (!buffer_destination) return;
 
-    /* Write "XFSB" Magic Token to the very first 4 bytes of the sector tracking frame */
+    /* Write "XFSB" Magic Token (0x58465342) to the very first 4 bytes */
     u32 *magic_ptr = (u32 *)buffer_destination;
     *magic_ptr = XFS_SUPER_MAGIC;
 
-    /* Inject standard block log shift constraints (4 KiB allocation mapping blocks) */
+    /* Write Block Size Log into byte offset 4 of the sector block array */
     buffer_destination[4] = XFS_BLOCK_SIZE_LOG;
 
-    /* Inject an active Allocation Group count to match your multi-core affinity settings */
+    /* Write Allocation Group Count into byte offset 5 of the sector block array */
     buffer_destination[5] = 4; 
 
     pr_info("FabricZC Standalone: [SPOOF] Intercepted LBA 0 read pass - Injected 'XFSB' magic signatures.\n");
