@@ -3,6 +3,7 @@
 #include <linux/printk.h>
 #include <linux/fs.h>
 #include <linux/device.h>
+#include <linux/blkdev.h>
 #include <asm/byteorder.h>
 #include "../../staging_includes/fabriczc_staging.h"
 
@@ -90,7 +91,7 @@ static int __init fabriczc_init(void)
         return PTR_ERR(fabriczc_class);
     }
 
-    /* 3. Instantly construct the /dev/rcraid0 device node file representation */
+    /* 3. AUTOMATION STEP: Force the kernel to draw /dev/rcraid0 immediately on screen */
     fabriczc_device = device_create(fabriczc_class, NULL, MKDEV(fabriczc_major_id, 0), NULL, "rcraid0");
     if (IS_ERR(fabriczc_device)) {
         class_destroy(fabriczc_class);
