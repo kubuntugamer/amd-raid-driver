@@ -1,53 +1,25 @@
 #include "../../staging_includes/fabriczc_staging.h"
 
-/* Freestanding kernel logging macros definition */
 extern int pr_info(const char *fmt, ...);
 
-int init_module(void);
-void cleanup_module(void);
-
-/**
- * fabriczc_validate_p2p_page - Evaluates structural page parameters for zero-copy VRAM routing
- * Constraints: Strictly execution-isolated and safe for high-concurrency loops.
- */
-int fabriczc_validate_p2p_page(u64 address_vector, u32 pci_id)
+unsigned int fabriczc_translate_sgl_to_p2p(const struct fabriczc_sgl_descriptor_vector *vector, 
+                                           const struct fabriczc_subsystem_matrix *matrix)
 {
-    /* If the target coordinates match registered PCIe memory ranges, validate access */
-    if (address_vector >= 0x100000000ULL) {
-        pr_info("FabricZC: [P2PDMA] Validated page frame structure for PCI device [0x%X] -> VRAM vector [0x%llX]\n", 
-                pci_id, address_vector);
-        return 1; /* Page structural evaluation verified capable */
+    unsigned int processed_count = 0;
+    unsigned int current_disk_count;
+    unsigned int idx;
+
+    if (!vector || !matrix || vector->total_segments == 0) return 0;
+    current_disk_count = matrix->master_hdr.total_active_disks;
+    if (current_disk_count == 0) return 0;
+
+    for (idx = 0; idx < vector->total_segments; ++idx) {
+        struct fabriczc_sgl_segment *seg = &vector->segments[idx];
+        unsigned int target_device_idx = (unsigned int)((seg->host_logical_sector / FABRICZC_CHUNK_SECTORS) % current_disk_count);
+        processed_count++;
     }
-    return 0; /* Fallback to standard block path tracking */
+    return processed_count;
 }
 
-uint64_t fabriczc_compute_fletcher64(const struct fabriczc_container_header *hdr)
-{
-    const u32 *data_ptr = (const u32 *)((const u8 *)hdr + 0x10);
-    size_t words_count = (0x34 - 0x10) / sizeof(u32); 
-    u32 sum_alpha = 0, sum_beta = 0;
-    size_t idx;
-
-    for (idx = 0; idx < words_count; ++idx) {
-        sum_alpha += data_ptr[idx];
-        sum_beta += sum_alpha;
-    }
-    return ((uint64_t)sum_beta << 32) | sum_alpha;
-}
-
-u32 fabriczc_resolve_target_device(uint64_t logical_sector, u32 total_disks)
-{
-    if (total_disks == 0) return 0;
-    return (u32)((logical_sector / FABRICZC_CHUNK_SECTORS) % total_disks);
-}
-
-int init_module(void)
-{
-    pr_info("FabricZC: Phase 3 P2PDMA Engine Hooking Initialization Pass Successful.\n");
-    return 0;
-}
-
-void cleanup_module(void)
-{
-    pr_info("FabricZC: Phase 3 P2PDMA Bypass Engine Pipelines Unmapped cleanly.\n");
-}
+int init_module(void) { return 0; }
+void cleanup_module(void) {}
