@@ -3,6 +3,7 @@
 
 #include <linux/version.h>
 
+/* Map basic fixed-width types explicitly to bypass missing system headers */
 typedef unsigned char      u8;
 typedef unsigned short     u16;
 typedef unsigned int       u32;
@@ -13,9 +14,9 @@ typedef unsigned char      uint8_t;
 typedef long long          s64;
 typedef unsigned long      size_t;
 
-typedef struct {
-    volatile int counter;
-} atomic_t;
+/* Explicit 64-bit and 32-bit primitive atomic mappings for freestanding compilation */
+typedef struct { long long counter; } atomic64_t;
+typedef struct { int counter; } atomic_t;
 
 #define FABRICZC_MAGIC_HEALTHY   0x48435a21
 #define FABRICZC_MAX_DEVICES     8
@@ -23,8 +24,8 @@ typedef struct {
 #define FABRICZC_MAX_EXTENTS     16
 
 /* XFS Native Magic Superblock Signatures for Driver Spoofing */
-#define XFS_SUPER_MAGIC          0x58465342  /* "XFSB" in ASCII hexadecimal */
-#define XFS_BLOCK_SIZE_LOG       12          /* 2^12 = 4096 Byte block size allocation */
+#define XFS_SUPER_MAGIC          0x58465342  
+#define XFS_BLOCK_SIZE_LOG       12          
 
 struct fabriczc_container_header {
     uint64_t sequence_generation_id;
