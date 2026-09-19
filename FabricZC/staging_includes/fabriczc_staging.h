@@ -47,3 +47,33 @@ struct fabriczc_subsystem_matrix {
 };
 
 #endif
+
+/* Phase 3: P2PDMA Hardware Routing Mapping Structures */
+struct fabriczc_p2p_mapping {
+    u64 pcie_device_vram_address;
+    u32 target_pci_device_id;
+    u32 page_allocation_status;
+    u8  is_p2p_capable;
+    u8  channel_bus_alignment_padding[7];
+};
+
+/* Expand the main system matrix tracking parameters to hold hardware maps */
+struct fabriczc_p2p_engine {
+    struct fabriczc_p2p_mapping active_mappings[FABRICZC_MAX_DEVICES];
+    atomic_t total_p2p_allocated_pages;
+};
+
+/* Phase 3: P2PDMA Hardware Routing Mapping Structures */
+struct fabriczc_p2p_mapping {
+    u64 pcie_device_vram_address;
+    u32 target_pci_device_id;
+    u32 page_allocation_status;
+    u8  is_p2p_capable;
+    u8  channel_bus_alignment_padding;
+};
+
+/* Expand the main system matrix tracking parameters to hold hardware maps */
+struct fabriczc_p2p_engine {
+    struct fabriczc_p2p_mapping active_mappings[FABRICZC_MAX_DEVICES];
+    atomic_t total_p2p_allocated_pages;
+};
