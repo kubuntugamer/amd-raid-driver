@@ -1,0 +1,12 @@
+# FabricZC Automated Compilation Ignore Maps
+*.o
+*.ko
+*.mod
+*.mod.c
+*.symvers
+*.order
+.tmp_versions/
+.*.cmd
+.cache.mk
+src/user/fabriczc_ctl
+AI_CONTEXT_DUMP.txt

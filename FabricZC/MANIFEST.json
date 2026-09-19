@@ -1,0 +1,27 @@
+{
+  "project": "FabricZC",
+  "version": "0.1.0",
+  "status": "Staging Phase",
+  "parameters": {
+    "max_devices": 8,
+    "extent_size_sectors": 2048,
+    "chunk_size": "1M"
+  },
+  "phases": {
+    "phase_1": {
+      "title": "Structural Skeleton Bootstrap",
+      "status": "COMPLETE",
+      "target_files": ["include/fabriczc.h", "src/kernel/main.c", "src/user/control.c", "Makefile"]
+    },
+    "phase_2": {
+      "title": "Asynchronous Ring Integration",
+      "status": "COMPILE_TESTED",
+      "instructions": "Inject io_uring event loop registrations and poll queue kernel thread structures into src/kernel/main.c."
+    },
+    "phase_3": {
+      "title": "P2PDMA Engine Hooking",
+      "status": "COMPILE_TESTED",
+      "instructions": "Incorporate pci_p2pdma kernel page evaluation logic to route storage data blocks directly to GPU memory regions."
+    }
+  }
+}
