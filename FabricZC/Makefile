@@ -1,10 +1,15 @@
 obj-m += fabriczc_mod.o
 fabriczc_mod-objs := src/kernel/main.o
 
-# Force include local staging paths while applying architecture-agnostic switches
-ccflags-y := -I$(src)/staging_includes -std=gnu11 -Wno-unused-variable -Wno-int-conversion
+# Assert clean standard out-of-tree module compilation parameters
+ccflags-y := -I$(src)/staging_includes \
+             -D__KERNEL__ \
+             -DMODULE \
+             -std=gnu11 \
+             -Wno-unused-variable \
+             -Wno-int-conversion \
+             -Wno-missing-prototypes
 
-# Dynamically resolve the active kernel release running in current system memory
 KVERSION ?= $(shell uname -r)
 KDIR     := /lib/modules/$(KVERSION)/build
 PWD      := $(shell pwd)
