@@ -106,3 +106,9 @@ Simulate an installer query tool scanning the drive to verify that your custom m
 sudo blkid /dev/rcraid0
 \`\`\`
 *Expected Diagnostic Output:* The scan should bypass the blank sectors and return: \`/dev/rcraid0: TYPE="xfs"\`, verifying your software-defined controller works flawlessly!
+
+---
+
+## 🤖 PHASE 5 AUTOMATED PROGRESSION TARGETS
+* **Active Milestone:** Phase 5 (Direct-to-Disk Linear Extent Stripe Mapping)
+* **AI Ingestion Rule:** Load 'src/kernel/main.c', implement lock-free extent linear logic mapping calculations, and pass compilation using the standalone './run_pure_local_compile.sh' wrapper flags.
