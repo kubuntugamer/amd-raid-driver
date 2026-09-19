@@ -3,7 +3,6 @@
 
 #include <linux/version.h>
 
-/* Map basic fixed-width types explicitly to bypass missing system headers */
 typedef unsigned char      u8;
 typedef unsigned short     u16;
 typedef unsigned int       u32;
@@ -14,7 +13,6 @@ typedef unsigned char      uint8_t;
 typedef long long          s64;
 typedef unsigned long      size_t;
 
-/* Atomic Synchronization Primitive Forgery for Standalone Compiles */
 typedef struct {
     volatile int counter;
 } atomic_t;
@@ -23,6 +21,10 @@ typedef struct {
 #define FABRICZC_MAX_DEVICES     8
 #define FABRICZC_CHUNK_SECTORS   2048
 #define FABRICZC_MAX_EXTENTS     16
+
+/* XFS Native Magic Superblock Signatures for Driver Spoofing */
+#define XFS_SUPER_MAGIC          0x58465342  /* "XFSB" in ASCII hexadecimal */
+#define XFS_BLOCK_SIZE_LOG       12          /* 2^12 = 4096 Byte block size allocation */
 
 struct fabriczc_container_header {
     uint64_t sequence_generation_id;
@@ -63,18 +65,10 @@ struct fabriczc_extent_table {
     u32 active_table_id;
 };
 
-/* Phase 6 Additions: Asynchronous Ring Fault Tracking Parameters */
-struct fabriczc_fault_registry {
-    u64 last_recorded_timestamp;
-    u32 total_timeout_aborts;
-    u32 active_fault_flags;
-};
-
 struct fabriczc_subsystem_matrix {
     struct fabriczc_container_header master_hdr;
     void *member_bdevs[FABRICZC_MAX_DEVICES];
     struct fabriczc_extent_table extent_map;
-    struct fabriczc_fault_registry fault_log[FABRICZC_MAX_DEVICES];
     u32 total_registered_cpus;
 };
 

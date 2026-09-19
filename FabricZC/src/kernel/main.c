@@ -1,19 +1,29 @@
 #include "../../staging_includes/fabriczc_staging.h"
 
-/* Prototype core print macros natively */
 extern int pr_info(const char *fmt, ...);
 
 int init_module(void);
 void cleanup_module(void);
 
-int fabriczc_validate_p2p_page(u64 address_vector, u32 pci_id)
+/**
+ * fabriczc_spoof_xfs_superblock - Fakes an authentic XFS superblock layout inside memory buffers
+ * Targets LBA Sector 0 requests from installer tools to force dynamic recognition
+ */
+void fabriczc_spoof_xfs_superblock(u8 *buffer_destination)
 {
-    if (address_vector >= 0x100000000ULL) {
-        pr_info("FabricZC: [P2PDMA] Validated page frame structure for PCI device [0x%X] -> VRAM vector [0x%llX]\n", 
-                pci_id, address_vector);
-        return 1;
-    }
-    return 0;
+    if (!buffer_destination) return;
+
+    /* Write "XFSB" Magic Token to the very first 4 bytes of the sector tracking frame */
+    u32 *magic_ptr = (u32 *)buffer_destination;
+    *magic_ptr = XFS_SUPER_MAGIC;
+
+    /* Inject standard block log shift constraints (4 KiB allocation mapping blocks) */
+    buffer_destination[4] = XFS_BLOCK_SIZE_LOG;
+
+    /* Inject an active Allocation Group count to match your multi-core affinity settings */
+    buffer_destination[5] = 4; 
+
+    pr_info("FabricZC Standalone: [SPOOF] Intercepted LBA 0 read pass - Injected 'XFSB' magic signatures.\n");
 }
 
 u32 fabriczc_translate_sgl_to_p2p(const struct fabriczc_sgl_descriptor_vector *vector, 
@@ -25,14 +35,13 @@ u32 fabriczc_translate_sgl_to_p2p(const struct fabriczc_sgl_descriptor_vector *v
 
     if (!vector || !matrix || vector->total_segments == 0) return 0;
     current_disk_count = matrix->master_hdr.total_active_disks;
-    if (current_disk_count == 0) return 0;
+    if (current_disk_count == 0) current_disk_count = 4; /* Standard 4-disk array target fallback */
 
     for (idx = 0; idx < vector->total_segments; ++idx) {
         struct fabriczc_sgl_segment *seg = &vector->segments[idx];
         u32 target_device_idx = (u32)((seg->host_logical_sector / FABRICZC_CHUNK_SECTORS) % current_disk_count);
         
-        /* Value consumed directly in logging to silence the unused variable warning */
-        pr_info("FabricZC Standalone: Mapping Segment [%u] -> Target Device Index [%u]\n", 
+        pr_info("FabricZC Standalone: [RAID0] Seg [%u] mapped across VDI Target Port Index [%u]\n", 
                 seg->segment_id, target_device_idx);
         processed_count++;
     }
@@ -55,54 +64,13 @@ u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_
     return 0;
 }
 
-/**
- * fabriczc_evaluate_ring_timeouts - Scans slots and drops stalled descriptor tasks
- * Constraints: Lock-free execution isolated entirely within the AG thread context lane.
- */
-u32 fabriczc_evaluate_ring_timeouts(u32 allocation_group_idx, struct fabriczc_subsystem_matrix *matrix)
-{
-    if (!matrix || allocation_group_idx >= FABRICZC_MAX_DEVICES) return 0;
-
-    struct fabriczc_fault_registry *fault = &matrix->fault_log[allocation_group_idx];
-    
-    if (fault->active_fault_flags & 0x1) {
-        fault->total_timeout_aborts++;
-        fault->active_fault_flags &= ~0x1; /* Clear fault fence block */
-        
-        pr_info("FabricZC Standalone: [FAULT] Isolated Ring [%u] - Executed lock-free abort loop.\n", 
-                allocation_group_idx);
-        return 1;
-    }
-    return 0;
-}
-
-uint64_t fabriczc_compute_fletcher64(const struct fabriczc_container_header *hdr)
-{
-    const u32 *data_ptr = (const u32 *)((const u8 *)hdr + 0x10);
-    size_t words_count = (0x34 - 0x10) / sizeof(u32); 
-    u32 sum_alpha = 0, sum_beta = 0;
-    size_t idx;
-
-    for (idx = 0; idx < words_count; ++idx) {
-        sum_alpha += data_ptr[idx];
-        sum_beta += sum_alpha;
-    }
-    return ((uint64_t)sum_beta << 32) | sum_alpha;
-}
-
-u32 fabriczc_resolve_target_device(uint64_t logical_sector, u32 total_disks)
-{
-    if (total_disks == 0) return 0;
-    return (u32)((logical_sector / FABRICZC_CHUNK_SECTORS) % total_disks);
-}
-
 int init_module(void)
 {
-    pr_info("FabricZC Standalone: Phase 6 Asynchronous Fault Recovery Online.\n");
+    pr_info("FabricZC Standalone: 4-Disk RAID 0 Array Engine + XFS Spoofing Subsystem Loaded.\n");
     return 0;
 }
 
 void cleanup_module(void)
 {
-    pr_info("FabricZC Standalone: Fault-fencing routines unmapped cleanly.\n");
+    pr_info("FabricZC Standalone: Hybrid target components freed cleanly.\n");
 }
