@@ -1,10 +1,9 @@
 #include "../../staging_includes/fabriczc_staging.h"
+#include <linux/module.h>
+#include <linux/init.h>
 
 /* Prototype core print macros natively */
 extern int pr_info(const char *fmt, ...);
-
-int init_module(void);
-void cleanup_module(void);
 
 /**
  * fabriczc_spoof_xfs_superblock - Fakes an authentic XFS superblock layout inside memory buffers
@@ -65,13 +64,19 @@ u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_
     return 0;
 }
 
-int init_module(void)
+static int __init fabriczc_init(void)
 {
     pr_info("FabricZC Standalone: 4-Disk RAID 0 Array Engine + XFS Spoofing Subsystem Loaded.\n");
     return 0;
 }
 
-void cleanup_module(void)
+static void __exit fabriczc_exit(void)
 {
     pr_info("FabricZC Standalone: Hybrid target components freed cleanly.\n");
 }
+
+/* Explicitly hook entries into canonical kernel module architecture maps */
+module_init(fabriczc_init);
+module_exit(fabriczc_exit);
+
+MODULE_LICENSE("GPL");
