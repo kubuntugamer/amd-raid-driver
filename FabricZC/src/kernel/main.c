@@ -6,7 +6,7 @@
 #include <asm/byteorder.h>
 #include "../../staging_includes/fabriczc_staging.h"
 
-/* Structural variables for full automated /dev/rcraid0 node registration */
+/* Structural tracking handles for the automated block node tree */
 static int fabriczc_major_id = 0;
 static struct class *fabriczc_class = NULL;
 static struct device *fabriczc_device = NULL;
@@ -76,25 +76,21 @@ static int __init fabriczc_init(void)
 {
     printk(KERN_INFO "FabricZC Standalone: 4-Disk RAID 0 Array Engine + XFS Spoofing Subsystem Loaded.\n");
 
-    /* 1. Dynamic allocation registration block */
+    /* 1. Register a major tracking device slots dynamically inside memory */
     fabriczc_major_id = register_blkdev(0, DEVICE_NAME);
     if (fabriczc_major_id < 0) {
-        printk(KERN_WARNING "FabricZC Standalone: Failed to register block device.\n");
+        printk(KERN_WARNING "FabricZC Standalone: Failed to allocate major device registers.\n");
         return fabriczc_major_id;
     }
 
-    /* 2. Automatically generate the system class tracking directory layer */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+    /* 2. Instantiate class tracking using modern 1-argument function layouts */
     fabriczc_class = class_create(DEVICE_NAME);
-#else
-    fabriczc_class = class_create(THIS_MODULE, DEVICE_NAME);
-#endif
     if (IS_ERR(fabriczc_class)) {
         unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
         return PTR_ERR(fabriczc_class);
     }
 
-    /* 3. AUTOMATION STEP: Force the kernel to draw /dev/rcraid0 immediately on screen */
+    /* 3. Instantly construct the /dev/rcraid0 device node file representation */
     fabriczc_device = device_create(fabriczc_class, NULL, MKDEV(fabriczc_major_id, 0), NULL, "rcraid0");
     if (IS_ERR(fabriczc_device)) {
         class_destroy(fabriczc_class);
@@ -102,13 +98,13 @@ static int __init fabriczc_init(void)
         return PTR_ERR(fabriczc_device);
     }
 
-    printk(KERN_INFO "FabricZC Standalone: Node automation complete. /dev/rcraid0 spawned natively.\n");
+    printk(KERN_INFO "FabricZC Standalone: Automated block node tracking active at /dev/rcraid0.\n");
     return 0;
 }
 
 static void __exit fabriczc_exit(void)
 {
-    /* Automatically destroy device node representations out of the system dev tree */
+    /* Clean up the device file nodes out of the active dev subsystem tree on unload */
     if (fabriczc_device) device_destroy(fabriczc_class, MKDEV(fabriczc_major_id, 0));
     if (fabriczc_class) class_destroy(fabriczc_class);
     if (fabriczc_major_id > 0) unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
