@@ -1,22 +1,7 @@
 #ifndef __FABRICZC_STAGING_H__
 #define __FABRICZC_STAGING_H__
 
-#include <linux/version.h>
-
-/* Map basic fixed-width types explicitly to bypass missing system headers */
-typedef unsigned char      u8;
-typedef unsigned short     u16;
-typedef unsigned int       u32;
-typedef unsigned long long u64;
-typedef unsigned long long uint64_t;
-typedef unsigned int       uint32_t;
-typedef unsigned char      uint8_t;
-typedef long long          s64;
-typedef unsigned long      size_t;
-
-/* Explicit 64-bit and 32-bit primitive atomic mappings for freestanding compilation */
-typedef struct { long long counter; } atomic64_t;
-typedef struct { int counter; } atomic_t;
+#include <linux/types.h>
 
 #define FABRICZC_MAGIC_HEALTHY   0x48435a21
 #define FABRICZC_MAX_DEVICES     8
