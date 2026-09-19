@@ -1,22 +1,14 @@
 #ifndef __FABRICZC_STAGING_H__
 #define __FABRICZC_STAGING_H__
 
-/* Explicitly provision standard mock primitives to bypass host dependency faults */
-typedef unsigned char      u8;
-typedef unsigned short     u16;
-typedef unsigned int       u32;
-typedef unsigned long long u64;
-typedef unsigned long long uint64_t;
-typedef unsigned int       uint32_t;
-typedef unsigned char      uint8_t;
-typedef long long          s64;
-typedef unsigned long      size_t;
+#include <linux/types.h>
 
 #define FABRICZC_MAGIC_HEALTHY   0x48435a21
 #define FABRICZC_MAX_DEVICES     8
 #define FABRICZC_CHUNK_SECTORS   2048
 #define FABRICZC_MAX_EXTENTS     16
 
+/* XFS Native Magic Superblock Signatures for Driver Spoofing */
 #define XFS_SUPER_MAGIC          0x58465342  
 #define XFS_BLOCK_SIZE_LOG       12          
 
