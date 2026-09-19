@@ -1,15 +1,27 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/printk.h>
+#include <asm/byteorder.h>
 #include "../../staging_includes/fabriczc_staging.h"
 
+/**
+ * fabriczc_spoof_xfs_superblock - Fakes an authentic XFS superblock layout inside memory buffers
+ * Targets LBA Sector 0 requests from installer tools to force dynamic recognition
+ */
 void fabriczc_spoof_xfs_superblock(u8 *buffer_destination)
 {
     if (!buffer_destination) return;
+
+    /* Write "XFSB" Magic Token using explicit Big-Endian conversion macros */
     u32 *magic_ptr = (u32 *)buffer_destination;
-    *magic_ptr = XFS_SUPER_MAGIC;
-    buffer_destination[4] = XFS_BLOCK_SIZE_LOG;
-    buffer_destination[5] = 4; 
+    *magic_ptr = cpu_to_be32(XFS_SUPER_MAGIC);
+
+    /* Write Block Size Log into byte offset 4 of the sector block array */
+    buffer_destination = XFS_BLOCK_SIZE_LOG;
+
+    /* Write Allocation Group Count into byte offset 5 of the sector block array */
+    buffer_destination = 4; 
+
     printk(KERN_INFO "FabricZC Standalone: [SPOOF] Intercepted LBA 0 read pass - Injected 'XFSB' magic signatures.\n");
 }
 
@@ -22,11 +34,12 @@ u32 fabriczc_translate_sgl_to_p2p(const struct fabriczc_sgl_descriptor_vector *v
 
     if (!vector || !matrix || vector->total_segments == 0) return 0;
     current_disk_count = matrix->master_hdr.total_active_disks;
-    if (current_disk_count == 0) current_disk_count = 4;
+    if (current_disk_count == 0) current_disk_count = 4; /* Standard 4-disk array target fallback */
 
     for (idx = 0; idx < vector->total_segments; ++idx) {
         struct fabriczc_sgl_segment *seg = &vector->segments[idx];
         u32 target_device_idx = (u32)((seg->host_logical_sector / FABRICZC_CHUNK_SECTORS) % current_disk_count);
+        
         printk(KERN_INFO "FabricZC Standalone: [RAID0] Seg [%u] mapped across VDI Target Port Index [%u]\n", 
                seg->segment_id, target_device_idx);
         processed_count++;
