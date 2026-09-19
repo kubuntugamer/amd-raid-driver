@@ -66,6 +66,7 @@ static int __init rc_init(void)
     
     // Initialize rcbottom (hardware layer)
     err = rc_bottom_init();
+    if (amd_init_async_subsystem() != 0) pr_err("rcraid: failed to start async engine\n");
     if (err) {
         rc_printk(RC_ERROR, "rc_init: failed to initialize rcbottom\n");
         rc_debugfs_cleanup();
@@ -78,6 +79,7 @@ static int __init rc_init(void)
     err = rc_config_init();
     if (err) {
         rc_printk(RC_ERROR, "rc_init: failed to initialize rccfg\n");
+    amd_cleanup_async_subsystem();
         rc_bottom_cleanup();
         rc_debugfs_cleanup();
         unregister_blkdev(rc_major, "rcraid");
@@ -105,6 +107,7 @@ static void __exit rc_exit(void)
 
     // Cleanup in reverse order
     rc_config_cleanup();
+    amd_cleanup_async_subsystem();
     rc_bottom_cleanup();
     rc_debugfs_cleanup();
     

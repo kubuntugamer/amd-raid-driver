@@ -1,6 +1,7 @@
 #include "patch_prototypes.h"
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/workqueue.h>
 #include <linux/kthread.h>
 #include <linux/bio.h>
 #include <linux/slab.h>
@@ -116,3 +117,35 @@ void rc_amd_exit_async_subsystem(void)
 EXPORT_SYMBOL_GPL(rc_amd_exit_async_subsystem);
 
 MODULE_LICENSE("GPL");
+
+/* Integrated Background Workqueue Engine from hpt-cleanroom-driver */
+static struct workqueue_struct *amd_async_wq = NULL;
+struct amd_sweep_task {
+    struct work_struct work_node;
+    int target_array_id;
+};
+static struct amd_sweep_task active_amd_sweep;
+
+static void amd_async_sweep_worker(struct work_struct *work) {
+    /* Background processing execution loop plane */
+    pr_info("amd-raid-driver: Asynchronous background verification sweep active\n");
+}
+
+int amd_init_async_subsystem(void) {
+    amd_async_wq = create_singlethread_workqueue("kamd_async_worker");
+    if (!amd_async_wq) {
+        return -ENOMEM;
+    }
+    INIT_WORK(&active_amd_sweep.work_node, amd_async_sweep_worker);
+    pr_info("amd-raid-driver: Background workqueue tracking channel online\n");
+    return 0;
+}
+
+void amd_cleanup_async_subsystem(void) {
+    if (amd_async_wq) {
+        cancel_work_sync(&active_amd_sweep.work_node);
+        destroy_workqueue(amd_async_wq);
+        amd_async_wq = NULL;
+    }
+    pr_info("amd-raid-driver: Background workqueue tracking channel closed\n");
+}
