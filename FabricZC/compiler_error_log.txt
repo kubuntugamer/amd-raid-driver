@@ -1,0 +1,883 @@
+make -C /lib/modules/\7.2.6-1-liquorix-amd64/build M=\/home/chazz/experimental/amd-raid-driver/FabricZC modules
+make[1]: Entering directory '/usr/src/linux-headers-7.2.6-1-liquorix-amd64'
+make[2]: Entering directory '/home/chazz/experimental/amd-raid-driver/FabricZC'
+warning: pahole version differs from the one used to build the kernel
+  The kernel was built with: 131
+  You are using:             0
+  CC [M]  src/kernel/main.o
+In file included from <command-line>:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/compiler_types.h:90:5: warning: ‘CONFIG_FUNCTION_ALIGNMENT’ is not defined, evaluates to ‘0’ [-Wundef]
+   90 | #if CONFIG_FUNCTION_ALIGNMENT > 0
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/compiler_types.h:111:56: warning: ‘CONFIG_FUNCTION_ALIGNMENT’ is not defined, evaluates to ‘0’ [-Wundef]
+  111 | #if defined(CONFIG_CC_HAS_SANE_FUNCTION_ALIGNMENT) || (CONFIG_FUNCTION_ALIGNMENT == 0)
+      |                                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/linkage.h:8,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/printk.h:8,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/bug.h:31,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/bug.h:195,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/alternative.h:9,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/barrier.h:5,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/list.h:11,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/module.h:12,
+                 from src/kernel/main.c:1:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/linkage.h:32:6: warning: ‘CONFIG_FUNCTION_ALIGNMENT’ is not defined, evaluates to ‘0’ [-Wundef]
+   32 | #if (CONFIG_FUNCTION_ALIGNMENT > 8) && !defined(__DISABLE_EXPORTS) && !defined(BUILD_VDSO)
+      |      ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/spinlock_types.h:6,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/spinlock_types_raw.h:7,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/ratelimit_types.h:7,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/printk.h:9:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/qspinlock_types.h:73:5: warning: ‘CONFIG_NR_CPUS’ is not defined, evaluates to ‘0’ [-Wundef]
+   73 | #if CONFIG_NR_CPUS < (1U << 14)
+      |     ^~~~~~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/cache.h:5,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/cache.h:6,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/time.h:5,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/stat.h:19,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/module.h:13:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/cache.h:13:31: error: ‘CONFIG_X86_INTERNODE_CACHE_SHIFT’ undeclared here (not in a function); did you mean ‘INTERNODE_CACHE_SHIFT’?
+   13 | #define INTERNODE_CACHE_SHIFT CONFIG_X86_INTERNODE_CACHE_SHIFT
+      |                               ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/cache.h:97:42: note: in expansion of macro ‘INTERNODE_CACHE_SHIFT’
+   97 |         __attribute__((__aligned__(1 << (INTERNODE_CACHE_SHIFT))))
+      |                                          ^~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/cache.h:172:3: note: in expansion of macro ‘____cacheline_internodealigned_in_smp’
+  172 | } ____cacheline_internodealigned_in_smp;
+      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page_types.h:9,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/ptrace.h:6,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/math_emu.h:5,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/processor.h:13,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/timex.h:5,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/timex.h:67,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/time32.h:13,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/time.h:60:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page_types.h: In function ‘get_max_mapped’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:13:25: error: ‘CONFIG_PAGE_SHIFT’ undeclared (first use in this function)
+   13 | #define PAGE_SHIFT      CONFIG_PAGE_SHIFT
+      |                         ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page_types.h:60:47: note: in expansion of macro ‘PAGE_SHIFT’
+   60 |         return (phys_addr_t)max_pfn_mapped << PAGE_SHIFT;
+      |                                               ^~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:13:25: note: each undeclared identifier is reported only once for each function it appears in
+   13 | #define PAGE_SHIFT      CONFIG_PAGE_SHIFT
+      |                         ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page_types.h:60:47: note: in expansion of macro ‘PAGE_SHIFT’
+   60 |         return (phys_addr_t)max_pfn_mapped << PAGE_SHIFT;
+      |                                               ^~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/ptrace.h: In function ‘regs_within_kernel_stack’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:15:39: error: ‘CONFIG_PAGE_SHIFT’ undeclared (first use in this function)
+   15 | #define PAGE_SIZE       (_AC(1,UL) << CONFIG_PAGE_SHIFT)
+      |                                       ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page_64_types.h:16:23: note: in expansion of macro ‘PAGE_SIZE’
+   16 | #define THREAD_SIZE  (PAGE_SIZE << THREAD_SIZE_ORDER)
+      |                       ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/ptrace.h:362:27: note: in expansion of macro ‘THREAD_SIZE’
+  362 |         return ((addr & ~(THREAD_SIZE - 1)) == (regs->sp & ~(THREAD_SIZE - 1)));
+      |                           ^~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page_64.h: In function ‘clear_pages’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:15:39: error: ‘CONFIG_PAGE_SHIFT’ undeclared (first use in this function)
+   15 | #define PAGE_SIZE       (_AC(1,UL) << CONFIG_PAGE_SHIFT)
+      |                                       ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page_64.h:87:28: note: in expansion of macro ‘PAGE_SIZE’
+   87 |         u64 len = npages * PAGE_SIZE;
+      |                            ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page_64.h: In function ‘task_size_max’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:15:39: error: ‘CONFIG_PAGE_SHIFT’ undeclared (first use in this function)
+   15 | #define PAGE_SIZE       (_AC(1,UL) << CONFIG_PAGE_SHIFT)
+      |                                       ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/alternative.h:267:40: note: in expansion of macro ‘PAGE_SIZE’
+  267 |                 : output : "i" (0), ## input)
+      |                                        ^~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page_64.h:142:9: note: in expansion of macro ‘alternative_io’
+  142 |         alternative_io("movq %[small],%0","movq %[large],%0",
+      |         ^~~~~~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/processor.h:20:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page.h: In function ‘pfn_to_kaddr’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:13:25: error: ‘CONFIG_PAGE_SHIFT’ undeclared (first use in this function)
+   13 | #define PAGE_SHIFT      CONFIG_PAGE_SHIFT
+      |                         ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page.h:52:59: note: in definition of macro ‘__va’
+   52 | #define __va(x)                 ((void *)((unsigned long)(x)+PAGE_OFFSET))
+      |                                                           ^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page.h:68:28: note: in expansion of macro ‘PAGE_SHIFT’
+   68 |         return __va(pfn << PAGE_SHIFT);
+      |                            ^~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/getorder.h: In function ‘get_order’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:13:25: error: ‘CONFIG_PAGE_SHIFT’ undeclared (first use in this function)
+   13 | #define PAGE_SHIFT      CONFIG_PAGE_SHIFT
+      |                         ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/getorder.h:33:48: note: in expansion of macro ‘PAGE_SHIFT’
+   33 |                         return BITS_PER_LONG - PAGE_SHIFT;
+      |                                                ^~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h: In function ‘pgd_flags’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:15:39: error: ‘CONFIG_PAGE_SHIFT’ undeclared (first use in this function)
+   15 | #define PAGE_SIZE       (_AC(1,UL) << CONFIG_PAGE_SHIFT)
+      |                                       ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:28:28: note: in expansion of macro ‘PAGE_SIZE’
+   28 | #define PAGE_MASK       (~(PAGE_SIZE - 1))
+      |                            ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page_types.h:16:48: note: in expansion of macro ‘PAGE_MASK’
+   16 | #define PHYSICAL_PAGE_MASK      (((signed long)PAGE_MASK) & __PHYSICAL_MASK)
+      |                                                ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:285:44: note: in expansion of macro ‘PHYSICAL_PAGE_MASK’
+  285 | #define PTE_PFN_MASK            ((pteval_t)PHYSICAL_PAGE_MASK)
+      |                                            ^~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:291:35: note: in expansion of macro ‘PTE_PFN_MASK’
+  291 | #define PTE_FLAGS_MASK          (~PTE_PFN_MASK)
+      |                                   ^~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:338:38: note: in expansion of macro ‘PTE_FLAGS_MASK’
+  338 |         return native_pgd_val(pgd) & PTE_FLAGS_MASK;
+      |                                      ^~~~~~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/processor.h:21:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h: At top level:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:341:5: warning: ‘CONFIG_PGTABLE_LEVELS’ is not defined, evaluates to ‘0’ [-Wundef]
+  341 | #if CONFIG_PGTABLE_LEVELS > 4
+      |     ^~~~~~~~~~~~~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:354:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/pgtable-nop4d.h:11:9: warning: ‘P4D_SHIFT’ redefined
+   11 | #define P4D_SHIFT               PGDIR_SHIFT
+      |         ^~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:277:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_64_types.h:56:9: note: this is the location of the previous definition
+   56 | #define P4D_SHIFT               39
+      |         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/pgtable-nop4d.h:12:9: warning: ‘PTRS_PER_P4D’ redefined
+   12 | #define PTRS_PER_P4D            1
+      |         ^~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_64_types.h:58:9: note: this is the location of the previous definition
+   58 | #define PTRS_PER_P4D            ptrs_per_p4d
+      |         ^~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/pgtable-nop4d.h:13:9: warning: ‘P4D_SIZE’ redefined
+   13 | #define P4D_SIZE                (1UL << P4D_SHIFT)
+      |         ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_64_types.h:59:9: note: this is the location of the previous definition
+   59 | #define P4D_SIZE                (_AC(1, UL) << P4D_SHIFT)
+      |         ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/pgtable-nop4d.h:14:9: warning: ‘P4D_MASK’ redefined
+   14 | #define P4D_MASK                (~(P4D_SIZE-1))
+      |         ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_64_types.h:60:9: note: this is the location of the previous definition
+   60 | #define P4D_MASK                (~(P4D_SIZE - 1))
+      |         ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:367:5: warning: ‘CONFIG_PGTABLE_LEVELS’ is not defined, evaluates to ‘0’ [-Wundef]
+  367 | #if CONFIG_PGTABLE_LEVELS > 3
+      |     ^~~~~~~~~~~~~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:380:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/pgtable-nopud.h:18:9: warning: ‘PUD_SHIFT’ redefined
+   18 | #define PUD_SHIFT       P4D_SHIFT
+      |         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_64_types.h:67:9: note: this is the location of the previous definition
+   67 | #define PUD_SHIFT       30
+      |         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/pgtable-nopud.h:19:9: warning: ‘PTRS_PER_PUD’ redefined
+   19 | #define PTRS_PER_PUD    1
+      |         ^~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_64_types.h:68:9: note: this is the location of the previous definition
+   68 | #define PTRS_PER_PUD    512
+      |         ^~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/pgtable-nopud.h:20:9: warning: ‘PUD_SIZE’ redefined
+   20 | #define PUD_SIZE        (1UL << PUD_SHIFT)
+      |         ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_64_types.h:84:9: note: this is the location of the previous definition
+   84 | #define PUD_SIZE        (_AC(1, UL) << PUD_SHIFT)
+      |         ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/pgtable-nopud.h:21:9: warning: ‘PUD_MASK’ redefined
+   21 | #define PUD_MASK        (~(PUD_SIZE-1))
+      |         ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_64_types.h:85:9: note: this is the location of the previous definition
+   85 | #define PUD_MASK        (~(PUD_SIZE - 1))
+      |         ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:393:5: warning: ‘CONFIG_PGTABLE_LEVELS’ is not defined, evaluates to ‘0’ [-Wundef]
+  393 | #if CONFIG_PGTABLE_LEVELS > 2
+      |     ^~~~~~~~~~~~~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:404:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/pgtable-nopmd.h:18:31: error: conflicting types for ‘pmd_t’; have ‘struct <anonymous>’
+   18 | typedef struct { pud_t pud; } pmd_t;
+      |                               ^~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_64_types.h:22:34: note: previous declaration of ‘pmd_t’ with type ‘pmd_t’
+   22 | typedef struct { pmdval_t pmd; } pmd_t;
+      |                                  ^~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/pgtable-nopmd.h:20:9: warning: ‘PMD_SHIFT’ redefined
+   20 | #define PMD_SHIFT       PUD_SHIFT
+      |         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_64_types.h:74:9: note: this is the location of the previous definition
+   74 | #define PMD_SHIFT       21
+      |         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/pgtable-nopmd.h:21:9: warning: ‘PTRS_PER_PMD’ redefined
+   21 | #define PTRS_PER_PMD    1
+      |         ^~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_64_types.h:75:9: note: this is the location of the previous definition
+   75 | #define PTRS_PER_PMD    512
+      |         ^~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/pgtable-nopmd.h:22:9: warning: ‘PMD_SIZE’ redefined
+   22 | #define PMD_SIZE        (1UL << PMD_SHIFT)
+      |         ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_64_types.h:82:9: note: this is the location of the previous definition
+   82 | #define PMD_SIZE        (_AC(1, UL) << PMD_SHIFT)
+      |         ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/pgtable-nopmd.h:23:9: warning: ‘PMD_MASK’ redefined
+   23 | #define PMD_MASK        (~(PMD_SIZE-1))
+      |         ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_64_types.h:83:9: note: this is the location of the previous definition
+   83 | #define PMD_MASK        (~(PMD_SIZE - 1))
+      |         ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h: In function ‘p4d_pfn_mask’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:15:39: error: ‘CONFIG_PAGE_SHIFT’ undeclared (first use in this function)
+   15 | #define PAGE_SIZE       (_AC(1,UL) << CONFIG_PAGE_SHIFT)
+      |                                       ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:28:28: note: in expansion of macro ‘PAGE_SIZE’
+   28 | #define PAGE_MASK       (~(PAGE_SIZE - 1))
+      |                            ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page_types.h:16:48: note: in expansion of macro ‘PAGE_MASK’
+   16 | #define PHYSICAL_PAGE_MASK      (((signed long)PAGE_MASK) & __PHYSICAL_MASK)
+      |                                                ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:285:44: note: in expansion of macro ‘PHYSICAL_PAGE_MASK’
+  285 | #define PTE_PFN_MASK            ((pteval_t)PHYSICAL_PAGE_MASK)
+      |                                            ^~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:420:16: note: in expansion of macro ‘PTE_PFN_MASK’
+  420 |         return PTE_PFN_MASK;
+      |                ^~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h: In function ‘pud_pfn_mask’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:15:39: error: ‘CONFIG_PAGE_SHIFT’ undeclared (first use in this function)
+   15 | #define PAGE_SIZE       (_AC(1,UL) << CONFIG_PAGE_SHIFT)
+      |                                       ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:28:28: note: in expansion of macro ‘PAGE_SIZE’
+   28 | #define PAGE_MASK       (~(PAGE_SIZE - 1))
+      |                            ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page_types.h:16:48: note: in expansion of macro ‘PAGE_MASK’
+   16 | #define PHYSICAL_PAGE_MASK      (((signed long)PAGE_MASK) & __PHYSICAL_MASK)
+      |                                                ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:285:44: note: in expansion of macro ‘PHYSICAL_PAGE_MASK’
+  285 | #define PTE_PFN_MASK            ((pteval_t)PHYSICAL_PAGE_MASK)
+      |                                            ^~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:438:24: note: in expansion of macro ‘PTE_PFN_MASK’
+  438 |                 return PTE_PFN_MASK;
+      |                        ^~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h: In function ‘pmd_pfn_mask’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:15:39: error: ‘CONFIG_PAGE_SHIFT’ undeclared (first use in this function)
+   15 | #define PAGE_SIZE       (_AC(1,UL) << CONFIG_PAGE_SHIFT)
+      |                                       ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:28:28: note: in expansion of macro ‘PAGE_SIZE’
+   28 | #define PAGE_MASK       (~(PAGE_SIZE - 1))
+      |                            ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page_types.h:16:48: note: in expansion of macro ‘PAGE_MASK’
+   16 | #define PHYSICAL_PAGE_MASK      (((signed long)PAGE_MASK) & __PHYSICAL_MASK)
+      |                                                ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:285:44: note: in expansion of macro ‘PHYSICAL_PAGE_MASK’
+  285 | #define PTE_PFN_MASK            ((pteval_t)PHYSICAL_PAGE_MASK)
+      |                                            ^~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:456:24: note: in expansion of macro ‘PTE_PFN_MASK’
+  456 |                 return PTE_PFN_MASK;
+      |                        ^~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h: In function ‘pte_flags’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:15:39: error: ‘CONFIG_PAGE_SHIFT’ undeclared (first use in this function)
+   15 | #define PAGE_SIZE       (_AC(1,UL) << CONFIG_PAGE_SHIFT)
+      |                                       ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:28:28: note: in expansion of macro ‘PAGE_SIZE’
+   28 | #define PAGE_MASK       (~(PAGE_SIZE - 1))
+      |                            ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/page_types.h:16:48: note: in expansion of macro ‘PAGE_MASK’
+   16 | #define PHYSICAL_PAGE_MASK      (((signed long)PAGE_MASK) & __PHYSICAL_MASK)
+      |                                                ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:285:44: note: in expansion of macro ‘PHYSICAL_PAGE_MASK’
+  285 | #define PTE_PFN_MASK            ((pteval_t)PHYSICAL_PAGE_MASK)
+      |                                            ^~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:291:35: note: in expansion of macro ‘PTE_PFN_MASK’
+  291 | #define PTE_FLAGS_MASK          (~PTE_PFN_MASK)
+      |                                   ^~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/pgtable_types.h:481:38: note: in expansion of macro ‘PTE_FLAGS_MASK’
+  481 |         return native_pte_val(pte) & PTE_FLAGS_MASK;
+      |                                      ^~~~~~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h:2567,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic.h:80,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jump_label.h:243,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/static_key.h:1,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/nospec-branch.h:6,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/irqflags.h:9,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/irqflags.h:18,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/special_insns.h:10,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/processor.h:25:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/atomic64.h: At top level:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/atomic64.h:14:3: error: conflicting types for ‘atomic64_t’; have ‘struct <anonymous>’
+   14 | } atomic64_t;
+      |   ^~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/kasan-checks.h:5,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/rwonce.h:26,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/generated/asm/rwonce.h:1,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/compiler.h:369,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/build_bug.h:5,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/container_of.h:5,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/list.h:5:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/types.h:195:3: note: previous declaration of ‘atomic64_t’ with type ‘atomic64_t’
+  195 | } atomic64_t;
+      |   ^~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/atomic64.h:57:9: warning: ‘arch_atomic64_add_return’ redefined
+   57 | #define arch_atomic64_add_return        generic_atomic64_add_return
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic.h:174,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic.h:7:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:81:9: note: this is the location of the previous definition
+   81 | #define arch_atomic64_add_return arch_atomic64_add_return
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/atomic64.h:58:9: warning: ‘arch_atomic64_fetch_add’ redefined
+   58 | #define arch_atomic64_fetch_add         generic_atomic64_fetch_add
+      |         ^~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:89:9: note: this is the location of the previous definition
+   89 | #define arch_atomic64_fetch_add arch_atomic64_fetch_add
+      |         ^~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/atomic64.h:60:9: warning: ‘arch_atomic64_sub_return’ redefined
+   60 | #define arch_atomic64_sub_return        generic_atomic64_sub_return
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:83:9: note: this is the location of the previous definition
+   83 | #define arch_atomic64_sub_return(i, v) arch_atomic64_add_return(-(i), v)
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/atomic64.h:61:9: warning: ‘arch_atomic64_fetch_sub’ redefined
+   61 | #define arch_atomic64_fetch_sub         generic_atomic64_fetch_sub
+      |         ^~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:91:9: note: this is the location of the previous definition
+   91 | #define arch_atomic64_fetch_sub(i, v) arch_atomic64_fetch_add(-(i), v)
+      |         ^~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/atomic64.h:64:9: warning: ‘arch_atomic64_fetch_and’ redefined
+   64 | #define arch_atomic64_fetch_and         generic_atomic64_fetch_and
+      |         ^~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:127:9: note: this is the location of the previous definition
+  127 | #define arch_atomic64_fetch_and arch_atomic64_fetch_and
+      |         ^~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/atomic64.h:66:9: warning: ‘arch_atomic64_fetch_or’ redefined
+   66 | #define arch_atomic64_fetch_or          generic_atomic64_fetch_or
+      |         ^~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:145:9: note: this is the location of the previous definition
+  145 | #define arch_atomic64_fetch_or arch_atomic64_fetch_or
+      |         ^~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/atomic64.h:68:9: warning: ‘arch_atomic64_fetch_xor’ redefined
+   68 | #define arch_atomic64_fetch_xor         generic_atomic64_fetch_xor
+      |         ^~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:163:9: note: this is the location of the previous definition
+  163 | #define arch_atomic64_fetch_xor arch_atomic64_fetch_xor
+      |         ^~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/atomic64.h:71:9: warning: ‘arch_atomic64_cmpxchg’ redefined
+   71 | #define arch_atomic64_cmpxchg           generic_atomic64_cmpxchg
+      |         ^~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:97:9: note: this is the location of the previous definition
+   97 | #define arch_atomic64_cmpxchg arch_atomic64_cmpxchg
+      |         ^~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/atomic64.h:72:9: warning: ‘arch_atomic64_xchg’ redefined
+   72 | #define arch_atomic64_xchg              generic_atomic64_xchg
+      |         ^~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:109:9: note: this is the location of the previous definition
+  109 | #define arch_atomic64_xchg arch_atomic64_xchg
+      |         ^~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h: In function ‘raw_atomic64_inc’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h:3118:27: error: passing argument 1 of ‘arch_atomic64_inc’ from incompatible pointer type [-Wincompatible-pointer-types]
+ 3118 |         arch_atomic64_inc(v);
+      |                           ^
+      |                           |
+      |                           atomic64_t *
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:43:59: note: expected ‘atomic64_t *’ but argument is of type ‘atomic64_t *’
+   43 | static __always_inline void arch_atomic64_inc(atomic64_t *v)
+      |                                               ~~~~~~~~~~~~^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h: In function ‘raw_atomic64_dec’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h:3336:27: error: passing argument 1 of ‘arch_atomic64_dec’ from incompatible pointer type [-Wincompatible-pointer-types]
+ 3336 |         arch_atomic64_dec(v);
+      |                           ^
+      |                           |
+      |                           atomic64_t *
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:51:59: note: expected ‘atomic64_t *’ but argument is of type ‘atomic64_t *’
+   51 | static __always_inline void arch_atomic64_dec(atomic64_t *v)
+      |                                               ~~~~~~~~~~~~^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h: In function ‘raw_atomic64_try_cmpxchg’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h:4256:42: error: passing argument 1 of ‘arch_atomic64_try_cmpxchg’ from incompatible pointer type [-Wincompatible-pointer-types]
+ 4256 |         return arch_atomic64_try_cmpxchg(v, old, new);
+      |                                          ^
+      |                                          |
+      |                                          atomic64_t *
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:99:67: note: expected ‘atomic64_t *’ but argument is of type ‘atomic64_t *’
+   99 | static __always_inline bool arch_atomic64_try_cmpxchg(atomic64_t *v, s64 *old, s64 new)
+      |                                                       ~~~~~~~~~~~~^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h: In function ‘raw_atomic64_try_cmpxchg_acquire’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h:4296:42: error: passing argument 1 of ‘arch_atomic64_try_cmpxchg’ from incompatible pointer type [-Wincompatible-pointer-types]
+ 4296 |         return arch_atomic64_try_cmpxchg(v, old, new);
+      |                                          ^
+      |                                          |
+      |                                          atomic64_t *
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:99:67: note: expected ‘atomic64_t *’ but argument is of type ‘atomic64_t *’
+   99 | static __always_inline bool arch_atomic64_try_cmpxchg(atomic64_t *v, s64 *old, s64 new)
+      |                                                       ~~~~~~~~~~~~^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h: In function ‘raw_atomic64_try_cmpxchg_release’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h:4329:42: error: passing argument 1 of ‘arch_atomic64_try_cmpxchg’ from incompatible pointer type [-Wincompatible-pointer-types]
+ 4329 |         return arch_atomic64_try_cmpxchg(v, old, new);
+      |                                          ^
+      |                                          |
+      |                                          atomic64_t *
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:99:67: note: expected ‘atomic64_t *’ but argument is of type ‘atomic64_t *’
+   99 | static __always_inline bool arch_atomic64_try_cmpxchg(atomic64_t *v, s64 *old, s64 new)
+      |                                                       ~~~~~~~~~~~~^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h: In function ‘raw_atomic64_try_cmpxchg_relaxed’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h:4359:42: error: passing argument 1 of ‘arch_atomic64_try_cmpxchg’ from incompatible pointer type [-Wincompatible-pointer-types]
+ 4359 |         return arch_atomic64_try_cmpxchg(v, old, new);
+      |                                          ^
+      |                                          |
+      |                                          atomic64_t *
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:99:67: note: expected ‘atomic64_t *’ but argument is of type ‘atomic64_t *’
+   99 | static __always_inline bool arch_atomic64_try_cmpxchg(atomic64_t *v, s64 *old, s64 new)
+      |                                                       ~~~~~~~~~~~~^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h: In function ‘raw_atomic64_sub_and_test’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h:4384:46: error: passing argument 2 of ‘arch_atomic64_sub_and_test’ from incompatible pointer type [-Wincompatible-pointer-types]
+ 4384 |         return arch_atomic64_sub_and_test(i, v);
+      |                                              ^
+      |                                              |
+      |                                              atomic64_t *
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:37:75: note: expected ‘atomic64_t *’ but argument is of type ‘atomic64_t *’
+   37 | static __always_inline bool arch_atomic64_sub_and_test(s64 i, atomic64_t *v)
+      |                                                               ~~~~~~~~~~~~^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h: In function ‘raw_atomic64_dec_and_test’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h:4404:43: error: passing argument 1 of ‘arch_atomic64_dec_and_test’ from incompatible pointer type [-Wincompatible-pointer-types]
+ 4404 |         return arch_atomic64_dec_and_test(v);
+      |                                           ^
+      |                                           |
+      |                                           atomic64_t *
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:59:68: note: expected ‘atomic64_t *’ but argument is of type ‘atomic64_t *’
+   59 | static __always_inline bool arch_atomic64_dec_and_test(atomic64_t *v)
+      |                                                        ~~~~~~~~~~~~^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h: In function ‘raw_atomic64_inc_and_test’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h:4424:43: error: passing argument 1 of ‘arch_atomic64_inc_and_test’ from incompatible pointer type [-Wincompatible-pointer-types]
+ 4424 |         return arch_atomic64_inc_and_test(v);
+      |                                           ^
+      |                                           |
+      |                                           atomic64_t *
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:65:68: note: expected ‘atomic64_t *’ but argument is of type ‘atomic64_t *’
+   65 | static __always_inline bool arch_atomic64_inc_and_test(atomic64_t *v)
+      |                                                        ~~~~~~~~~~~~^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h: In function ‘raw_atomic64_add_negative’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h:4445:46: error: passing argument 2 of ‘arch_atomic64_add_negative’ from incompatible pointer type [-Wincompatible-pointer-types]
+ 4445 |         return arch_atomic64_add_negative(i, v);
+      |                                              ^
+      |                                              |
+      |                                              atomic64_t *
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:71:75: note: expected ‘atomic64_t *’ but argument is of type ‘atomic64_t *’
+   71 | static __always_inline bool arch_atomic64_add_negative(s64 i, atomic64_t *v)
+      |                                                               ~~~~~~~~~~~~^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h: In function ‘raw_atomic64_add_negative_acquire’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h:4478:46: error: passing argument 2 of ‘arch_atomic64_add_negative’ from incompatible pointer type [-Wincompatible-pointer-types]
+ 4478 |         return arch_atomic64_add_negative(i, v);
+      |                                              ^
+      |                                              |
+      |                                              atomic64_t *
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:71:75: note: expected ‘atomic64_t *’ but argument is of type ‘atomic64_t *’
+   71 | static __always_inline bool arch_atomic64_add_negative(s64 i, atomic64_t *v)
+      |                                                               ~~~~~~~~~~~~^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h: In function ‘raw_atomic64_add_negative_release’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h:4504:46: error: passing argument 2 of ‘arch_atomic64_add_negative’ from incompatible pointer type [-Wincompatible-pointer-types]
+ 4504 |         return arch_atomic64_add_negative(i, v);
+      |                                              ^
+      |                                              |
+      |                                              atomic64_t *
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:71:75: note: expected ‘atomic64_t *’ but argument is of type ‘atomic64_t *’
+   71 | static __always_inline bool arch_atomic64_add_negative(s64 i, atomic64_t *v)
+      |                                                               ~~~~~~~~~~~~^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h: In function ‘raw_atomic64_add_negative_relaxed’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/atomic/atomic-arch-fallback.h:4527:46: error: passing argument 2 of ‘arch_atomic64_add_negative’ from incompatible pointer type [-Wincompatible-pointer-types]
+ 4527 |         return arch_atomic64_add_negative(i, v);
+      |                                              ^
+      |                                              |
+      |                                              atomic64_t *
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/atomic64_64.h:71:75: note: expected ‘atomic64_t *’ but argument is of type ‘atomic64_t *’
+   71 | static __always_inline bool arch_atomic64_add_negative(s64 i, atomic64_t *v)
+      |                                                               ~~~~~~~~~~~~^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/fpu/types.h: At top level:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:15:39: error: ‘CONFIG_PAGE_SHIFT’ undeclared here (not in a function)
+   15 | #define PAGE_SIZE       (_AC(1,UL) << CONFIG_PAGE_SHIFT)
+      |                                       ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/fpu/types.h:374:22: note: in expansion of macro ‘PAGE_SIZE’
+  374 |         u8 __padding[PAGE_SIZE];
+      |                      ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/processor.h:226:9: warning: ‘cache_line_size’ redefined
+  226 | #define cache_line_size()       (boot_cpu_data.x86_cache_alignment)
+      |         ^~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/cache.h:104:9: note: this is the location of the previous definition
+  104 | #define cache_line_size()       L1_CACHE_BYTES
+      |         ^~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/processor.h: In function ‘load_cr3’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/processor.h:257:19: error: implicit declaration of function ‘__sme_pa’ [-Wimplicit-function-declaration]
+  257 |         write_cr3(__sme_pa(pgdir));
+      |                   ^~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/smp.h:119,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/alloc_tag.h:14,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/percpu.h:5,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/msr.h:16,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/tsc.h:11,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/timex.h:6:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/thread_info.h: In function ‘tif_test_bit’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/thread_info.h:200:49: error: implicit declaration of function ‘current_thread_info’ [-Wimplicit-function-declaration]
+  200 |                              (unsigned long *)(&current_thread_info()->flags));
+      |                                                 ^~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/thread_info.h:200:70: error: invalid type argument of ‘->’ (have ‘int’)
+  200 |                              (unsigned long *)(&current_thread_info()->flags));
+      |                                                                      ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/thread_info.h: At top level:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/thread_info.h:219:19: error: redefinition of ‘arch_within_stack_frames’
+  219 | static inline int arch_within_stack_frames(const void * const stack,
+      |                   ^~~~~~~~~~~~~~~~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/thread_info.h:62:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/thread_info.h:164:19: note: previous definition of ‘arch_within_stack_frames’ with type ‘int(const void * const,  const void * const,  const void *, long unsigned int)’
+  164 | static inline int arch_within_stack_frames(const void * const stack,
+      |                   ^~~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:15:39: warning: ‘CONFIG_PAGE_SHIFT’ is not defined, evaluates to ‘0’ [-Wundef]
+   15 | #define PAGE_SIZE       (_AC(1,UL) << CONFIG_PAGE_SHIFT)
+      |                                       ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/mm_types_task.h:58:6: note: in expansion of macro ‘PAGE_SIZE’
+   58 | #if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE) && (BITS_PER_LONG <= 32)
+      |      ^~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/const.h:5,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/const.h:4,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/list.h:9:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:15:39: warning: ‘CONFIG_PAGE_SHIFT’ is not defined, evaluates to ‘0’ [-Wundef]
+   15 | #define PAGE_SIZE       (_AC(1,UL) << CONFIG_PAGE_SHIFT)
+      |                                       ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/uapi/linux/const.h:49:50: note: in definition of macro ‘__ALIGN_KERNEL_MASK’
+   49 | #define __ALIGN_KERNEL_MASK(x, mask)    (((x) + (mask)) & ~(mask))
+      |                                                  ^~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/mm_types_task.h:47:41: note: in expansion of macro ‘__ALIGN_MASK’
+   47 | #define PAGE_FRAG_CACHE_MAX_SIZE        __ALIGN_MASK(32768, ~PAGE_MASK)
+      |                                         ^~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:28:28: note: in expansion of macro ‘PAGE_SIZE’
+   28 | #define PAGE_MASK       (~(PAGE_SIZE - 1))
+      |                            ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/mm_types_task.h:47:62: note: in expansion of macro ‘PAGE_MASK’
+   47 | #define PAGE_FRAG_CACHE_MAX_SIZE        __ALIGN_MASK(32768, ~PAGE_MASK)
+      |                                                              ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/mm_types_task.h:58:18: note: in expansion of macro ‘PAGE_FRAG_CACHE_MAX_SIZE’
+   58 | #if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE) && (BITS_PER_LONG <= 32)
+      |                  ^~~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:15:39: warning: ‘CONFIG_PAGE_SHIFT’ is not defined, evaluates to ‘0’ [-Wundef]
+   15 | #define PAGE_SIZE       (_AC(1,UL) << CONFIG_PAGE_SHIFT)
+      |                                       ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/uapi/linux/const.h:49:61: note: in definition of macro ‘__ALIGN_KERNEL_MASK’
+   49 | #define __ALIGN_KERNEL_MASK(x, mask)    (((x) + (mask)) & ~(mask))
+      |                                                             ^~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/mm_types_task.h:47:41: note: in expansion of macro ‘__ALIGN_MASK’
+   47 | #define PAGE_FRAG_CACHE_MAX_SIZE        __ALIGN_MASK(32768, ~PAGE_MASK)
+      |                                         ^~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/page.h:28:28: note: in expansion of macro ‘PAGE_SIZE’
+   28 | #define PAGE_MASK       (~(PAGE_SIZE - 1))
+      |                            ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/mm_types_task.h:47:62: note: in expansion of macro ‘PAGE_MASK’
+   47 | #define PAGE_FRAG_CACHE_MAX_SIZE        __ALIGN_MASK(32768, ~PAGE_MASK)
+      |                                                              ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/mm_types_task.h:58:18: note: in expansion of macro ‘PAGE_FRAG_CACHE_MAX_SIZE’
+   58 | #if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE) && (BITS_PER_LONG <= 32)
+      |                  ^~~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/cache.h:8:26: error: ‘CONFIG_X86_L1_CACHE_SHIFT’ undeclared here (not in a function)
+    8 | #define L1_CACHE_SHIFT  (CONFIG_X86_L1_CACHE_SHIFT)
+      |                          ^~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/cache.h:9:31: note: in expansion of macro ‘L1_CACHE_SHIFT’
+    9 | #define L1_CACHE_BYTES  (1 << L1_CACHE_SHIFT)
+      |                               ^~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/cache.h:8:25: note: in expansion of macro ‘L1_CACHE_BYTES’
+    8 | #define SMP_CACHE_BYTES L1_CACHE_BYTES
+      |                         ^~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/cache.h:12:58: note: in expansion of macro ‘SMP_CACHE_BYTES’
+   12 | #define ____cacheline_aligned __attribute__((__aligned__(SMP_CACHE_BYTES)))
+      |                                                          ^~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/sched.h:520:3: note: in expansion of macro ‘____cacheline_aligned’
+  520 | } ____cacheline_aligned;
+      |   ^~~~~~~~~~~~~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/rbtree.h:24,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/mm_types.h:11,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/mmzone.h:22,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/gfp.h:7,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/umh.h:4,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/kmod.h:9,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/module.h:18:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/rcupdate.h:262:2: error: #error "Unknown RCU implementation specified to kernel configuration"
+  262 | #error "Unknown RCU implementation specified to kernel configuration"
+      |  ^~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/rcupdate.h: In function ‘rcu_read_lock’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/rcupdate.h:841:27: error: implicit declaration of function ‘rcu_is_watching’ [-Wimplicit-function-declaration]
+  841 |         RCU_LOCKDEP_WARN(!rcu_is_watching(),
+      |                           ^~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/rcupdate.h:453:52: note: in definition of macro ‘RCU_LOCKDEP_WARN’
+  453 | #define RCU_LOCKDEP_WARN(c, s) do { } while (0 && (c))
+      |                                                    ^
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/generated/uapi/asm/param.h:1,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/uapi/linux/param.h:5,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/ratelimit_types.h:6:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/generated/timeconst.h: At top level:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/generated/timeconst.h:10:5: note: in expansion of macro ‘HZ’
+   10 | #if HZ != 1000
+      |     ^~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:14,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/ktime.h:25,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/timer.h:6,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/uprobes.h:18,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/mm_types.h:16:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/generated/timeconst.h:11:2: error: #error "include/generated/timeconst.h has the wrong HZ value!"
+   11 | #error "include/generated/timeconst.h has the wrong HZ value!"
+      |  ^~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:23:5: note: in expansion of macro ‘HZ’
+   23 | #if HZ >= 12 && HZ < 24
+      |     ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:25:7: note: in expansion of macro ‘HZ’
+   25 | #elif HZ >= 24 && HZ < 48
+      |       ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:27:7: note: in expansion of macro ‘HZ’
+   27 | #elif HZ >= 48 && HZ < 96
+      |       ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:29:7: note: in expansion of macro ‘HZ’
+   29 | #elif HZ >= 96 && HZ < 192
+      |       ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:31:7: note: in expansion of macro ‘HZ’
+   31 | #elif HZ >= 192 && HZ < 384
+      |       ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:33:7: note: in expansion of macro ‘HZ’
+   33 | #elif HZ >= 384 && HZ < 768
+      |       ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:35:7: note: in expansion of macro ‘HZ’
+   35 | #elif HZ >= 768 && HZ < 1536
+      |       ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:37:7: note: in expansion of macro ‘HZ’
+   37 | #elif HZ >= 1536 && HZ < 3072
+      |       ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:39:7: note: in expansion of macro ‘HZ’
+   39 | #elif HZ >= 3072 && HZ < 6144
+      |       ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:41:7: note: in expansion of macro ‘HZ’
+   41 | #elif HZ >= 6144 && HZ < 12288
+      |       ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:44:3: error: #error Invalid value of HZ.
+   44 | # error Invalid value of HZ.
+      |   ^~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/jiffies.h:9:34: note: in expansion of macro ‘HZ’
+    9 | #define TICK_NSEC ((NSEC_PER_SEC+HZ/2)/HZ)
+      |                                  ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:406:31: note: in expansion of macro ‘TICK_NSEC’
+  406 | #if !((((NSEC_PER_SEC << 2) / TICK_NSEC) << (SEC_JIFFIE_SC - 2)) & 0x80000000)
+      |                               ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/jiffies.h:9:40: note: in expansion of macro ‘HZ’
+    9 | #define TICK_NSEC ((NSEC_PER_SEC+HZ/2)/HZ)
+      |                                        ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:406:31: note: in expansion of macro ‘TICK_NSEC’
+  406 | #if !((((NSEC_PER_SEC << 2) / TICK_NSEC) << (SEC_JIFFIE_SC - 2)) & 0x80000000)
+      |                               ^~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:12:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/vdso/jiffies.h:9:39: error: division by zero in #if
+    9 | #define TICK_NSEC ((NSEC_PER_SEC+HZ/2)/HZ)
+      |                                       ^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:406:31: note: in expansion of macro ‘TICK_NSEC’
+  406 | #if !((((NSEC_PER_SEC << 2) / TICK_NSEC) << (SEC_JIFFIE_SC - 2)) & 0x80000000)
+      |                               ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:405:29: warning: ‘SHIFT_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+  405 | #define SEC_JIFFIE_SC (31 - SHIFT_HZ)
+      |                             ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:406:46: note: in expansion of macro ‘SEC_JIFFIE_SC’
+  406 | #if !((((NSEC_PER_SEC << 2) / TICK_NSEC) << (SEC_JIFFIE_SC - 2)) & 0x80000000)
+      |                                              ^~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:434:5: note: in expansion of macro ‘HZ’
+  434 | #if HZ <= MSEC_PER_SEC && !(MSEC_PER_SEC % HZ)
+      |     ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:434:44: note: in expansion of macro ‘HZ’
+  434 | #if HZ <= MSEC_PER_SEC && !(MSEC_PER_SEC % HZ)
+      |                                            ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:434:42: error: division by zero in #if
+  434 | #if HZ <= MSEC_PER_SEC && !(MSEC_PER_SEC % HZ)
+      |                                          ^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:451:22: note: in expansion of macro ‘HZ’
+  451 | #if !(USEC_PER_SEC % HZ)
+      |                      ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:451:20: error: division by zero in #if
+  451 | #if !(USEC_PER_SEC % HZ)
+      |                    ^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:487:5: note: in expansion of macro ‘HZ’
+  487 | #if HZ <= MSEC_PER_SEC && !(MSEC_PER_SEC % HZ)
+      |     ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:487:44: note: in expansion of macro ‘HZ’
+  487 | #if HZ <= MSEC_PER_SEC && !(MSEC_PER_SEC % HZ)
+      |                                            ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:487:42: error: division by zero in #if
+  487 | #if HZ <= MSEC_PER_SEC && !(MSEC_PER_SEC % HZ)
+      |                                          ^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:497:7: note: in expansion of macro ‘HZ’
+  497 | #elif HZ > MSEC_PER_SEC && !(HZ % MSEC_PER_SEC)
+      |       ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h: In function ‘_msecs_to_jiffies’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: error: ‘CONFIG_HZ’ undeclared (first use in this function); did you mean ‘CONFIG_SMP’?
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:517:13: note: in expansion of macro ‘HZ’
+  517 |         if (HZ > MSEC_PER_SEC && m > jiffies_to_msecs(MAX_JIFFY_OFFSET))
+      |             ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h: At top level:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: warning: ‘CONFIG_HZ’ is not defined, evaluates to ‘0’ [-Wundef]
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:575:22: note: in expansion of macro ‘HZ’
+  575 | #if !(USEC_PER_SEC % HZ)
+      |                      ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/jiffies.h:575:20: error: division by zero in #if
+  575 | #if !(USEC_PER_SEC % HZ)
+      |                    ^
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/notifier.h:16,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/memory_hotplug.h:7,
+                 from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/mmzone.h:1614:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/srcu.h:87:2: error: #error "Unknown SRCU implementation specified to kernel configuration"
+   87 | #error "Unknown SRCU implementation specified to kernel configuration"
+      |  ^~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/srcu.h: In function ‘__srcu_read_lock_nmisafe’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/srcu.h:140:16: error: implicit declaration of function ‘__srcu_read_lock’; did you mean ‘__rcu_read_lock’? [-Wimplicit-function-declaration]
+  140 |         return __srcu_read_lock(ssp);
+      |                ^~~~~~~~~~~~~~~~
+      |                __rcu_read_lock
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/srcu.h: In function ‘srcu_read_lock’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/srcu.h:292:9: error: implicit declaration of function ‘srcu_check_read_flavor’ [-Wimplicit-function-declaration]
+  292 |         srcu_check_read_flavor(ssp, SRCU_READ_FLAVOR_NORMAL);
+      |         ^~~~~~~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/srcu.h: In function ‘srcu_read_lock_fast’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/srcu.h:331:18: error: implicit declaration of function ‘__srcu_read_lock_fast’; did you mean ‘srcu_read_lock_fast’? [-Wimplicit-function-declaration]
+  331 |         retval = __srcu_read_lock_fast(ssp);
+      |                  ^~~~~~~~~~~~~~~~~~~~~
+      |                  srcu_read_lock_fast
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/srcu.h: In function ‘srcu_read_lock_fast_updown’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/srcu.h:371:18: error: implicit declaration of function ‘__srcu_read_lock_fast_updown’; did you mean ‘srcu_read_lock_fast_updown’? [-Wimplicit-function-declaration]
+  371 |         retval = __srcu_read_lock_fast_updown(ssp);
+      |                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |                  srcu_read_lock_fast_updown
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/srcu.h: In function ‘srcu_read_unlock_fast’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/srcu.h:502:9: error: implicit declaration of function ‘__srcu_read_unlock_fast’; did you mean ‘srcu_read_unlock_fast’? [-Wimplicit-function-declaration]
+  502 |         __srcu_read_unlock_fast(ssp, scp);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~
+      |         srcu_read_unlock_fast
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/srcu.h: In function ‘srcu_read_unlock_fast_updown’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/srcu.h:518:9: error: implicit declaration of function ‘__srcu_read_unlock_fast_updown’; did you mean ‘srcu_read_unlock_fast_updown’? [-Wimplicit-function-declaration]
+  518 |         __srcu_read_unlock_fast_updown(ssp, scp);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |         srcu_read_unlock_fast_updown
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/notifier.h: At top level:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/notifier.h:76:27: error: field ‘srcuu’ has incomplete type
+   76 |         struct srcu_usage srcuu;
+      |                           ^~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/notifier.h:77:28: error: field ‘srcu’ has incomplete type
+   77 |         struct srcu_struct srcu;
+      |                            ^~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/gfp.h: In function ‘gfp_zone’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/gfp.h:136:27: warning: left shift count >= width of type [-Wshift-count-overflow]
+  136 |         | (OPT_ZONE_DMA32 << (___GFP_MOVABLE | ___GFP_DMA32) * GFP_ZONES_SHIFT)\
+      |                           ^~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/gfp.h:161:14: note: in expansion of macro ‘GFP_ZONE_TABLE’
+  161 |         z = (GFP_ZONE_TABLE >> (bit * GFP_ZONES_SHIFT)) &
+      |              ^~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/sched/mm.h: In function ‘memalloc_retry_wait’:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/param.h:8:25: error: ‘CONFIG_HZ’ undeclared (first use in this function); did you mean ‘CONFIG_SMP’?
+    8 | # define HZ             CONFIG_HZ       /* Internal kernel timer frequency */
+      |                         ^~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/sched/mm.h:304:37: note: in expansion of macro ‘HZ’
+  304 |                 io_schedule_timeout(HZ/50);
+      |                                     ^~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/module.h:34:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/module.h: At top level:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/module.h:15:8: error: redefinition of ‘struct mod_arch_specific’
+   15 | struct mod_arch_specific {
+      |        ^~~~~~~~~~~~~~~~~
+In file included from /usr/src/linux-headers-7.2.6-1-liquorix-amd64/arch/x86/include/asm/module.h:5:
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/module.h:10:8: note: originally defined here
+   10 | struct mod_arch_specific
+      |        ^~~~~~~~~~~~~~~~~
+In file included from src/kernel/main.c:3:
+src/kernel/../../staging_includes/fabriczc_staging.h:18:39: error: conflicting types for ‘atomic64_t’; have ‘struct <anonymous>’
+   18 | typedef struct { long long counter; } atomic64_t;
+      |                                       ^~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/asm-generic/atomic64.h:14:3: note: previous declaration of ‘atomic64_t’ with type ‘atomic64_t’
+   14 | } atomic64_t;
+      |   ^~~~~~~~~~
+src/kernel/../../staging_includes/fabriczc_staging.h:19:33: error: conflicting types for ‘atomic_t’; have ‘struct <anonymous>’
+   19 | typedef struct { int counter; } atomic_t;
+      |                                 ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/types.h:188:3: note: previous declaration of ‘atomic_t’ with type ‘atomic_t’
+  188 | } atomic_t;
+      |   ^~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/printk.h:481:10: error: expected identifier or ‘(’ before ‘{’ token
+  481 |         ({                                                              \
+      |          ^
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/printk.h:511:26: note: in expansion of macro ‘printk_index_wrap’
+  511 | #define printk(fmt, ...) printk_index_wrap(_printk, fmt, ##__VA_ARGS__)
+      |                          ^~~~~~~~~~~~~~~~~
+/usr/src/linux-headers-7.2.6-1-liquorix-amd64/include/linux/printk.h:584:9: note: in expansion of macro ‘printk’
+  584 |         printk(KERN_INFO pr_fmt(fmt), ##__VA_ARGS__)
+      |         ^~~~~~
+src/kernel/main.c:6:12: note: in expansion of macro ‘pr_info’
+    6 | extern int pr_info(const char *fmt, ...);
+      |            ^~~~~~~
+src/kernel/main.c:8:6: warning: no previous prototype for ‘fabriczc_spoof_xfs_superblock’ [-Wmissing-prototypes]
+    8 | void fabriczc_spoof_xfs_superblock(u8 *buffer_destination)
+      |      ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/kernel/main.c:18:5: warning: no previous prototype for ‘fabriczc_translate_sgl_to_p2p’ [-Wmissing-prototypes]
+   18 | u32 fabriczc_translate_sgl_to_p2p(const struct fabriczc_sgl_descriptor_vector *vector,
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/kernel/main.c:39:5: warning: no previous prototype for ‘fabriczc_map_linear_extent’ [-Wmissing-prototypes]
+   39 | u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_table *table, u32 *out_disk_idx)
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~
+make[4]: *** [/usr/src/linux-headers-7.2.6-1-liquorix-amd64/scripts/Makefile.build:289: src/kernel/main.o] Error 1
+make[3]: *** [/usr/src/linux-headers-7.2.6-1-liquorix-amd64/Makefile:2213: .] Error 2
+make[2]: *** [/usr/src/linux-headers-7.2.6-1-liquorix-amd64/Makefile:248: __sub-make] Error 2
+make[2]: Leaving directory '/home/chazz/experimental/amd-raid-driver/FabricZC'
+make[1]: *** [Makefile:248: __sub-make] Error 2
+make[1]: Leaving directory '/usr/src/linux-headers-7.2.6-1-liquorix-amd64'
+make: *** [Makefile:7: all] Error 2
