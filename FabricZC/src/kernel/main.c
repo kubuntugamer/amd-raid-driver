@@ -18,8 +18,8 @@ static struct gendisk *fabriczc_disk = NULL;
 static struct blk_mq_tag_set fabriczc_tag_set;
 
 /* Array matrices to track open handles of the underlying virtual storage devices */
-static struct bdev_handle *member_handles[4] = {NULL, NULL, NULL, NULL};
-static struct block_device *member_bdevs[4] = {NULL, NULL, NULL, NULL};
+static struct bdev_handle *member_handles = {NULL, NULL, NULL, NULL};
+static struct block_device *member_bdevs = {NULL, NULL, NULL, NULL};
 
 static const struct block_device_operations fabriczc_fops = {
     .owner = THIS_MODULE,
@@ -116,7 +116,7 @@ static int __init fabriczc_init(void)
     struct queue_limits limits;
     sector_t total_array_sectors;
     int ret, i;
-    char path[64];
+    char path[32]; /* Explicitly allocate 32-byte tracking string buffer array footprint */
 
     printk(KERN_INFO "FabricZC Standalone: Universal 4-Disk RAID 0 Engine + Dynamic Geometry Mapping Initializing.\n");
 
