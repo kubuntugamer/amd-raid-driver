@@ -7,6 +7,7 @@
 #include <linux/highmem.h>
 #include <linux/bio.h>
 #include <linux/version.h>
+#include <linux/file.h>
 #include <asm/byteorder.h>
 #include "../../staging_includes/fabriczc_staging.h"
 
@@ -17,14 +18,15 @@ static int fabriczc_major_id = 0;
 static struct gendisk *fabriczc_disk = NULL;
 static struct blk_mq_tag_set fabriczc_tag_set;
 
-/* Array matrix to track open handles of the underlying virtual storage devices safely */
+/* Array matrices to track open handles of the underlying virtual storage devices safely using modern file-backed API */
+static struct file *member_files[4] = {NULL, NULL, NULL, NULL};
 static struct block_device *member_bdevs[4] = {NULL, NULL, NULL, NULL};
 
 static const struct block_device_operations fabriczc_fops = {
     .owner = THIS_MODULE,
 };
 
-/* Forward prototypes to satisfy strict compiler warning parameters */
+/* Explicit prototypes to clear strict missing-declaration warnings */
 u32 fabriczc_translate_sgl_to_p2p(const struct fabriczc_sgl_descriptor_vector *vector, 
                                   const struct fabriczc_subsystem_matrix *matrix);
 u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_table *table, u32 *out_disk_idx);
@@ -67,8 +69,7 @@ u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_
 }
 
 /**
- * fabriczc_queue_rq - Production Multi-Queue Request Processor Loop
- * Dynamically forwards incoming request structures straight down to active member disks.
+ * fabriczc_queue_rq - Hardened Production Multi-Queue Request Processor Loop
  */
 static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd)
 {
@@ -96,14 +97,7 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
         struct bio *clone_bio;
 
         /* Allocate an independent metadata clone shell container mapping to the target hardware disk */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
         clone_bio = bio_alloc_clone(member_bdevs[target_disk_idx], bio, GFP_ATOMIC, &fs_bio_set);
-#else
-        clone_bio = bio_clone_fast(bio, GFP_ATOMIC, &fs_bio_set);
-        if (clone_bio) {
-            bio_set_dev(clone_bio, member_bdevs[target_disk_idx]);
-        }
-#endif
 
         if (clone_bio) {
             submit_bio_noacct(clone_bio);
@@ -126,23 +120,23 @@ static int __init fabriczc_init(void)
     struct queue_limits limits;
     sector_t total_array_sectors;
     int ret, i;
-    char path[32]; /* Correctly size local array tracking path buffer bounds */
+    char path[32];
 
     printk(KERN_INFO "FabricZC Standalone: Universal 4-Disk RAID 0 Engine + Dynamic Geometry Mapping Initializing.\n");
 
-    /* 1. Open and secure structural tracking reference locks for all 4 underlying 10.2 GB disks */
+    /* 1. Open and secure structural tracking reference locks safely using the modern file-backed block interface */
     for (i = 0; i < 4; i++) {
         snprintf(path, sizeof(path), "/dev/nvme0n%d", i + 1);
         
-        /* Fall back to standard, stable blkdev_get_by_path interfaces for the 7.0.0-14 headers */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
-        member_bdevs[i] = blkdev_get_by_path(path, FMODE_READ | FMODE_WRITE, THIS_MODULE, NULL);
-#else
-        member_bdevs[i] = blkdev_get_by_path(path, FMODE_READ | FMODE_WRITE, THIS_MODULE);
-#endif
-        if (IS_ERR(member_bdevs[i])) {
-            printk(KERN_WARNING "FabricZC Standalone: Warning - could not claim bdev lock on path %s\n", path);
+        /* Modern file-backed block path interface invocation */
+        member_files[i] = bdev_open_by_path(path, BLK_OPEN_READ | BLK_OPEN_WRITE, THIS_MODULE, NULL);
+        if (IS_ERR(member_files[i])) {
+            printk(KERN_WARNING "FabricZC Standalone: Warning - could not claim block device file on %s\n", path);
+            member_files[i] = NULL;
             member_bdevs[i] = NULL;
+        } else {
+            /* Extract the core block_device structure reference from the file descriptor wrapper */
+            member_bdevs[i] = file_bdev(member_files[i]);
         }
     }
 
@@ -151,7 +145,7 @@ static int __init fabriczc_init(void)
     if (fabriczc_major_id < 0) {
         printk(KERN_WARNING "FabricZC Standalone: Failed to register block device major number.\n");
         for (i = 0; i < 4; i++) {
-            if (member_bdevs[i]) blkdev_put(member_bdevs[i], FMODE_READ | FMODE_WRITE);
+            if (member_files[i]) fput(member_files[i]);
         }
         return fabriczc_major_id;
     }
@@ -167,7 +161,7 @@ static int __init fabriczc_init(void)
     if (blk_mq_alloc_tag_set(&fabriczc_tag_set)) {
         unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
         for (i = 0; i < 4; i++) {
-            if (member_bdevs[i]) blkdev_put(member_bdevs[i], FMODE_READ | FMODE_WRITE);
+            if (member_files[i]) fput(member_files[i]);
         }
         return -ENOMEM;
     }
@@ -176,20 +170,19 @@ static int __init fabriczc_init(void)
     memset(&limits, 0, sizeof(limits));
     blk_set_stacking_limits(&limits);
 
-    /* Allocate disk configuration profile using the queue limit metrics block pointer */
     fabriczc_disk = blk_mq_alloc_disk(&fabriczc_tag_set, &limits, NULL);
     if (IS_ERR(fabriczc_disk)) {
         blk_mq_free_tag_set(&fabriczc_tag_set);
         unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
         for (i = 0; i < 4; i++) {
-            if (member_bdevs[i]) blkdev_put(member_bdevs[i], FMODE_READ | FMODE_WRITE);
+            if (member_files[i]) fput(member_files[i]);
         }
         return PTR_ERR(fabriczc_disk);
     }
 
     fabriczc_disk->major = fabriczc_major_id;
     fabriczc_disk->first_minor = 0;
-    fabriczc_disk->minors = FABRICZC_MINORS;
+    fabriczc_disk->minors = FABRICZC_MINORS; /* Bind partition mapping features natively */
     fabriczc_disk->fops = &fabriczc_fops;
     fabriczc_disk->private_data = NULL;
     snprintf(fabriczc_disk->disk_name, 32, "rcraid0");
@@ -204,7 +197,7 @@ static int __init fabriczc_init(void)
         blk_mq_free_tag_set(&fabriczc_tag_set);
         unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
         for (i = 0; i < 4; i++) {
-            if (member_bdevs[i]) blkdev_put(member_bdevs[i], FMODE_READ | FMODE_WRITE);
+            if (member_files[i]) fput(member_files[i]);
         }
         return ret;
     }
@@ -223,10 +216,10 @@ static void __exit fabriczc_exit(void)
     blk_mq_free_tag_set(&fabriczc_tag_set);
     if (fabriczc_major_id > 0) unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
 
-    /* Clean de-allocation sequence using stable block reference drops */
+    /* Clean de-allocation sequence using the modern file descriptor release system */
     for (i = 0; i < 4; i++) {
-        if (member_bdevs[i]) {
-            blkdev_put(member_bdevs[i], FMODE_READ | FMODE_WRITE);
+        if (member_files[i]) {
+            fput(member_files[i]);
         }
     }
 
@@ -236,4 +229,5 @@ static void __exit fabriczc_exit(void)
 module_init(fabriczc_init);
 module_exit(fabriczc_exit);
 
+MODULE_DESCRIPTION("FabricZC Multi-Queue RAID0 Device Driver");
 MODULE_LICENSE("GPL");
