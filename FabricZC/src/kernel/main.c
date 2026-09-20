@@ -19,8 +19,8 @@ static struct gendisk *fabriczc_disk = NULL;
 static struct blk_mq_tag_set fabriczc_tag_set;
 
 /* Array matrices to track open handles of the underlying virtual storage devices safely using modern file-backed API */
-static struct file *member_files[4] = {NULL, NULL, NULL, NULL};
-static struct block_device *member_bdevs[4] = {NULL, NULL, NULL, NULL};
+static struct file *member_files = {NULL, NULL, NULL, NULL};
+static struct block_device *member_bdevs = {NULL, NULL, NULL, NULL};
 
 static const struct block_device_operations fabriczc_fops = {
     .owner = THIS_MODULE,
@@ -44,7 +44,7 @@ u32 fabriczc_translate_sgl_to_p2p(const struct fabriczc_sgl_descriptor_vector *v
 
     for (idx = 0; idx < vector->total_segments; ++idx) {
         struct fabriczc_sgl_segment *seg = &vector->segments[idx];
-        u32 target_device_idx = (u32)((seg->host_logical_sector / FABRICZC_CHUNK_SECTORS) % current_disk_count);
+        u32 target_device_idx = (u32)((seg->host_logical_sector / (u64)FABRICZC_CHUNK_SECTORS) % current_disk_count);
         printk(KERN_INFO "FabricZC Standalone: [RAID0] Seg [%u] mapped across VDI Target Port Index [%u]\n", 
                seg->segment_id, target_device_idx);
         processed_count++;
@@ -69,8 +69,8 @@ u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_
 }
 
 /**
- * fabriczc_queue_rq - Production Multi-Queue Request Processor Loop
- * Dynamically scales global sector addresses down to member capacities and dispatches cloned BIO structures.
+ * fabriczc_queue_rq - Hardened Production Multi-Queue Request Processor Loop
+ * Protects sector coordinates by enforcing strict 64-bit unsigned type casting macros.
  */
 static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd)
 {
@@ -93,8 +93,8 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
 
     base_sector = blk_rq_pos(rq);
     
-    /* Phase 4 Interleaving Pass-Through Matrix Routing Calculation */
-    target_disk_idx = (u32)((base_sector / FABRICZC_CHUNK_SECTORS) % 4);
+    /* Enforce 64-bit unsigned type casting rules across chunk interleaving calculation steps */
+    target_disk_idx = (u32)(((u64)base_sector / (u64)FABRICZC_CHUNK_SECTORS) % 4);
 
     if (member_bdevs[target_disk_idx]) {
         struct bio *clone_bio;
@@ -103,9 +103,12 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
         clone_bio = bio_alloc_clone(member_bdevs[target_disk_idx], bio, GFP_ATOMIC, &fs_bio_set);
 
         if (clone_bio) {
-            /* Fix: Scale high global array sectors down to valid member drive capacities 
-             * via block chunk-interleaved offset math */
-            sector_t local_sector = (base_sector / 4) + (base_sector % FABRICZC_CHUNK_SECTORS);
+            /* Fix: Cast all block segment elements to absolute 64-bit unsigned types 
+             * to clear standard integer truncation errors across high array sector boundaries */
+            u64 chunk_idx = (u64)base_sector / ((u64)FABRICZC_CHUNK_SECTORS * 4);
+            u64 chunk_offset = (u64)base_sector % (u64)FABRICZC_CHUNK_SECTORS;
+            sector_t local_sector = (sector_t)((chunk_idx * (u64)FABRICZC_CHUNK_SECTORS) + chunk_offset);
+            
             clone_bio->bi_iter.bi_sector = local_sector;
 
             /* Redirect the cloned block stream straight down into the native disk queue managers */
@@ -239,5 +242,5 @@ static void __exit fabriczc_exit(void)
 module_init(fabriczc_init);
 module_exit(fabriczc_exit);
 
-MODULE_DESCRIPTION("FabricZC Multi-Queue RAID0 Device Driver with Stripe Coordinate Translation");
+MODULE_DESCRIPTION("FabricZC Multi-Queue RAID0 Device Driver with 64-bit Segment Coordinate Translation");
 MODULE_LICENSE("GPL");
