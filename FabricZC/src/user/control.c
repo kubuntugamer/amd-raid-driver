@@ -58,7 +58,7 @@ int main(int argc, char *argv[]) {
         uint32_t mock_header[12] = {0x00000001, 0x00000000, 0x48435a21, 0xAABBCCDD, 0x00000000, 0x01080001, 0x00000800, 0, 0, 0, 0, 0};
         uint64_t checksum = simulate_fletcher64(mock_header, 12);
         printf("  [MATH] Computing active metadata checkpoint checksum signatures...\n");
-        printf("    -> Fletcher-64 Computed Checksum Block: 0x%%016llX\n", (unsigned long long)checksum);
+        printf("    -> Fletcher-64 Computed Checksum Block: 0x%016llX\n", (unsigned long long)checksum);
         printf("    -> State Machine Key Signature Flag Detected: 0x48435a21 (\"!ZCH\")\n");
         printf("    -> Current Container Pool Array Status: Healthy / Clean Unmount Certified\n");
     }
