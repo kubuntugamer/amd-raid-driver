@@ -11,7 +11,7 @@
 #include "../../staging_includes/fabriczc_staging.h"
 
 #define DEVICE_NAME "rcraid"
-#define FABRICZC_MINORS 16  /* Support complete partitioning trees (rcraid0p1, rcraid0p2) */
+#define FABRICZC_MINORS 16  /* Support complete partitioning allocations (rcraid0p1, rcraid0p2) */
 
 static int fabriczc_major_id = 0;
 static struct gendisk *fabriczc_disk = NULL;
@@ -24,6 +24,11 @@ static struct block_device *member_bdevs[4] = {NULL, NULL, NULL, NULL};
 static const struct block_device_operations fabriczc_fops = {
     .owner = THIS_MODULE,
 };
+
+/* Forward prototypes to satisfy strict compiler warning parameters */
+u32 fabriczc_translate_sgl_to_p2p(const struct fabriczc_sgl_descriptor_vector *vector, 
+                                  const struct fabriczc_subsystem_matrix *matrix);
+u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_table *table, u32 *out_disk_idx);
 
 u32 fabriczc_translate_sgl_to_p2p(const struct fabriczc_sgl_descriptor_vector *vector, 
                                   const struct fabriczc_subsystem_matrix *matrix)
@@ -111,7 +116,7 @@ static int __init fabriczc_init(void)
     struct queue_limits limits;
     sector_t total_array_sectors;
     int ret, i;
-    char path[64];
+    char path[32];
 
     printk(KERN_INFO "FabricZC Standalone: Universal 4-Disk RAID 0 Engine + Dynamic Geometry Mapping Initializing.\n");
 
