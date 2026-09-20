@@ -69,17 +69,25 @@ u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_
 }
 
 /**
- * fabriczc_queue_rq - Hardened Production Multi-Queue Request Processor Loop
- * Protects sector coordinates by enforcing strict 64-bit unsigned type casting macros.
+ * fabriczc_bio_end_io - Asynchronous Block I/O Completion Callback Handler
+ * Signals real, hardware-synchronized transaction success back to the request queue.
  */
-static void fabriczc_clone_endio(struct bio *clone_bio)
+static void fabriczc_bio_end_io(struct bio *clone_bio)
 {
     struct request *rq = clone_bio->bi_private;
-    blk_status_t status = clone_bio->bi_status;
+    blk_status_t status = errno_to_blk_status(clone_bio->bi_status);
+
+    /* Free the cloned metadata container wrapper out of kernel memory pools */
     bio_put(clone_bio);
+
+    /* Safely tell the operating system the hardware write/read has securely completed */
     blk_mq_end_request(rq, status);
 }
 
+/**
+ * fabriczc_queue_rq - Production Multi-Queue Request Processor Loop
+ * Selectively links asynchronous end-I/O callback intercepts to ensure data block synchronization.
+ */
 static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd)
 {
     struct request *rq = bd->rq;
@@ -90,8 +98,7 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
     blk_mq_start_request(rq);
 
     if (!rq) {
-        blk_mq_end_request(rq, BLK_STS_IOERR);
-        return BLK_STS_OK;
+        return BLK_STS_IOERR;
     }
 
     bio = rq->bio;
@@ -107,25 +114,29 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
         struct bio *clone_bio;
 
         clone_bio = bio_alloc_clone(member_bdevs[target_disk_idx], bio, GFP_ATOMIC, &fs_bio_set);
-        if (clone_bio) {
-            clone_bio->bi_private = rq;
-            clone_bio->bi_end_io = fabriczc_clone_endio;
-            bio_set_dev(clone_bio, member_bdevs[target_disk_idx]);
 
+        if (clone_bio) {
             u64 chunk_idx = (u64)base_sector / ((u64)FABRICZC_CHUNK_SECTORS * 4);
             u64 chunk_offset = (u64)base_sector % (u64)FABRICZC_CHUNK_SECTORS;
             sector_t local_sector = (sector_t)((chunk_idx * (u64)FABRICZC_CHUNK_SECTORS) + chunk_offset);
             
             clone_bio->bi_iter.bi_sector = local_sector;
+
+            /* Intercept completion signaling by attaching our custom end-I/O function context */
+            clone_bio->bi_private = rq;
+            clone_bio->bi_end_io = fabriczc_bio_end_io;
+
+            /* Redirect the cloned block stream straight down into the native disk queue managers */
             submit_bio_noacct(clone_bio);
             return BLK_STS_OK;
         } else {
-            return BLK_STS_RESOURCE;
+            blk_mq_end_request(rq, BLK_STS_RESOURCE);
+            return BLK_STS_OK;
         }
-    } else {
-        blk_mq_end_request(rq, BLK_STS_IOERR);
-        return BLK_STS_OK;
     }
+
+    blk_mq_end_request(rq, BLK_STS_IOERR);
+    return BLK_STS_OK;
 }
 
 static const struct blk_mq_ops fabriczc_mq_ops = {
@@ -145,14 +156,12 @@ static int __init fabriczc_init(void)
     for (i = 0; i < 4; i++) {
         snprintf(path, sizeof(path), "/dev/nvme0n%d", i + 1);
         
-        /* Modern 6.11+ file-backed block path interface invocation */
         member_files[i] = bdev_file_open_by_path(path, BLK_OPEN_READ | BLK_OPEN_WRITE, THIS_MODULE, NULL);
         if (IS_ERR(member_files[i])) {
             printk(KERN_WARNING "FabricZC Standalone: Warning - could not claim block device file on %s\n", path);
             member_files[i] = NULL;
             member_bdevs[i] = NULL;
         } else {
-            /* Extract the core block_device structure reference from the file descriptor wrapper */
             member_bdevs[i] = file_bdev(member_files[i]);
         }
     }
@@ -204,9 +213,7 @@ static int __init fabriczc_init(void)
     fabriczc_disk->private_data = NULL;
     snprintf(fabriczc_disk->disk_name, 32, "rcraid0");
 
-    /* Map aggregate capacities dynamically to match your 4 attached 10.19 GB virtual drives perfectly */
-    /* (Fix: Sync to absolute hardware capacity limit: exactly 21369978 sectors per disk node) */
-    total_array_sectors = (sector_t)85463040; /* Forced chunk-row aligned safety limit: 10432 rows * 8192 sectors */
+    total_array_sectors = (sector_t)4 * 21369978;
     set_capacity(fabriczc_disk, total_array_sectors); 
 
     /* 5. Activate storage device node inside live system tree */
@@ -248,5 +255,5 @@ static void __exit fabriczc_exit(void)
 module_init(fabriczc_init);
 module_exit(fabriczc_exit);
 
-MODULE_DESCRIPTION("FabricZC Multi-Queue RAID0 Device Driver with 64-bit Segment Coordinate Translation");
+MODULE_DESCRIPTION("FabricZC Multi-Queue RAID0 Device Driver with Asynchronous End-I/O Synchronization");
 MODULE_LICENSE("GPL");
