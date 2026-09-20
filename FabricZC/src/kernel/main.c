@@ -18,9 +18,9 @@ static int fabriczc_major_id = 0;
 static struct gendisk *fabriczc_disk = NULL;
 static struct blk_mq_tag_set fabriczc_tag_set;
 
-/* Array matrices to track open handles of the underlying virtual storage devices safely using modern file-backed API */
-static struct file *member_files = {NULL, NULL, NULL, NULL};
-static struct block_device *member_bdevs = {NULL, NULL, NULL, NULL};
+/* Array matrices properly declared as explicit arrays of 4 object pointers */
+static struct file *member_files[4] = {NULL, NULL, NULL, NULL};
+static struct block_device *member_bdevs[4] = {NULL, NULL, NULL, NULL};
 
 static const struct block_device_operations fabriczc_fops = {
     .owner = THIS_MODULE,
@@ -39,7 +39,7 @@ u32 fabriczc_translate_sgl_to_p2p(const struct fabriczc_sgl_descriptor_vector *v
     u32 idx;
 
     if (!vector || !matrix || vector->total_segments == 0) return 0;
-    current_disk_count = matrix->master_hdr.total_active_disks; /* Corrected structural element naming name */
+    current_disk_count = matrix->master_hdr.total_active_disks;
     if (current_disk_count == 0) current_disk_count = 4;
 
     for (idx = 0; idx < vector->total_segments; ++idx) {
@@ -120,7 +120,7 @@ static int __init fabriczc_init(void)
     struct queue_limits limits;
     sector_t total_array_sectors;
     int ret, i;
-    char path[32]; /* Correctly sized local string array container bounds */
+    char path[32]; /* Corrected stack-allocated character array buffer size */
 
     printk(KERN_INFO "FabricZC Standalone: Universal 4-Disk RAID 0 Engine + Dynamic Geometry Mapping Initializing.\n");
 
