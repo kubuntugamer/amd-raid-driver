@@ -39,7 +39,7 @@ u32 fabriczc_translate_sgl_to_p2p(const struct fabriczc_sgl_descriptor_vector *v
     u32 idx;
 
     if (!vector || !matrix || vector->total_segments == 0) return 0;
-    current_disk_count = matrix->master_hdr.total_active_disks;
+    current_disk_count = matrix->master_hdr.total_active_dis_count;
     if (current_disk_count == 0) current_disk_count = 4;
 
     for (idx = 0; idx < vector->total_segments; ++idx) {
@@ -128,8 +128,8 @@ static int __init fabriczc_init(void)
     for (i = 0; i < 4; i++) {
         snprintf(path, sizeof(path), "/dev/nvme0n%d", i + 1);
         
-        /* Modern file-backed block path interface invocation */
-        member_files[i] = bdev_open_by_path(path, BLK_OPEN_READ | BLK_OPEN_WRITE, THIS_MODULE, NULL);
+        /* Modern 6.11+ file-backed block path interface invocation */
+        member_files[i] = bdev_file_open_by_path(path, BLK_OPEN_READ | BLK_OPEN_WRITE, THIS_MODULE, NULL);
         if (IS_ERR(member_files[i])) {
             printk(KERN_WARNING "FabricZC Standalone: Warning - could not claim block device file on %s\n", path);
             member_files[i] = NULL;
