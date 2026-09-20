@@ -11,13 +11,14 @@
 #include "../../staging_includes/fabriczc_staging.h"
 
 #define DEVICE_NAME "rcraid"
-#define FABRICZC_MINORS 16  /* Support full partitioning allocations (rcraid0p1, rcraid0p2) */
+#define FABRICZC_MINORS 16  /* Support complete partitioning trees (rcraid0p1, rcraid0p2) */
 
 static int fabriczc_major_id = 0;
 static struct gendisk *fabriczc_disk = NULL;
 static struct blk_mq_tag_set fabriczc_tag_set;
 
-/* Array matrix to track open handles of the underlying virtual storage devices */
+/* Array matrices to track open handles of the underlying virtual storage devices */
+static struct bdev_handle *member_handles[4] = {NULL, NULL, NULL, NULL};
 static struct block_device *member_bdevs[4] = {NULL, NULL, NULL, NULL};
 
 static const struct block_device_operations fabriczc_fops = {
@@ -87,14 +88,7 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
         struct bio *clone_bio;
 
         /* Allocate an independent metadata clone shell container mapping to the target hardware disk */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
         clone_bio = bio_alloc_clone(member_bdevs[target_disk_idx], bio, GFP_ATOMIC, &fs_bio_set);
-#else
-        clone_bio = bio_clone_fast(bio, GFP_ATOMIC, &fs_bio_set);
-        if (clone_bio) {
-            bio_set_dev(clone_bio, member_bdevs[target_disk_idx]);
-        }
-#endif
 
         if (clone_bio) {
             submit_bio_noacct(clone_bio);
@@ -117,7 +111,7 @@ static int __init fabriczc_init(void)
     struct queue_limits limits;
     sector_t total_array_sectors;
     int ret, i;
-    char path[32];
+    char path[64];
 
     printk(KERN_INFO "FabricZC Standalone: Universal 4-Disk RAID 0 Engine + Dynamic Geometry Mapping Initializing.\n");
 
@@ -125,15 +119,14 @@ static int __init fabriczc_init(void)
     for (i = 0; i < 4; i++) {
         snprintf(path, sizeof(path), "/dev/nvme0n%d", i + 1);
         
-        /* Fall back to standard, rock-solid blkdev_get_by_path interfaces for the 7.0.0-14 headers */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
-        member_bdevs[i] = blkdev_get_by_path(path, FMODE_READ | FMODE_WRITE, THIS_MODULE, NULL);
-#else
-        member_bdevs[i] = blkdev_get_by_path(path, FMODE_READ | FMODE_WRITE, THIS_MODULE);
-#endif
-        if (IS_ERR(member_bdevs[i])) {
-            printk(KERN_WARNING "FabricZC Standalone: Warning - could not claim bdev lock on path %s\n", path);
+        /* Modern 6.8+ block path interface allocation mapping */
+        member_handles[i] = bdev_open_by_path(path, BLK_OPEN_READ | BLK_OPEN_WRITE, THIS_MODULE, NULL);
+        if (IS_ERR(member_handles[i])) {
+            printk(KERN_WARNING "FabricZC Standalone: Warning - could not claim bdev handle on %s\n", path);
+            member_handles[i] = NULL;
             member_bdevs[i] = NULL;
+        } else {
+            member_bdevs[i] = member_handles[i]->bdev;
         }
     }
 
@@ -203,10 +196,10 @@ static void __exit fabriczc_exit(void)
     blk_mq_free_tag_set(&fabriczc_tag_set);
     if (fabriczc_major_id > 0) unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
 
-    /* Release backend disk device reference blocks out of kernel memory loop */
+    /* Release backend disk device reference blocks out of modern kernel memory */
     for (i = 0; i < 4; i++) {
-        if (member_bdevs[i]) {
-            blkdev_put(member_bdevs[i], FMODE_READ | FMODE_WRITE);
+        if (member_handles[i]) {
+            bdev_release(member_handles[i]);
         }
     }
 
