@@ -17,15 +17,14 @@ static int fabriczc_major_id = 0;
 static struct gendisk *fabriczc_disk = NULL;
 static struct blk_mq_tag_set fabriczc_tag_set;
 
-/* Array matrices to track open handles of the underlying virtual storage devices safely */
-static struct bdev_handle *member_handles[4] = {NULL, NULL, NULL, NULL};
+/* Array matrix to track open handles of the underlying virtual storage devices safely */
 static struct block_device *member_bdevs[4] = {NULL, NULL, NULL, NULL};
 
 static const struct block_device_operations fabriczc_fops = {
     .owner = THIS_MODULE,
 };
 
-/* Explicit prototypes to clear strict missing-declaration warnings */
+/* Forward prototypes to satisfy strict compiler warning parameters */
 u32 fabriczc_translate_sgl_to_p2p(const struct fabriczc_sgl_descriptor_vector *vector, 
                                   const struct fabriczc_subsystem_matrix *matrix);
 u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_table *table, u32 *out_disk_idx);
@@ -68,8 +67,8 @@ u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_
 }
 
 /**
- * fabriczc_queue_rq - Hardened Production Multi-Queue Request Processor Loop
- * Protects memory page bounds and dynamically clones incoming payloads without atomic deadlocks.
+ * fabriczc_queue_rq - Production Multi-Queue Request Processor Loop
+ * Dynamically forwards incoming request structures straight down to active member disks.
  */
 static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd)
 {
@@ -80,7 +79,6 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
 
     blk_mq_start_request(rq);
 
-    /* Guard point: Validate request memory structures before extraction to prevent Null panics */
     if (!rq) {
         return BLK_STS_IOERR;
     }
@@ -92,18 +90,22 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
     }
 
     base_sector = blk_rq_pos(rq);
-    
-    /* Phase 4 Interleaving Pass-Through Matrix Routing Calculation */
     target_disk_idx = (u32)((base_sector / FABRICZC_CHUNK_SECTORS) % 4);
 
     if (member_bdevs[target_disk_idx]) {
         struct bio *clone_bio;
 
         /* Allocate an independent metadata clone shell container mapping to the target hardware disk */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
         clone_bio = bio_alloc_clone(member_bdevs[target_disk_idx], bio, GFP_ATOMIC, &fs_bio_set);
+#else
+        clone_bio = bio_clone_fast(bio, GFP_ATOMIC, &fs_bio_set);
+        if (clone_bio) {
+            bio_set_dev(clone_bio, member_bdevs[target_disk_idx]);
+        }
+#endif
 
         if (clone_bio) {
-            /* Redirect the cloned block stream straight down into the native disk queue managers */
             submit_bio_noacct(clone_bio);
         } else {
             blk_mq_end_request(rq, BLK_STS_RESOURCE);
@@ -124,7 +126,7 @@ static int __init fabriczc_init(void)
     struct queue_limits limits;
     sector_t total_array_sectors;
     int ret, i;
-    char path[32]; /* Bug Fix 1: Properly size array tracking path buffer bounds */
+    char path[32]; /* Correctly size local array tracking path buffer bounds */
 
     printk(KERN_INFO "FabricZC Standalone: Universal 4-Disk RAID 0 Engine + Dynamic Geometry Mapping Initializing.\n");
 
@@ -132,14 +134,15 @@ static int __init fabriczc_init(void)
     for (i = 0; i < 4; i++) {
         snprintf(path, sizeof(path), "/dev/nvme0n%d", i + 1);
         
-        /* Modern 6.8+ block path interface allocation mapping with strict array indexing */
-        member_handles[i] = bdev_open_by_path(path, BLK_OPEN_READ | BLK_OPEN_WRITE, THIS_MODULE, NULL);
-        if (IS_ERR(member_handles[i])) {
-            printk(KERN_WARNING "FabricZC Standalone: Warning - could not claim bdev handle on %s\n", path);
-            member_handles[i] = NULL;
+        /* Fall back to standard, stable blkdev_get_by_path interfaces for the 7.0.0-14 headers */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
+        member_bdevs[i] = blkdev_get_by_path(path, FMODE_READ | FMODE_WRITE, THIS_MODULE, NULL);
+#else
+        member_bdevs[i] = blkdev_get_by_path(path, FMODE_READ | FMODE_WRITE, THIS_MODULE);
+#endif
+        if (IS_ERR(member_bdevs[i])) {
+            printk(KERN_WARNING "FabricZC Standalone: Warning - could not claim bdev lock on path %s\n", path);
             member_bdevs[i] = NULL;
-        } else {
-            member_bdevs[i] = member_handles[i]->bdev;
         }
     }
 
@@ -148,7 +151,7 @@ static int __init fabriczc_init(void)
     if (fabriczc_major_id < 0) {
         printk(KERN_WARNING "FabricZC Standalone: Failed to register block device major number.\n");
         for (i = 0; i < 4; i++) {
-            if (member_handles[i]) bdev_release(member_handles[i]);
+            if (member_bdevs[i]) blkdev_put(member_bdevs[i], FMODE_READ | FMODE_WRITE);
         }
         return fabriczc_major_id;
     }
@@ -164,7 +167,7 @@ static int __init fabriczc_init(void)
     if (blk_mq_alloc_tag_set(&fabriczc_tag_set)) {
         unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
         for (i = 0; i < 4; i++) {
-            if (member_handles[i]) bdev_release(member_handles[i]);
+            if (member_bdevs[i]) blkdev_put(member_bdevs[i], FMODE_READ | FMODE_WRITE);
         }
         return -ENOMEM;
     }
@@ -179,20 +182,18 @@ static int __init fabriczc_init(void)
         blk_mq_free_tag_set(&fabriczc_tag_set);
         unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
         for (i = 0; i < 4; i++) {
-            if (member_handles[i]) bdev_release(member_handles[i]);
+            if (member_bdevs[i]) blkdev_put(member_bdevs[i], FMODE_READ | FMODE_WRITE);
         }
         return PTR_ERR(fabriczc_disk);
     }
 
     fabriczc_disk->major = fabriczc_major_id;
     fabriczc_disk->first_minor = 0;
-    fabriczc_disk->minors = FABRICZC_MINORS; /* Bind partition mapping features natively */
+    fabriczc_disk->minors = FABRICZC_MINORS;
     fabriczc_disk->fops = &fabriczc_fops;
     fabriczc_disk->private_data = NULL;
     snprintf(fabriczc_disk->disk_name, 32, "rcraid0");
 
-    /* Real-Time Storage Capacity Mapping: Aggregates total sectors across your 4 attached 10.19 GB devices */
-    /* (10.19 GB * 1024 * 1024 * 1024 / 512 bytes = 21390950 sectors per member disk node) */
     total_array_sectors = (sector_t)4 * 21390950;
     set_capacity(fabriczc_disk, total_array_sectors); 
 
@@ -203,7 +204,7 @@ static int __init fabriczc_init(void)
         blk_mq_free_tag_set(&fabriczc_tag_set);
         unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
         for (i = 0; i < 4; i++) {
-            if (member_handles[i]) bdev_release(member_handles[i]);
+            if (member_bdevs[i]) blkdev_put(member_bdevs[i], FMODE_READ | FMODE_WRITE);
         }
         return ret;
     }
@@ -222,10 +223,10 @@ static void __exit fabriczc_exit(void)
     blk_mq_free_tag_set(&fabriczc_tag_set);
     if (fabriczc_major_id > 0) unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
 
-    /* Bug Fix 4: Clean, leak-free de-allocation sequence using locked handle indexes */
+    /* Clean de-allocation sequence using stable block reference drops */
     for (i = 0; i < 4; i++) {
-        if (member_handles[i]) {
-            bdev_release(member_handles[i]);
+        if (member_bdevs[i]) {
+            blkdev_put(member_bdevs[i], FMODE_READ | FMODE_WRITE);
         }
     }
 
