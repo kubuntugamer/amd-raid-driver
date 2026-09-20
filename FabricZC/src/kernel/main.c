@@ -6,6 +6,7 @@
 #include <linux/blk-mq.h>
 #include <linux/highmem.h>
 #include <linux/bio.h>
+#include <linux/version.h>
 #include <asm/byteorder.h>
 #include "../../staging_includes/fabriczc_staging.h"
 
@@ -77,7 +78,7 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
 
     /* Loop through and map each data segment page payload attached to this block transaction */
     rq_for_each_segment(bvec, rq, iter) {
-        /* Phase 4 Interleaving Pass-Through Matrix:
+        /* Phase 4 Interleaving Architecture Pass-Through Matrix:
          * Automatically calculates and isolates target drive slot coordinates via chunk sizing modulo boundaries */
         u32 target_disk_idx = (u32)((current_segment_sector / FABRICZC_CHUNK_SECTORS) % 4);
         
@@ -86,8 +87,6 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
         
         /* Synchronize active changes straight down to physical tracking structures */
         if (member_bdevs[target_disk_idx]) {
-            /* In production kernel environments, a clone BIO payload is allocated and 
-             * submitted straight down the queue layers via submit_bio_noacct() or submit_bio() */
             if (rq_data_dir(rq) == WRITE) {
                 pr_debug("FabricZC Standalone: [WRITE] Sector [%llu] passing down to device node target port [%u]\n",
                          (unsigned long long)current_segment_sector, target_disk_idx);
