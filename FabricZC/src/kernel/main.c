@@ -72,6 +72,14 @@ u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_
  * fabriczc_queue_rq - Hardened Production Multi-Queue Request Processor Loop
  * Protects sector coordinates by enforcing strict 64-bit unsigned type casting macros.
  */
+static void fabriczc_clone_endio(struct bio *clone_bio)
+{
+    struct request *rq = clone_bio->bi_private;
+    blk_status_t status = clone_bio->bi_status;
+    bio_put(clone_bio);
+    blk_mq_end_request(rq, status);
+}
+
 static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd)
 {
     struct request *rq = bd->rq;
@@ -82,7 +90,8 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
     blk_mq_start_request(rq);
 
     if (!rq) {
-        return BLK_STS_IOERR;
+        blk_mq_end_request(rq, BLK_STS_IOERR);
+        return BLK_STS_OK;
     }
 
     bio = rq->bio;
@@ -92,35 +101,31 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
     }
 
     base_sector = blk_rq_pos(rq);
-    
-    /* Enforce 64-bit unsigned type casting rules across chunk interleaving calculation steps */
     target_disk_idx = (u32)(((u64)base_sector / (u64)FABRICZC_CHUNK_SECTORS) % 4);
 
     if (member_bdevs[target_disk_idx]) {
         struct bio *clone_bio;
 
-        /* Allocate an independent metadata clone shell container mapping to the target hardware disk */
         clone_bio = bio_alloc_clone(member_bdevs[target_disk_idx], bio, GFP_ATOMIC, &fs_bio_set);
-
         if (clone_bio) {
-            /* Fix: Cast all block segment elements to absolute 64-bit unsigned types 
-             * to clear standard integer truncation errors across high array sector boundaries */
+            clone_bio->bi_private = rq;
+            clone_bio->bi_end_io = fabriczc_clone_endio;
+            bio_set_dev(clone_bio, member_bdevs[target_disk_idx]);
+
             u64 chunk_idx = (u64)base_sector / ((u64)FABRICZC_CHUNK_SECTORS * 4);
             u64 chunk_offset = (u64)base_sector % (u64)FABRICZC_CHUNK_SECTORS;
             sector_t local_sector = (sector_t)((chunk_idx * (u64)FABRICZC_CHUNK_SECTORS) + chunk_offset);
             
             clone_bio->bi_iter.bi_sector = local_sector;
-
-            /* Redirect the cloned block stream straight down into the native disk queue managers */
             submit_bio_noacct(clone_bio);
-        } else {
-            blk_mq_end_request(rq, BLK_STS_RESOURCE);
             return BLK_STS_OK;
+        } else {
+            return BLK_STS_RESOURCE;
         }
+    } else {
+        blk_mq_end_request(rq, BLK_STS_IOERR);
+        return BLK_STS_OK;
     }
-
-    blk_mq_end_request(rq, BLK_STS_OK);
-    return BLK_STS_OK;
 }
 
 static const struct blk_mq_ops fabriczc_mq_ops = {
