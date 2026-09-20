@@ -92,50 +92,62 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
 {
     struct request *rq = bd->rq;
     struct bio *bio;
-    sector_t base_sector;
-    u32 target_disk_idx;
+    blk_status_t status = BLK_STS_OK;
 
     blk_mq_start_request(rq);
 
     if (!rq) {
-        return BLK_STS_IOERR;
-    }
-
-    bio = rq->bio;
-    if (!bio) {
-        blk_mq_end_request(rq, BLK_STS_OK);
+        blk_mq_end_request(rq, BLK_STS_IOERR);
         return BLK_STS_OK;
     }
 
-    base_sector = blk_rq_pos(rq);
-    target_disk_idx = (u32)(((u64)base_sector / (u64)FABRICZC_CHUNK_SECTORS) % 4);
+    /* Request Trap: Intercept and fail hardware zeroing optimization commands cleanly */
+    if (req_op(rq) == REQ_OP_WRITE_ZEROES) {
+        blk_mq_end_request(rq, BLK_STS_NOTSUPP);
+        return BLK_STS_OK;
+    }
 
-    if (member_bdevs[target_disk_idx]) {
-        struct bio *clone_bio;
+    /* High-Precision Multi-Bio Iteration: Loop through every bio structure linked inside this request sequence */
+    __rq_for_each_bio(bio, rq) {
+        u64 absolute_sector = (u64)bio->bi_iter.bi_sector;
+        u32 target_disk_idx = (u32)((absolute_sector / (u64)FABRICZC_CHUNK_SECTORS) % 4);
 
-        clone_bio = bio_alloc_clone(member_bdevs[target_disk_idx], bio, GFP_ATOMIC, &fs_bio_set);
+        if (member_bdevs[target_disk_idx]) {
+            struct bio *clone_bio;
 
-        if (clone_bio) {
-            u64 chunk_idx = (u64)base_sector / ((u64)FABRICZC_CHUNK_SECTORS * 4);
-            u64 chunk_offset = (u64)base_sector % (u64)FABRICZC_CHUNK_SECTORS;
-            sector_t local_sector = (sector_t)((chunk_idx * (u64)FABRICZC_CHUNK_SECTORS) + chunk_offset);
-            
-            clone_bio->bi_iter.bi_sector = local_sector;
+            clone_bio = bio_alloc_clone(member_bdevs[target_disk_idx], bio, GFP_ATOMIC, &fs_bio_set);
+            if (clone_bio) {
+                clone_bio->bi_private = rq;
+                clone_bio->bi_end_io = fabriczc_bio_end_io;
+                bio_set_dev(clone_bio, member_bdevs[target_disk_idx]);
 
-            /* Intercept completion signaling by attaching our custom end-I/O function context */
-            clone_bio->bi_private = rq;
-            clone_bio->bi_end_io = fabriczc_bio_end_io;
+                /* RAID 0 Address Coordinate Alignment Pipeline */
+                u64 stripe_row = absolute_sector / ((u64)FABRICZC_CHUNK_SECTORS * 4);
+                u64 intra_chunk_offset = absolute_sector % (u64)FABRICZC_CHUNK_SECTORS;
+                sector_t local_sector = (sector_t)((stripe_row * (u64)FABRICZC_CHUNK_SECTORS) + intra_chunk_offset + 32);
 
-            /* Redirect the cloned block stream straight down into the native disk queue managers */
-            submit_bio_noacct(clone_bio);
-            return BLK_STS_OK;
+                if ((u64)local_sector >= 21369978) {
+                    bio_put(clone_bio);
+                    status = BLK_STS_IOERR;
+                    break;
+                }
+
+                clone_bio->bi_iter.bi_sector = local_sector;
+                submit_bio_noacct(clone_bio);
+            } else {
+                status = BLK_STS_RESOURCE;
+                break;
+            }
         } else {
-            blk_mq_end_request(rq, BLK_STS_RESOURCE);
-            return BLK_STS_OK;
+            status = BLK_STS_IOERR;
+            break;
         }
     }
 
-    blk_mq_end_request(rq, BLK_STS_IOERR);
+    /* If a processing bottleneck occurred during loop execution, end the request transaction with a failure token */
+    if (status != BLK_STS_OK) {
+        blk_mq_end_request(rq, status);
+    }
     return BLK_STS_OK;
 }
 
@@ -197,6 +209,14 @@ static int __init fabriczc_init(void)
     blk_set_stacking_limits(&limits);
 
     fabriczc_disk = blk_mq_alloc_disk(&fabriczc_tag_set, &limits, NULL);
+    if (!IS_ERR(fabriczc_disk)) {
+        fabriczc_disk->minors = 16;
+        fabriczc_disk->flags |= GD_NEED_PART_SCAN;
+    }
+    if (!IS_ERR(fabriczc_disk)) {
+        fabriczc_disk->minors = 16;
+        fabriczc_disk->flags |= GD_NEED_PART_SCAN;
+    }
     if (IS_ERR(fabriczc_disk)) {
         blk_mq_free_tag_set(&fabriczc_tag_set);
         unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
@@ -213,7 +233,7 @@ static int __init fabriczc_init(void)
     fabriczc_disk->private_data = NULL;
     snprintf(fabriczc_disk->disk_name, 32, "rcraid0");
 
-    total_array_sectors = (sector_t)4 * 21369978;
+    total_array_sectors = (sector_t)85463040; /* 10432 rows * 8192 sectors */
     set_capacity(fabriczc_disk, total_array_sectors); 
 
     /* 5. Activate storage device node inside live system tree */
