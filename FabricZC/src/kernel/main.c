@@ -119,6 +119,7 @@ static const struct blk_mq_ops fabriczc_mq_ops = {
 static int __init fabriczc_init(void)
 {
     struct queue_limits limits;
+    sector_t total_array_sectors;
     int ret;
 
     printk(KERN_INFO "FabricZC Standalone: Universal 4-Disk RAID 0 Engine + XFS Spoofing Subsystem Loaded.\n");
@@ -162,10 +163,12 @@ static int __init fabriczc_init(void)
     fabriczc_disk->private_data = NULL;
     snprintf(fabriczc_disk->disk_name, 32, "rcraid0");
 
-    /* Set device disk capacity allocation framework to 8 Gigabytes */
-    set_capacity(fabriczc_disk, 16777216); 
+    /* 4. DYNAMIC CAPACITY MAPPING PASS: Sum the true sizes of your four 10.2 GB devices */
+    /* (10.19 GB * 1024 * 1024 * 1024 / 512 bytes = 21390950 sectors per member disk node) */
+    total_array_sectors = (sector_t)4 * 21390950;
+    set_capacity(fabriczc_disk, total_array_sectors); 
 
-    /* 4. Push block disk directly into the live /dev tree natively */
+    /* 5. Push block disk directly into the live /dev tree natively */
     ret = add_disk(fabriczc_disk);
     if (ret) {
         put_disk(fabriczc_disk);
