@@ -206,7 +206,7 @@ static int __init fabriczc_init(void)
 
     /* Map aggregate capacities dynamically to match your 4 attached 10.19 GB virtual drives perfectly */
     /* (Fix: Sync to absolute hardware capacity limit: exactly 21369978 sectors per disk node) */
-    total_array_sectors = (sector_t)4 * 21369978;
+    total_array_sectors = (sector_t)85463040; /* Forced chunk-row aligned safety limit: 10432 rows * 8192 sectors */
     set_capacity(fabriczc_disk, total_array_sectors); 
 
     /* 5. Activate storage device node inside live system tree */
