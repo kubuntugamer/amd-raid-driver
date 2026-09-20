@@ -17,7 +17,7 @@ static int fabriczc_major_id = 0;
 static struct gendisk *fabriczc_disk = NULL;
 static struct blk_mq_tag_set fabriczc_tag_set;
 
-/* Array matrix to track open handles of the underlying virtual storage devices */
+/* Array matrices to track open handles of the underlying virtual storage devices */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
 static struct bdev_handle *member_handles[4] = {NULL, NULL, NULL, NULL};
 static struct block_device *member_bdevs[4] = {NULL, NULL, NULL, NULL};
@@ -68,6 +68,8 @@ u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_
 
 /**
  * fabriczc_queue_rq - Production Multi-Queue Request Processor Loop
+ * Intercepts incoming requests, clones the memory payload container, applies 
+ * Phase 4 modulo stripe math, and submits the cloned BIO directly down the target drive queues.
  */
 static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd)
 {
@@ -83,9 +85,12 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
         return BLK_STS_OK;
     }
 
-    /* Phase 4 Interleaving Pass-Through Matrix Routing Calculation */
+    /* Phase 4 Interleaving Pass-Through Matrix Routing Calculation:
+     * Evaluates core sector coordinates to isolate target device port via chunk sizing modulo checks */
     target_disk_idx = (u32)((base_sector / FABRICZC_CHUNK_SECTORS) % 4);
 
+    /* Enforce tracking boundaries. If the mapped target disk backend handle is active, 
+     * clone the incoming memory payload and resubmit it down the physical device queues natively */
     if (member_bdevs[target_disk_idx]) {
         struct bio *clone_bio;
 
@@ -100,6 +105,7 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
 #endif
 
         if (clone_bio) {
+            /* Redirect the cloned block stream straight down into the native disk queue managers */
             submit_bio_noacct(clone_bio);
         } else {
             blk_mq_end_request(rq, BLK_STS_RESOURCE);
@@ -175,6 +181,7 @@ static int __init fabriczc_init(void)
     memset(&limits, 0, sizeof(limits));
     blk_set_stacking_limits(&limits);
 
+    /* Allocate disk configuration profile using the queue limit metrics block pointer */
     fabriczc_disk = blk_mq_alloc_disk(&fabriczc_tag_set, &limits, NULL);
     if (IS_ERR(fabriczc_disk)) {
         blk_mq_free_tag_set(&fabriczc_tag_set);
@@ -184,11 +191,13 @@ static int __init fabriczc_init(void)
 
     fabriczc_disk->major = fabriczc_major_id;
     fabriczc_disk->first_minor = 0;
-    fabriczc_disk->minors = FABRICZC_MINORS;
+    fabriczc_disk->minors = FABRICZC_MINORS; /* Bind partition mapping features natively */
     fabriczc_disk->fops = &fabriczc_fops;
     fabriczc_disk->private_data = NULL;
     snprintf(fabriczc_disk->disk_name, 32, "rcraid0");
 
+    /* Real-Time Storage Capacity Mapping: Aggregates total sectors across your 4 attached 10.19 GB devices */
+    /* (10.19 GB * 1024 * 1024 * 1024 / 512 bytes = 21390950 sectors per member disk node) */
     total_array_sectors = (sector_t)4 * 21390950;
     set_capacity(fabriczc_disk, total_array_sectors); 
 
@@ -215,7 +224,7 @@ static void __exit fabriczc_exit(void)
     blk_mq_free_tag_set(&fabriczc_tag_set);
     if (fabriczc_major_id > 0) unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
 
-    /* Release backend disk device reference blocks out of modern kernel memory */
+    /* Release backend disk device reference blocks out of modern kernel memory loop */
     for (i = 0; i < 4; i++) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
         if (member_handles[i]) {
