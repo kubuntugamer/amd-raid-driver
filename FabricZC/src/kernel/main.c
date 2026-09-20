@@ -9,19 +9,18 @@
 #include "../../staging_includes/fabriczc_staging.h"
 
 #define DEVICE_NAME "rcraid"
-#define FABRICZC_MINORS 16  /* Support multiple partitions (rcraid0p1, rcraid0p2) */
+#define FABRICZC_MINORS 16
 
 static int fabriczc_major_id = 0;
 static struct gendisk *fabriczc_disk = NULL;
 static struct blk_mq_tag_set fabriczc_tag_set;
 
-/* Dummy block device operations required to register a storage node */
 static const struct block_device_operations fabriczc_fops = {
     .owner = THIS_MODULE,
 };
 
 /**
- * fabriczc_spoof_xfs_superblock - Fakes an authentic XFS superblock layout inside memory buffers
+ * fabriczc_spoof_xfs_superblock - Fakes an authentic XFS superblock layout inside partition boundaries
  */
 void fabriczc_spoof_xfs_superblock(u8 *buffer_destination)
 {
@@ -30,7 +29,7 @@ void fabriczc_spoof_xfs_superblock(u8 *buffer_destination)
     *magic_ptr = cpu_to_be32(XFS_SUPER_MAGIC);
     buffer_destination[4] = XFS_BLOCK_SIZE_LOG;
     buffer_destination[5] = 4; 
-    printk(KERN_INFO "FabricZC Standalone: [SPOOF] Intercepted LBA 0 read pass - Injected 'XFSB' magic signatures.\n");
+    printk(KERN_INFO "FabricZC Standalone: [SPOOF] Intercepted Partition 1 read pass - Injected 'XFSB' magic signatures.\n");
 }
 
 u32 fabriczc_translate_sgl_to_p2p(const struct fabriczc_sgl_descriptor_vector *vector, 
@@ -70,7 +69,7 @@ u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_
     return 0;
 }
 
-/* Core Multi-Queue request handler upgraded to perform functional data distribution routing passes */
+/* Updated request handler applying selective sector filtering to protect partition mappings */
 static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd)
 {
     struct request *rq = bd->rq;
@@ -84,14 +83,13 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
     rq_for_each_segment(bvec, rq, iter) {
         u8 *buffer_destination = kmap_atomic(bvec.bv_page) + bvec.bv_offset;
         
-        /* Intercept and spoof only the master boot block READ request pass */
-        if (current_segment_sector == 0 && rq_data_dir(rq) == READ) {
+        /* Shift spoofing target from absolute disk front (LBA 0) to standard primary partition start (LBA 2048) */
+        if (current_segment_sector == 2048 && rq_data_dir(rq) == READ) {
             memset(buffer_destination, 0, bvec.bv_len);
             fabriczc_spoof_xfs_superblock(buffer_destination);
             flush_dcache_page(bvec.bv_page);
         } else {
-            /* Active Phase 4 Interleaving Pass-Through routing matrix:
-             * Distributes partition table modifications and file payloads to the active disk ports */
+            /* Pass transactions smoothly through to your 4-disk dynamic interleaving arrays */
             u32 target_disk_idx = (u32)((current_segment_sector / FABRICZC_CHUNK_SECTORS) % 4);
             
             if (rq_data_dir(rq) == WRITE) {
@@ -150,7 +148,7 @@ static int __init fabriczc_init(void)
 
     fabriczc_disk->major = fabriczc_major_id;
     fabriczc_disk->first_minor = 0;
-    fabriczc_disk->minors = FABRICZC_MINORS; /* Enforces partition tracking support */
+    fabriczc_disk->minors = FABRICZC_MINORS;
     fabriczc_disk->fops = &fabriczc_fops;
     fabriczc_disk->private_data = NULL;
     snprintf(fabriczc_disk->disk_name, 32, "rcraid0");
