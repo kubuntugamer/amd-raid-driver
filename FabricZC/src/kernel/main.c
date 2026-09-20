@@ -18,7 +18,12 @@ static struct gendisk *fabriczc_disk = NULL;
 static struct blk_mq_tag_set fabriczc_tag_set;
 
 /* Array matrix to track open handles of the underlying virtual storage devices */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+static struct bdev_handle *member_handles[4] = {NULL, NULL, NULL, NULL};
 static struct block_device *member_bdevs[4] = {NULL, NULL, NULL, NULL};
+#else
+static struct block_device *member_bdevs[4] = {NULL, NULL, NULL, NULL};
+#endif
 
 static const struct block_device_operations fabriczc_fops = {
     .owner = THIS_MODULE,
@@ -63,8 +68,6 @@ u64 fabriczc_map_linear_extent(u64 logical_sector, const struct fabriczc_extent_
 
 /**
  * fabriczc_queue_rq - Production Multi-Queue Request Processor Loop
- * Dynamically parses incoming block request payload page fragments and passes 
- * cloned BIO metadata frames straight down to the verified member target drives.
  */
 static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd)
 {
@@ -75,18 +78,14 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
 
     blk_mq_start_request(rq);
 
-    /* Verify if the transaction is holding a valid, initialized block memory payload descriptor */
     if (!bio) {
         blk_mq_end_request(rq, BLK_STS_IOERR);
         return BLK_STS_OK;
     }
 
-    /* Phase 4 Interleaving Pass-Through Matrix Routing Calculation:
-     * Evaluates core sector coordinates to isolate target device port via chunk sizing modulo checks */
+    /* Phase 4 Interleaving Pass-Through Matrix Routing Calculation */
     target_disk_idx = (u32)((base_sector / FABRICZC_CHUNK_SECTORS) % 4);
 
-    /* Enforce tracking boundaries. If the mapped target disk backend handle is active, 
-     * clone the incoming memory payload and resubmit it down the physical device queues natively */
     if (member_bdevs[target_disk_idx]) {
         struct bio *clone_bio;
 
@@ -101,7 +100,6 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
 #endif
 
         if (clone_bio) {
-            /* Redirect the cloned block stream straight down into the native disk queue managers */
             submit_bio_noacct(clone_bio);
         } else {
             blk_mq_end_request(rq, BLK_STS_RESOURCE);
@@ -122,7 +120,7 @@ static int __init fabriczc_init(void)
     struct queue_limits limits;
     sector_t total_array_sectors;
     int ret, i;
-    char path[32];
+    char path[64];
 
     printk(KERN_INFO "FabricZC Standalone: Universal 4-Disk RAID 0 Engine + Dynamic Geometry Mapping Initializing.\n");
 
@@ -130,16 +128,27 @@ static int __init fabriczc_init(void)
     for (i = 0; i < 4; i++) {
         snprintf(path, sizeof(path), "/dev/nvme0n%d", i + 1);
         
-        /* Modern kernel block device path claim signature verification layer */
+        /* Modern kernel block device path claim signature verification layer for 6.8+ kernels */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+        member_handles[i] = bdev_open_by_path(path, BLK_OPEN_READ | BLK_OPEN_WRITE, THIS_MODULE, NULL);
+        if (IS_ERR(member_handles[i])) {
+            printk(KERN_WARNING "FabricZC Standalone: Warning - could not claim bdev handle on %s\n", path);
+            member_handles[i] = NULL;
+            member_bdevs[i] = NULL;
+        } else {
+            member_bdevs[i] = member_handles[i]->bdev;
+        }
+#else
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
         member_bdevs[i] = blkdev_get_by_path(path, FMODE_READ | FMODE_WRITE, THIS_MODULE, NULL);
 #else
         member_bdevs[i] = blkdev_get_by_path(path, FMODE_READ | FMODE_WRITE, THIS_MODULE);
 #endif
         if (IS_ERR(member_bdevs[i])) {
-            printk(KERN_WARNING "FabricZC Standalone: Warning - could not claim backend handle lock on path %s. Target may be uninitialized.\n", path);
+            printk(KERN_WARNING "FabricZC Standalone: Warning - could not claim legacy bdev lock on %s\n", path);
             member_bdevs[i] = NULL;
         }
+#endif
     }
 
     /* 2. Dynamic block allocation major registration */
@@ -166,7 +175,6 @@ static int __init fabriczc_init(void)
     memset(&limits, 0, sizeof(limits));
     blk_set_stacking_limits(&limits);
 
-    /* Allocate disk configuration profile using the queue limit metrics block pointer */
     fabriczc_disk = blk_mq_alloc_disk(&fabriczc_tag_set, &limits, NULL);
     if (IS_ERR(fabriczc_disk)) {
         blk_mq_free_tag_set(&fabriczc_tag_set);
@@ -176,13 +184,11 @@ static int __init fabriczc_init(void)
 
     fabriczc_disk->major = fabriczc_major_id;
     fabriczc_disk->first_minor = 0;
-    fabriczc_disk->minors = FABRICZC_MINORS; /* Bind partition mapping features natively */
+    fabriczc_disk->minors = FABRICZC_MINORS;
     fabriczc_disk->fops = &fabriczc_fops;
     fabriczc_disk->private_data = NULL;
     snprintf(fabriczc_disk->disk_name, 32, "rcraid0");
 
-    /* Real-Time Storage Capacity Mapping: Aggregates total sectors across your 4 attached 10.19 GB devices */
-    /* (10.19 GB * 1024 * 1024 * 1024 / 512 bytes = 21390950 sectors per member disk node) */
     total_array_sectors = (sector_t)4 * 21390950;
     set_capacity(fabriczc_disk, total_array_sectors); 
 
@@ -209,11 +215,17 @@ static void __exit fabriczc_exit(void)
     blk_mq_free_tag_set(&fabriczc_tag_set);
     if (fabriczc_major_id > 0) unregister_blkdev(fabriczc_major_id, DEVICE_NAME);
 
-    /* Release backend disk device reference blocks out of kernel memory loop */
+    /* Release backend disk device reference blocks out of modern kernel memory */
     for (i = 0; i < 4; i++) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+        if (member_handles[i]) {
+            bdev_release(member_handles[i]);
+        }
+#else
         if (member_bdevs[i]) {
             blkdev_put(member_bdevs[i], FMODE_READ | FMODE_WRITE);
         }
+#endif
     }
 
     printk(KERN_INFO "FabricZC Standalone: Hardware array drivers dismantled cleanly.\n");
