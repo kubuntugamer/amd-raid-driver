@@ -1,5 +1,5 @@
 # SYSTEMS ENGINEERING SPECIFICATION
-# PROJECT: FABRICZC HARDWARE-AWARE NVMe FILESYSTEM LAYER (ALPHA STAGE)
+# PROJECT: FABRICZC HARDWARE-AWARE NVMe FILESYSTEM LAYER (REVISED SPECIFICATION)
 # REPOSITORY: SYSTEM-SANDBOX / ARCHITECTURE-BLUEPRINT
 # TARGET NODE: /dev/rcraid0 (HIGH-SPEED STORAGE EXTENSION NODE)
 
@@ -40,7 +40,7 @@ internal silicon lanes and channel geometry of high-performance NVMe solid-state
   - Mechanics: Completely bans in-place data block rewrites.
   - Structure: Aggregates all incoming file modifications into a single, continuous, 
     unbroken block stream that matches the exact physical erase boundaries of the array.
-  - Operational Outcome: Lays data down sequentially. Because the system writes full, 
+  - Operational Outcome: Lays data down smoothly. Because the system writes full, 
     aligned erase blocks in a single pass, the underlying controller never has to trigger 
     expensive background data shuffling loops. This drops your write amplification ratio 
     to a perfect 1:1, permanently bypassing the garbage collection performance cliff 
@@ -59,12 +59,13 @@ internal silicon lanes and channel geometry of high-performance NVMe solid-state
 3. ADVANCED HARDWARE INTEGRATION FEATURES
 ======================================================================
 
-* ZERO-CPU HARDWARE CRYPTOGRAPHY
+* ZERO-CPU HARDWARE CRYPTOGRAPHY & POINTER SYNC
   - Path: Direct hardware hook to the drive engine over the NVMe bus interface.
-  - Behavior: Bypasses standard software interception tables that burn up main host 
-    processing threads. The filesystem flags the data chunk signatures, and the physical 
-    NVMe controller encrypts the sectors on the fly as they hit the flash cells. 
-    Host processing overhead remains at absolute zero.
+  - Behavior: The filesystem flags data chunk signatures, and the physical NVMe controller 
+    encrypts the sectors on the fly as they hit the flash cells. Host processing overhead 
+    remains at absolute zero. To safeguard copy-on-write actions, the allocation layer 
+    tracks pointer mirrors explicitly to prevent twin pointers from triggering 
+    shared-cell encryption desynchronization bugs.
 
 * MULTI-TENANT ASYMMETRIC PATHWAY ISOLATION
   - Path: Custom request mapping utilizing native NVMe Asymmetric Namespace Access (ANA).
@@ -89,7 +90,27 @@ internal silicon lanes and channel geometry of high-performance NVMe solid-state
     factory performance indefinitely.
 
 ======================================================================
-4. CORE GEOMETRY & TARGET TRACKING MATRIX
+4. PRODUCTION REVISIONS & OPERATIONAL IMPLEMENTATION HARNESSES
+======================================================================
+
+* STRIPE-ROTATION ALLOCATION MAP (GARBAGE COLLECTION REMOVAL EXTENSION)
+  - Path: Kernel write-buffer aggregation layer.
+  - Behavior: To enforce a 1:1 write amplification target without background sector 
+    shuffling, the filesystem buffers data writes in host memory until a complete, 
+    un-fragmented stripe row can be written sequentially to a clean storage zone. 
+    Abandoned or deleted sector blocks are instantly cleared via hardware-level Trim flags, 
+    preventing fragmented space accumulation entirely.
+
+* BOOT-TIME DIRECTORY SNAPSHOT CACHE (MOUNT ACCELERATION LOOP)
+  - Path: FabricZC primary storage container tracking tail block.
+  - Behavior: Resolves the startup delay caused by scanning every single data block 
+    sequentially on a cold mount. On a clean shutdown, the filesystem saves a localized, 
+    compact folder-map image directly to the container metadata tracks. The filesystem 
+    mounts instantly from this cache on startup, automatically falling back to a full, 
+    sequential self-healing block scan only if the system suffered a sudden power loss.
+
+======================================================================
+5. CORE GEOMETRY & TARGET TRACKING MATRIX
 ======================================================================
 
 * Block Allocation Model: Full Stripe Width Chunk Alignment
