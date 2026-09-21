@@ -88,3 +88,4 @@ module_init(init_fabriczc_fs);
 module_exit(exit_fabriczc_fs);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Chazz");
+MODULE_DESCRIPTION("FabricZC Parallel Flash-Aware Filesystem Layer");
