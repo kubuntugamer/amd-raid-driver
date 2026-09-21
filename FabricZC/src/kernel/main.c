@@ -233,7 +233,7 @@ static int __init fabriczc_init(void)
     fabriczc_disk->private_data = NULL;
     snprintf(fabriczc_disk->disk_name, 32, "rcraid0");
 
-    total_array_sectors = (sector_t)85463040; /* 10432 rows * 8192 sectors */
+    total_array_sectors = (sector_t)bdev_nr_sectors(member_bdevs[0]);
     set_capacity(fabriczc_disk, total_array_sectors); 
 
     /* 5. Activate storage device node inside live system tree */
