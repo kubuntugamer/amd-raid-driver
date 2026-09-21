@@ -21,3 +21,7 @@ all:
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
+
+# Custom FabricZC Filesystem Module Extension Compilation Profiles
+obj-m += fabriczc_fs_mod.o
+fabriczc_fs_mod-objs := src/kernel/fs/super.o src/kernel/fs/inode.o src/kernel/fs/file.o
