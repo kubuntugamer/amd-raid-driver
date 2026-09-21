@@ -16,7 +16,7 @@ sleep 1
 # B. Inject the fresh, dynamically scaling storage driver module into memory
 echo "[*] Activating FabricZC storage translation layer..."
 cd "$(dirname "$0")" || exit 1
-insmod fabriczc_mod.ko
+insmod build/modules/fabriczc_mod.ko
 sleep 2
 
 # C. Create aligned partition layouts strictly over the virtual device node track
@@ -62,7 +62,7 @@ done
 # Copy network profiles and the stable driver module binary into the target directory paths
 cp -L /etc/resolv.conf "$TARGET_ROOT/etc/resolv.conf" 2>/dev/null || true
 mkdir -p "$TARGET_ROOT/lib/modules/7.0.0-14-generic/kernel/drivers/block"
-cp fabriczc_mod.ko "$TARGET_ROOT/lib/modules/7.0.0-14-generic/kernel/drivers/block/"
+cp build/modules/fabriczc_mod.ko "$TARGET_ROOT/lib/modules/7.0.0-14-generic/kernel/drivers/block/"
 
 # F. Copy your standalone Stage 2 script straight into the target filesystem and trigger execution
 echo "[*] Transitioning system control to Stage 2 automated finalizer script..."
