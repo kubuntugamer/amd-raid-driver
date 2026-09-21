@@ -1,16 +1,16 @@
-/* FabricZC VFS Superblock Management Engine — Boot Cache Acceleration Mount Loops */
+/* FabricZC VFS Superblock Management Engine — New Linux Mount API Compliance */
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/fs_context.h>
 #include "fabriczc_fs.h"
 
 static const struct super_operations fabriczc_super_ops = {
     .statfs      = simple_statfs,
-    .drop_inode  = generic_delete_inode,
 };
 
-static int fabriczc_fill_super(struct super_block *sb, void *data, int silent)
+static int fabriczc_fill_super(struct super_block *sb, struct fs_context *fc)
 {
     struct fabriczc_fs_sb_info *sbi;
     struct inode *root_inode;
@@ -26,7 +26,7 @@ static int fabriczc_fill_super(struct super_block *sb, void *data, int silent)
 
     spin_lock_init(&sbi->parallel_zone_lock);
 
-    /* Allocate the root execution pointer track */
+    /* Allocate the root execution pointer track natively */
     root_inode = new_inode(sb);
     if (!root_inode) {
         kfree(sbi);
@@ -46,22 +46,32 @@ static int fabriczc_fill_super(struct super_block *sb, void *data, int silent)
         return -ENOMEM;
     }
 
-    echo "[*] FabricZC: Dynamic boot snapshot cache checked. VFS Layer active.";
+    printk(KERN_INFO "FabricZC: Dynamic boot snapshot cache checked. VFS Layer active.\n");
     return 0;
 }
 
-static struct dentry *fabriczc_mount(struct file_system_type *fs_type,
-    int flags, const char *dev_name, void *data)
+/* Modern Linux 7.x Mount Context Extraction Target */
+static int fabriczc_get_tree(struct fs_context *fc)
 {
-    return mount_bdev(fs_type, flags, dev_name, data, fabriczc_fill_super);
+    return get_tree_bdev(fc, fabriczc_fill_super);
+}
+
+static const struct fs_context_operations fabriczc_context_ops = {
+    .get_tree    = fabriczc_get_tree,
+};
+
+static int fabriczc_init_fs_context(struct fs_context *fc)
+{
+    fc->ops = &fabriczc_context_ops;
+    return 0;
 }
 
 static struct file_system_type fabriczc_fs_type = {
-    .owner    = THIS_MODULE,
-    .name     = "fabriczc",
-    .mount    = fabriczc_mount,
-    .kill_sb  = kill_block_super,
-    .fs_flags = FS_REQUIRES_DEV,
+    .owner           = THIS_MODULE,
+    .name            = "fabriczc",
+    .init_fs_context = fabriczc_init_fs_context,
+    .kill_sb         = kill_block_super,
+    .fs_flags        = FS_REQUIRES_DEV,
 };
 
 static int __init init_fabriczc_fs(void)
