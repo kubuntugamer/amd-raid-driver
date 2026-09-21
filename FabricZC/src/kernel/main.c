@@ -110,7 +110,7 @@ static blk_status_t fabriczc_queue_rq(struct blk_mq_hw_ctx *hctx, const struct b
     /* High-Precision Multi-Bio Iteration: Loop through every bio structure linked inside this request sequence */
     __rq_for_each_bio(bio, rq) {
         u64 absolute_sector = (u64)bio->bi_iter.bi_sector;
-        u32 target_disk_idx = (u32)((absolute_sector / (u64)FABRICZC_CHUNK_SECTORS) % 4);
+        u32 target_disk_idx = (u32)(((absolute_sector + bio->bi_bdev->bd_start_sect) / (u64)FABRICZC_CHUNK_SECTORS) % 4);
 
         if (member_bdevs[target_disk_idx]) {
             struct bio *clone_bio;
