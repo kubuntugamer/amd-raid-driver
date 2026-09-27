@@ -1,5 +1,5 @@
 /*
- * src/fs/fs_main.c - FabricZC VFS Entry (Coherent Track Sync)
+ * src/fs/fs_main.c - FabricZC VFS Entry (Linux 7.0 Coherent POSIX Tracking)
  */
 #include <linux/module.h>
 #include <linux/fs.h>
@@ -46,6 +46,13 @@ static int fabriczc_fill_super(struct super_block *sb, struct fs_context *fc)
     if (!root) return -ENOMEM;
     root->i_ino = 1;
     root->i_mode = S_IFDIR | 0755;
+    root->i_uid = GLOBAL_ROOT_UID;
+    root->i_gid = GLOBAL_ROOT_GID;
+    
+    /* Use current 7.0 VFS timestamp API macros */
+    inode_set_ctime_current(root);
+    root->i_atime_sec = root->i_mtime_sec = root->i_ctime_sec;
+    
     root->i_op = &fabriczc_dir_inode_operations;
     root->i_fop = &fabriczc_dir_operations;
 
@@ -94,7 +101,6 @@ static int fabriczc_iterate(struct file *file, struct dir_context *ctx)
         de = (struct fabriczc_dir_entry *)(bh->b_data + offset);
         if (de->record_length_bytes == 0) break;
         
-        /* Evaluate entry indexes explicitly by adding a virtual dot offset shift modifier */
         if (de->inode_number > 0 && de->name_length > 0) {
             if ((record_index + 2) >= ctx->pos) {
                 if (!dir_emit(ctx, de->file_name, de->name_length, de->inode_number, de->file_type)) {
@@ -108,6 +114,36 @@ static int fabriczc_iterate(struct file *file, struct dir_context *ctx)
     }
     brelse(bh);
     return 0;
+}
+
+static int fabriczc_unlink(struct inode *dir, struct dentry *dentry)
+{
+    struct super_block *sb = dir->i_sb;
+    const char *name = dentry->d_name.name;
+    struct buffer_head *bh;
+    struct fabriczc_dir_entry *de;
+    unsigned int offset = 0;
+    size_t name_len = strlen(name);
+
+    bh = sb_bread(sb, 0);
+    if (!bh) return -EIO;
+
+    while (offset < 4096) {
+        de = (struct fabriczc_dir_entry *)(bh->b_data + offset);
+        if (de->record_length_bytes == 0) break;
+        
+        if (de->inode_number != 0 && de->name_length == name_len && memcmp(de->file_name, name, name_len) == 0) {
+            de->inode_number = 0;
+            mark_buffer_dirty(bh);
+            sync_dirty_buffer(bh);
+            brelse(bh);
+            return 0;
+        }
+        offset += de->record_length_bytes;
+    }
+
+    brelse(bh);
+    return -ENOENT;
 }
 
 static int fabriczc_create(struct mnt_idmap *idmap, struct inode *dir, struct dentry *dentry, umode_t mode, bool excl)
@@ -128,6 +164,11 @@ static int fabriczc_create(struct mnt_idmap *idmap, struct inode *dir, struct de
     inode->i_blocks = 8;
     inode->i_ino = allocated_ino;
     inode->i_mode = mode;
+    
+    /* Correct modern timestamp layout variables */
+    inode_set_ctime_current(inode);
+    inode->i_atime_sec = inode->i_mtime_sec = inode->i_ctime_sec;
+    
     inode->i_op = &fabriczc_file_inode_operations;
     inode->i_fop = &fabriczc_file_operations;
 
@@ -159,6 +200,12 @@ static struct dentry *fabriczc_lookup(struct inode *dir, struct dentry *dentry, 
         inode = iget_locked(sb, ino);
         if (inode && (inode_state_read_once(inode) & I_NEW)) {
             inode->i_mode = S_IFREG | 0644;
+            inode->i_uid = GLOBAL_ROOT_UID;
+            inode->i_gid = GLOBAL_ROOT_GID;
+            
+            inode_set_ctime_current(inode);
+            inode->i_atime_sec = inode->i_mtime_sec = inode->i_ctime_sec;
+            
             inode->i_op = &fabriczc_file_inode_operations;
             inode->i_fop = &fabriczc_file_operations;
             unlock_new_inode(inode);
@@ -179,6 +226,7 @@ static const struct file_operations fabriczc_dir_operations = {
 static const struct inode_operations fabriczc_dir_inode_operations = {
     .lookup         = fabriczc_lookup,
     .create         = fabriczc_create,
+    .unlink         = fabriczc_unlink,
 };
 
 static const struct super_operations fabriczc_super_ops = {
