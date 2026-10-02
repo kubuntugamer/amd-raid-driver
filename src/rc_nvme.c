@@ -68,6 +68,13 @@ static u32 rc_volume_stripe_sectors;
  * Everything level-specific (map_lba, mirror fan-out in queue_rq) keys off
  * this. */
 static u32 rc_volume_raid_level;
+/* RAID10 geometry: number of stripe columns (= FirstCount), i.e. the number
+ * of 2-way mirror pairs the logical space is striped across.  Member slots
+ * 2*c and 2*c+1 are the mirror pair for column c; logical stripe N lives in
+ * column (N % cols) at physical stripe (N / cols) on BOTH members of the
+ * pair.  Set from the on-disk LogicalDevice record when the first member of
+ * a RAID10 volume registers; 0 for every other level. */
+static u32 rc_volume_raid10_cols;
 /* RAID1 read balancer: monotonically increasing cursor; each read maps to
  * member (cursor % nmembers).  Plain round-robin — both mirrors see half
  * the reads, which on identical members approximates the 2x read speedup
@@ -257,6 +264,62 @@ static void rc_volume_member_set_state(int idx, enum rc_member_state st)
 		  atomic_read(&rc_volume_live_mask));
 }
 
+/* True while the volume can still serve I/O at its configured level:
+ *   RAID1 : at least one mirror member is live.
+ *   RAID10: every column still has at least one live copy — one failure per
+ *           pair is tolerated, losing a whole pair is fatal.
+ *   RAID0 : every member is live (each stripe crosses all of them).
+ * Reads and writes both require this; a RAID10 column with no live member
+ * would leave that half of the logical space unmapped. */
+static bool rc_volume_can_serve(void)
+{
+	unsigned int live = (unsigned int)atomic_read(&rc_volume_live_mask);
+
+	if (rc_volume_raid_level == RC_LDT_RAID1)
+		return live != 0;
+	if (rc_volume_raid_level == RC_LDT_RAID10) {
+		u32 c, cols = rc_volume_raid10_cols;
+
+		if (!cols)
+			return false;
+		for (c = 0; c < cols; c++) {
+			unsigned int pair = BIT(2 * c) | BIT(2 * c + 1);
+
+			if (!(live & pair))
+				return false;
+		}
+		return true;
+	}
+	return live == (unsigned int)(BIT(rc_volume_member_count) - 1);
+}
+
+/* rc_volume_can_serve() against a hypothetical live mask with @slot
+ * removed — used by rc_volume_remove_member() to decide whether a departing
+ * member leaves the volume able to keep serving degraded. */
+static bool rc_volume_can_serve_without(int slot)
+{
+	unsigned int live = (unsigned int)atomic_read(&rc_volume_live_mask);
+
+	if (slot >= 0 && slot < RC_VOLUME_MAX_MEMBERS)
+		live &= ~BIT(slot);
+	if (rc_volume_raid_level == RC_LDT_RAID1)
+		return live != 0;
+	if (rc_volume_raid_level == RC_LDT_RAID10) {
+		u32 c, cols = rc_volume_raid10_cols;
+
+		if (!cols)
+			return false;
+		for (c = 0; c < cols; c++) {
+			unsigned int pair = BIT(2 * c) | BIT(2 * c + 1);
+
+			if (!(live & pair))
+				return false;
+		}
+		return true;
+	}
+	return live == (unsigned int)(BIT(rc_volume_member_count) - 1);
+}
+
 /* Fail a member from any context (ISR, timeout, queue_rq).  Clearing the
  * live bit is the load-bearing effect — it is what stops new dispatches —
  * and happens immediately; the state-array store is a single WRITE_ONCE
@@ -306,9 +369,8 @@ static void rc_volume_member_mark_failed(int idx)
 		  idx,
 		  rc_volume_members[idx] ?
 			pci_name(rc_volume_members[idx]->pdev) : "absent",
-		  rc_volume_raid_level == RC_LDT_RAID1 &&
-		  atomic_read(&rc_volume_live_mask) ?
-			"continuing degraded on surviving mirror" :
+		  rc_volume_can_serve() ?
+			"continuing degraded on surviving member(s)" :
 			"volume can no longer serve I/O",
 		  atomic_read(&rc_volume_live_mask));
 	schedule_work(&rc_volume_degrade_work);
@@ -550,7 +612,8 @@ static blk_status_t rc_volume_finish_status(struct request *req)
 	if (!READ_ONCE(pdu->sc_sct))
 		return BLK_STS_OK;
 
-	if (rc_volume_raid_level != RC_LDT_RAID1 || !mask || !errs)
+	if ((rc_volume_raid_level != RC_LDT_RAID1 &&
+	     rc_volume_raid_level != RC_LDT_RAID10) || !mask || !errs)
 		return BLK_STS_IOERR;
 
 	if (pdu->op == REQ_OP_READ) {
@@ -559,7 +622,24 @@ static blk_status_t rc_volume_finish_status(struct request *req)
 		return BLK_STS_IOERR;
 	}
 
-	if ((errs & mask) == mask) {
+	/* A non-READ request is lost only when some redundancy group lost
+	 * every copy it submitted to.  RAID1 has one group (all members);
+	 * RAID10 has one group per mirror pair, so a request spanning several
+	 * pairs survives as long as each pair kept a copy.  This also covers
+	 * FLUSH, whose mask spans every live member of every pair. */
+	if (rc_volume_raid_level == RC_LDT_RAID10) {
+		u32 c, cols = rc_volume_raid10_cols;
+
+		for (c = 0; c < cols; c++) {
+			unsigned int subm = mask & (BIT(2 * c) | BIT(2 * c + 1));
+
+			if (subm && (errs & subm) == subm) {
+				for_each_set_bit(i, &errs, RC_VOLUME_MAX_MEMBERS)
+					rc_volume_member_mark_failed(i);
+				return BLK_STS_IOERR;
+			}
+		}
+	} else if ((errs & mask) == mask) {
 		/* Every submitted member errored — the request fails, and the
 		 * erroring members must ALSO be marked failed (same as the
 		 * READ branch above): a lone survivor that starts failing
@@ -574,7 +654,7 @@ static blk_status_t rc_volume_finish_status(struct request *req)
 	for_each_set_bit(i, &errs, RC_VOLUME_MAX_MEMBERS)
 		rc_volume_member_mark_failed(i);
 	printk_ratelimited(KERN_WARNING
-		"rcraid: %s: op=%u lba=%llu completed degraded (err_members=0x%lx of 0x%x) — data durable on surviving mirror\n",
+		"rcraid: %s: op=%u lba=%llu completed degraded (err_members=0x%lx of 0x%x) — data durable on surviving copy/mirror\n",
 		rc_volume_disk ? rc_volume_disk->disk_name : "?",
 		pdu->op, (unsigned long long)blk_rq_pos(req), errs, mask);
 	return BLK_STS_OK;
@@ -2064,9 +2144,9 @@ static int rc_volume_bdf_cmp(struct rc_adapter *a, struct rc_adapter *b)
  * writes DeviceType 0x1BF6 for BOTH RAID0 and RAID1 and encodes the layout
  * in the counts (verified on TRX50 hardware dumps, 2026-07-10 — see the
  * RC_LDT_* note in rc_linux.h).  Returns a normalized RC_LDT_RAID0 /
- * RC_LDT_RAID1, or 0 for any layout this driver has no dispatch path for
- * (RAID10, >2-way mirrors, count/device mismatches) — the caller must
- * refuse to assemble those rather than guess. */
+ * RC_LDT_RAID1 / RC_LDT_RAID10, or 0 for any layout this driver has no
+ * dispatch path for (RAID5/6, >2-way mirrors, count/device mismatches) —
+ * the caller must refuse to assemble those rather than guess. */
 static u32 rc_ld_level_from(u32 devtype, u32 first, u32 second, u32 devices)
 {
 	/* 1. Dedicated Baseline Mirror Gating */
@@ -2084,19 +2164,12 @@ static u32 rc_ld_level_from(u32 devtype, u32 first, u32 second, u32 devices)
 			return RC_LDT_RAID10;	/* Nested RAID 10 */
 	}
 
-	/* 3. Distributed Single Parity Arrays (RAID 5) */
-	if (devtype == 0x1BF7) {
-		if (devices >= 3 && first == (devices - 1) && second == 1) {
-			return 0x1BF7;		/* Approved RAID 5 Layout */
-		}
-	}
-
-	/* 4. Distributed Dual Parity Arrays (RAID 6) */
-	if (devtype == 0x1BF8) {
-		if (devices >= 4 && first == (devices - 2) && second == 1) {
-			return 0x1BF8;		/* Approved RAID 6 Layout */
-		}
-	}
+	/* 3. RAID5 / RAID6: recognized on-disk levels but NO dispatch path
+	 *    yet.  Deliberately fall through to the safety reject below.
+	 *    (An earlier iteration carried 0x1BF7/0x1BF8 branches here; both
+	 *    were miswired — 0x1BF7 IS RAID1 and 0x1BF8 has no define — and
+	 *    returning either would have assembled a parity array with RAID0
+	 *    stripe math, corrupting every stripe.) */
 
 	return 0; /* Safety reject on unmapped structural variations */
 }
@@ -2322,6 +2395,7 @@ static void rc_volume_parse_logical_device(struct rc_adapter *adapter)
 				  (pos + i) / 512, (pos + i) % 512,
 				  devtype, first_count, second_count,
 				  level == RC_LDT_RAID1 ? "RAID1" :
+				  level == RC_LDT_RAID10 ? "RAID10" :
 				  level == RC_LDT_RAID0 ? "RAID0" :
 							  "UNSUPPORTED",
 				  devices, chunk, chunk_index,
@@ -2371,6 +2445,23 @@ done:
 	dma_free_coherent(dev, chunk_bytes, buf, buf_dma);
 }
 
+/* Physical LBA of logical @lba on RAID10 member @m.  Both copies of a
+ * column hold the same physical extent, so the result does not depend on
+ * which copy @m is; only the member's own user-data base offset differs.
+ * Caller must have guaranteed @m belongs to the pair for @lba's column. */
+static u64 rc_volume_phys_for_member(int m, u64 logical_lba)
+{
+	u32 stripe = rc_volume_stripe_sectors;
+	u32 cols = rc_volume_raid10_cols;
+	u64 stripe_num, phys_stripe;
+	u32 off;
+
+	stripe_num  = div_u64(logical_lba, stripe);
+	off         = (u32)(logical_lba - stripe_num * stripe);
+	phys_stripe = div_u64(stripe_num, cols);
+	return phys_stripe * stripe + off + rc_volume_member_phys_offset[m];
+}
+
 /* Map a logical LBA to (member_index, physical LBA on that member).
  *
  * RAID0: stripe math — the stripe number picks the member, and stripes
@@ -2381,6 +2472,13 @@ done:
  * writes and discards must touch every mirror and go through
  * rc_volume_dispatch_mirror instead.  The pick is
  * round-robin, which halves each mirror's read load.
+ *
+ * RAID10: stripe over rc_volume_raid10_cols columns, each column a 2-way
+ * mirror pair.  The stripe picks the column and the physical stripe is
+ * packed within the pair; this mapping then PICKS one live copy of that
+ * pair (round robin), the same read-balancing contract as RAID1.  Writes
+ * and discards fan out to both copies via rc_volume_dispatch_raid10 and
+ * never use this function.
  *
  * Caller must hold rc_volume_lock (or be in a single-threaded init path). */
 static void rc_volume_map_lba(u64 logical_lba, int *out_member, u64 *out_phys)
@@ -2424,6 +2522,43 @@ static void rc_volume_map_lba(u64 logical_lba, int *out_member, u64 *out_phys)
 		return;
 	}
 
+	if (rc_volume_raid_level == RC_LDT_RAID10) {
+		u32 cols = rc_volume_raid10_cols;
+		u64 snum;
+		u32 col;
+		int c0, c1, chosen;
+		unsigned int live =
+			(unsigned int)atomic_read(&rc_volume_live_mask);
+		bool l0, l1;
+
+		if (unlikely(!cols || !stripe)) {
+			*out_member = 0;
+			*out_phys   = logical_lba;
+			return;
+		}
+		snum = div_u64(logical_lba, stripe);
+		col  = (u32)(snum % cols);
+		c0   = (int)(2u * col);
+		c1   = c0 + 1;
+		l0   = (live & BIT(c0)) != 0;
+		l1   = (live & BIT(c1)) != 0;
+		/* Prefer the round-robin copy when both are live; fall back to
+		 * whichever survives so a dead copy is never read.  Both dead
+		 * is caught by rc_volume_fatal() before we get here. */
+		if (l0 && l1)
+			chosen = (atomic_inc_return(&rc_volume_rr_next) & 1)
+				 ? c1 : c0;
+		else if (l0)
+			chosen = c0;
+		else if (l1)
+			chosen = c1;
+		else
+			chosen = c0;
+		*out_member = chosen;
+		*out_phys   = rc_volume_phys_for_member(chosen, logical_lba);
+		return;
+	}
+
 	stripe_num  = div_u64(logical_lba, stripe);
 	stripe_off  = (u32)(logical_lba - stripe_num * stripe);
 	member_idx  = (u32)(stripe_num % (u32)nmembers);
@@ -2434,18 +2569,21 @@ static void rc_volume_map_lba(u64 logical_lba, int *out_member, u64 *out_phys)
 		    + rc_volume_member_phys_offset[member_idx];
 }
 
-/* Read one LBA from the assembled RAID0 volume. */
-static int rc_volume_read_lba(u64 logical_lba, dma_addr_t buf_dma)
+/* Read one physical LBA from an already-mapped member.  The caller maps the
+ * logical LBA ONCE and passes BOTH the member index and its physical LBA, so
+ * the per-member DMA buffer (allocated on that member's IOMMU domain) can
+ * never be handed to a different member.  Mapping twice would re-roll the
+ * RAID1/RAID10 round-robin pick and mismatch the buffer. */
+static int rc_volume_read_lba(int member_idx, u64 phys_lba, dma_addr_t buf_dma)
 {
-	int member_idx;
-	u64 phys_lba;
 	struct rc_adapter *adapter;
 
-	if (rc_volume_member_count != RC_VOLUME_EXPECTED_MEMBERS ||
-	    !rc_volume_stripe_sectors)
+	if (member_idx < 0 ||
+	    member_idx >= rc_volume_member_count ||
+	    member_idx >= RC_VOLUME_MAX_MEMBERS ||
+	    !rc_volume_members[member_idx])
 		return -ENODEV;
 
-	rc_volume_map_lba(logical_lba, &member_idx, &phys_lba);
 	adapter = rc_volume_members[member_idx];
 	return rc_nvme_read_lba(adapter, phys_lba, 0, buf_dma);
 }
@@ -2493,8 +2631,17 @@ static void rc_volume_demo_reads(void)
 		int ret;
 
 		rc_volume_map_lba(probes[i], &member_idx, &phys_lba);
+		if (member_idx < 0 || member_idx >= rc_volume_member_count ||
+		    member_idx >= RC_VOLUME_MAX_MEMBERS ||
+		    !rc_volume_members[member_idx]) {
+			rc_printk(RC_WARN,
+				  "rc_volume_demo_reads: logical %llu has no usable member — skipped\n",
+				  (unsigned long long)probes[i]);
+			continue;
+		}
 		memset(bufs[member_idx], 0, 16);
-		ret = rc_volume_read_lba(probes[i], buf_dmas[member_idx]);
+		ret = rc_volume_read_lba(member_idx, phys_lba,
+					 buf_dmas[member_idx]);
 		if (ret) {
 			rc_printk(RC_WARN,
 				  "rc_volume_demo_reads: logical %llu read failed (%d)\n",
@@ -2610,12 +2757,15 @@ static void rc_volume_register_member(struct rc_adapter *adapter)
 	}
 
 	if (have_ld) {
-		/* Refuse layouts with no dispatch path (RAID10, >2-way
-		 * mirrors, FirstCount x SecondCount != Devices).  Guessing a
-		 * mapping for them turns every read into garbage and every
-		 * write into corruption, so the member is not registered at
-		 * all and the volume never assembles. */
-		if (!nvme->ld_level) {
+		/* Refuse layouts with no dispatch path (>2-way mirrors, RAID5/6,
+		 * FirstCount x SecondCount != Devices, and any level the
+		 * classifier did not normalize to 0/1/10).  Guessing a mapping
+		 * for them turns every read into garbage and every write into
+		 * corruption, so the member is not registered at all and the
+		 * volume never assembles. */
+		if (nvme->ld_level != RC_LDT_RAID0 &&
+		    nvme->ld_level != RC_LDT_RAID1 &&
+		    nvme->ld_level != RC_LDT_RAID10) {
 			rc_printk(RC_WARN,
 				  "rc_volume_register_member: %s unsupported RAID layout (DeviceType=0x%x FirstCount=%u SecondCount=%u Devices=%u) — ignoring member\n",
 				  pci_name(adapter->pdev), nvme->ld_device_type,
@@ -2707,6 +2857,11 @@ static void rc_volume_register_member(struct rc_adapter *adapter)
 		rc_volume_stripe_sectors   = chunk_sectors;
 		rc_volume_raid_level       = have_ld ? nvme->ld_level
 						     : RC_LDT_RAID0;
+		/* RAID10 is striped over 2-way mirror pairs, so the number of
+		 * columns is half the member count (= FirstCount). */
+		rc_volume_raid10_cols      =
+			rc_volume_raid_level == RC_LDT_RAID10 ? expected / 2u
+							      : 0u;
 	} else {
 		if ((have_ld ? nvme->ld_level : RC_LDT_RAID0) !=
 		    rc_volume_raid_level) {
@@ -2748,10 +2903,13 @@ static void rc_volume_register_member(struct rc_adapter *adapter)
 				  pci_name(adapter->pdev));
 			goto out;
 		}
-		if (rc_volume_raid_level != RC_LDT_RAID1) {
+		if (rc_volume_raid_level != RC_LDT_RAID1 &&
+		    rc_volume_raid_level != RC_LDT_RAID10) {
 			rc_printk(RC_WARN,
-				  "rc_volume_register_member: %s probed while a RAID0 volume is live — re-add is a RAID1 concept, ignoring\n",
-				  pci_name(adapter->pdev));
+				  "rc_volume_register_member: %s probed while a %s volume is live — re-add is a mirror concept, ignoring\n",
+				  pci_name(adapter->pdev),
+				  rc_volume_raid_level == RC_LDT_RAID0 ?
+					"RAID0" : "non-mirror");
 			goto out;
 		}
 		pos = nvme->ld_my_position;
@@ -3142,7 +3300,9 @@ static void rc_volume_build_discard_sqe(struct rc_nvme_sqe *cmd, unsigned int hc
  *   RAID0: any non-live member makes the volume unusable — every stripe
  *          crosses every member.
  *   RAID1: the volume is fatal only when NO live member remains; a
- *          surviving mirror keeps serving (degraded mode). */
+ *          surviving mirror keeps serving (degraded mode).
+ *   RAID10: fatal only when SOME mirror pair has lost both copies; one
+ *          failure per pair keeps every column readable (degraded). */
 static inline bool rc_volume_fatal(void)
 {
 	int i;
@@ -3163,11 +3323,7 @@ static inline bool rc_volume_fatal(void)
 			rc_volume_member_mark_failed(i);
 	}
 
-	if (rc_volume_raid_level == RC_LDT_RAID1)
-		return atomic_read(&rc_volume_live_mask) == 0;
-
-	return atomic_read(&rc_volume_live_mask) !=
-	       (int)(BIT(rc_volume_member_count) - 1);
+	return !rc_volume_can_serve();
 }
 
 /* blk-mq request handler.  chunk_sectors=stripe_sectors in queue_limits
@@ -3812,6 +3968,349 @@ static blk_status_t rc_volume_dispatch_mirror(
 	return BLK_STS_OK;
 }
 
+/* RAID10: stripe across the mirror pairs, then mirror each stripe to both
+ * members of its pair.
+ *
+ * The logical space is striped over rc_volume_raid10_cols columns; column c
+ * is the mirror pair {2c, 2c+1}.  Logical stripe N lives in column
+ * (N mod cols) at physical stripe (N / cols) on BOTH copies.  A request may
+ * span several stripes (chunk_sectors is 0), so the bvec is walked once and
+ * split at stripe boundaries:
+ *
+ *   WRITE: every strip is fanned to both live copies of its column
+ *          (degraded: to whichever copy survives).
+ *   READ:  every strip is placed on ONE live copy, round-robin, so the pair
+ *          shares the read load and a dead copy is never read.
+ *
+ * This is rc_volume_dispatch_mirror (same pages to both copies) fused with
+ * rc_volume_dispatch_multi_stripe (per-stripe physical runs).  Returns
+ * BLK_STS_DEV_RESOURCE (nothing started) on a full SQ, or BLK_STS_IOERR
+ * before blk_mq_start_request on a build error. */
+static blk_status_t rc_volume_dispatch_raid10(
+		struct blk_mq_hw_ctx *hctx, struct request *req,
+		struct rc_volume_pdu *pdu, sector_t pos, u32 nr_sectors,
+		enum req_op op)
+{
+	const u32 stripe = rc_volume_stripe_sectors;
+	const int nm = rc_volume_member_count;
+	const u32 cols = rc_volume_raid10_cols;
+	struct req_iterator iter;
+	struct bio_vec bv;
+	sector_t cur_lba = pos;
+	u32 sg_used[RC_VOLUME_MAX_MEMBERS] = {0};
+	u32 member_sectors[RC_VOLUME_MAX_MEMBERS] = {0};
+	u64 member_start_lba[RC_VOLUME_MAX_MEMBERS] = {0};
+	bool member_has_data[RC_VOLUME_MAX_MEMBERS] = {0};
+	int members_with_data = 0;
+	unsigned int live =
+		(unsigned int)atomic_read(&rc_volume_live_mask);
+	unsigned int wmask =
+		(unsigned int)atomic_read(&rc_volume_write_mask) &
+		(unsigned int)(BIT(nm) - 1);
+	int m;
+
+	if (nm <= 0 || nm > RC_VOLUME_MAX_MEMBERS || !stripe || !cols ||
+	    (u32)nm != cols * 2) {
+		rc_printk(RC_ERROR,
+			  "rc_volume_dispatch_raid10: bad volume state (members=%d stripe=%u cols=%u) — pos=%llu len=%u rejected\n",
+			  nm, stripe, cols, (u64)pos, nr_sectors);
+		return BLK_STS_IOERR;
+	}
+
+	for (m = 0; m < nm; m++)
+		sg_init_table(pdu->ms_sg[m], RC_VOLUME_MS_PAGES_PER_MEMBER);
+
+	rq_for_each_segment(bv, req, iter) {
+		u32 seg_len_sectors = bv.bv_len / 512;
+		u32 seg_off_in_page = bv.bv_offset;
+		u32 seg_remaining   = bv.bv_len;
+		struct page *seg_page = bv.bv_page;
+
+		while (seg_remaining) {
+			sector_t stripe_idx = cur_lba / stripe;
+			sector_t stripe_end = (stripe_idx + 1) * stripe;
+			u32 sectors_to_boundary =
+				(u32)(stripe_end - cur_lba);
+			u32 chunk_sectors = min(seg_len_sectors,
+						sectors_to_boundary);
+			u32 chunk_bytes = chunk_sectors * 512u;
+			u32 col = (u32)(stripe_idx % cols);
+			int c0 = (int)(2u * col);
+			int c1 = c0 + 1;
+			int targets[2];
+			int ntargets = 0;
+			int t;
+
+			if (chunk_bytes == 0 || chunk_bytes > seg_remaining) {
+				rc_printk(RC_ERROR,
+					  "rc_volume_dispatch_raid10: bvec split error (chunk_bytes=%u seg_remaining=%u bv_len=%u) — pos=%llu len=%u rejected\n",
+					  chunk_bytes, seg_remaining, bv.bv_len,
+					  (u64)pos, nr_sectors);
+				return BLK_STS_IOERR;
+			}
+
+			if (op == REQ_OP_WRITE) {
+				if (wmask & BIT(c0))
+					targets[ntargets++] = c0;
+				if (wmask & BIT(c1))
+					targets[ntargets++] = c1;
+			} else {
+				bool l0 = (live & BIT(c0)) != 0;
+				bool l1 = (live & BIT(c1)) != 0;
+				int chosen;
+
+				if (l0 && l1)
+					chosen = (atomic_inc_return(&rc_volume_rr_next) & 1)
+						 ? c1 : c0;
+				else if (l0)
+					chosen = c0;
+				else if (l1)
+					chosen = c1;
+				else
+					chosen = -1;	/* fatal catches first */
+				if (chosen >= 0)
+					targets[ntargets++] = chosen;
+			}
+
+			if (!ntargets) {
+				rc_printk(RC_ERROR,
+					  "rc_volume_dispatch_raid10: column %u has no usable copy (op=%u) — pos=%llu len=%u rejected\n",
+					  col, op, (u64)pos, nr_sectors);
+				return BLK_STS_IOERR;
+			}
+
+			for (t = 0; t < ntargets; t++) {
+				m = targets[t];
+				if (!member_has_data[m]) {
+					member_start_lba[m] =
+						rc_volume_phys_for_member(m,
+								cur_lba);
+					member_has_data[m] = true;
+					members_with_data++;
+				}
+				sg_used[m] = rc_volume_sg_append(
+						pdu->ms_sg[m], sg_used[m],
+						RC_VOLUME_MS_PAGES_PER_MEMBER,
+						seg_page, chunk_bytes,
+						seg_off_in_page);
+				if (!sg_used[m]) {
+					rc_printk(RC_ERROR,
+						  "rc_volume_dispatch_raid10: member %d sg overflow (>%u entries) — pos=%llu len=%u rejected\n",
+						  m,
+						  RC_VOLUME_MS_PAGES_PER_MEMBER,
+						  (u64)pos, nr_sectors);
+					return BLK_STS_IOERR;
+				}
+				member_sectors[m] += chunk_sectors;
+			}
+
+			seg_off_in_page += chunk_bytes;
+			seg_remaining   -= chunk_bytes;
+			seg_len_sectors -= chunk_sectors;
+			cur_lba         += chunk_sectors;
+		}
+	}
+
+	if (!members_with_data) {
+		rc_printk(RC_ERROR,
+			  "rc_volume_dispatch_raid10: no member with data — pos=%llu len=%u rejected\n",
+			  (u64)pos, nr_sectors);
+		return BLK_STS_IOERR;
+	}
+
+	for (m = 0; m < nm; m++) {
+		if (!member_has_data[m])
+			continue;
+		sg_mark_end(&pdu->ms_sg[m][sg_used[m] - 1]);
+	}
+
+	pdu->ms_active = true;
+	for (m = 0; m < nm; m++) {
+		struct device *dma_dev;
+		int mapped;
+
+		if (!member_has_data[m]) {
+			pdu->ms_nents[m] = 0;
+			continue;
+		}
+		dma_dev = &rc_volume_members[m]->pdev->dev;
+		mapped = dma_map_sg(dma_dev, pdu->ms_sg[m], sg_used[m],
+				    rc_volume_dma_dir(op));
+		if (mapped == 0) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_dispatch_raid10: dma_map_sg failed (member %d, %u entries) — pos=%llu len=%u rejected\n",
+				  m, sg_used[m], (u64)pos, nr_sectors);
+			pdu->ms_nents[m] = 0;
+			for (--m; m >= 0; m--) {
+				if (!pdu->ms_nents[m])
+					continue;
+				dma_dev = &rc_volume_members[m]->pdev->dev;
+				dma_unmap_sg(dma_dev, pdu->ms_sg[m],
+					     pdu->ms_nents[m],
+					     rc_volume_dma_dir(op));
+				pdu->ms_nents[m] = 0;
+			}
+			pdu->ms_active = false;
+			return BLK_STS_IOERR;
+		}
+		pdu->ms_nents[m] = mapped;
+	}
+
+	for (m = 0; m < nm; m++) {
+		if (!pdu->ms_nents[m])
+			continue;
+		if (!rc_nvme_sq_reserve(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num], 1)) {
+			while (m-- > 0)
+				if (pdu->ms_nents[m])
+					rc_nvme_sq_unreserve(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num], 1);
+			rc_volume_unmap_request_sg(pdu);
+			return BLK_STS_DEV_RESOURCE;
+		}
+	}
+
+	pdu->member_idx = -1;
+	pdu->member_mask = 0;
+	for (m = 0; m < nm; m++)
+		if (pdu->ms_nents[m])
+			pdu->member_mask |= BIT(m);
+	atomic_set(&pdu->members_pending, members_with_data);
+
+	{
+		struct rc_nvme_sqe cmds[RC_VOLUME_MAX_MEMBERS];
+		u32 tag = req->tag;
+
+		for (m = 0; m < nm; m++) {
+			if (!pdu->ms_nents[m])
+				continue;
+			if (rc_volume_build_io_sqe(&cmds[m], hctx->queue_num,
+					m, tag,
+					op == REQ_OP_WRITE ?
+					  RC_NVME_NVM_OP_WRITE :
+					  RC_NVME_NVM_OP_READ,
+					member_start_lba[m],
+					(u16)(member_sectors[m] - 1),
+					(req->cmd_flags & REQ_FUA) != 0,
+					pdu->ms_sg[m], pdu->ms_nents[m])) {
+				int u;
+
+				for (u = 0; u < nm; u++)
+					if (pdu->ms_nents[u])
+						rc_nvme_sq_unreserve(rc_volume_members[u]->ctx.nvme.io_queues[hctx->queue_num], 1);
+				rc_volume_unmap_request_sg(pdu);
+				return BLK_STS_IOERR;
+			}
+		}
+
+		blk_mq_start_request(req);
+		for (m = 0; m < nm; m++)
+			if (pdu->ms_nents[m])
+				rc_nvme_io_submit(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num],
+						  &cmds[m]);
+	}
+
+	return BLK_STS_OK;
+}
+
+/* RAID10 DISCARD: one DSM per live member, covering the physical extent of
+ * the logical stripes that member's column owns inside [pos, pos+nr).  Both
+ * copies of a column own the SAME logical stripes, so they receive the same
+ * range offset by their own user-data base.  This is the per-member range
+ * collapse of rc_volume_dispatch_multi_stripe_discard with the member's
+ * owner computed modulo the column count instead of the member count. */
+static blk_status_t rc_volume_dispatch_raid10_discard(
+		struct blk_mq_hw_ctx *hctx, struct request *req,
+		struct rc_volume_pdu *pdu, sector_t pos, u32 nr_sectors)
+{
+	const u32 stripe = rc_volume_stripe_sectors;
+	const int nm = rc_volume_member_count;
+	const u32 cols = rc_volume_raid10_cols;
+	const u64 start_stripe = pos / stripe;
+	const u64 end_lba = pos + (u64)nr_sectors - 1;
+	const u64 end_stripe = end_lba / stripe;
+	const u32 start_off_global = (u32)(pos - start_stripe * stripe);
+	const u32 end_off_global   = (u32)(end_lba - end_stripe * stripe);
+	unsigned int wmask =
+		(unsigned int)atomic_read(&rc_volume_write_mask) &
+		(unsigned int)(BIT(nm) - 1);
+	u64 member_start_lba[RC_VOLUME_MAX_MEMBERS] = {0};
+	u32 member_sectors[RC_VOLUME_MAX_MEMBERS] = {0};
+	bool member_has_data[RC_VOLUME_MAX_MEMBERS] = {0};
+	int members_with_data = 0;
+	u32 tag = req->tag;
+	int m;
+
+	if (nm <= 0 || nm > RC_VOLUME_MAX_MEMBERS || !stripe || !cols ||
+	    (u32)nm != cols * 2)
+		return BLK_STS_IOERR;
+
+	for (m = 0; m < nm; m++) {
+		u32 col = (u32)m / 2u;
+		u32 start_owner = (u32)(start_stripe % cols);
+		u32 rel = (col + cols - start_owner) % cols;
+		u64 first_owned = start_stripe + rel;
+		u64 last_owned;
+		u32 count, m_start_off, m_end_off;
+		u64 first_phys_stripe, last_phys_stripe;
+
+		if (!(wmask & BIT(m)))
+			continue;	/* dead copy; survivor covers the range */
+		if (first_owned > end_stripe)
+			continue;
+
+		count = (u32)((end_stripe - first_owned) / cols) + 1;
+		last_owned = first_owned + (u64)(count - 1) * cols;
+
+		m_start_off = (first_owned == start_stripe) ? start_off_global : 0;
+		m_end_off   = (last_owned  == end_stripe)   ? end_off_global   : (stripe - 1);
+
+		first_phys_stripe = first_owned / cols;
+		last_phys_stripe  = last_owned  / cols;
+
+		member_start_lba[m] = first_phys_stripe * stripe + m_start_off +
+				      rc_volume_member_phys_offset[m];
+		member_sectors[m]   = (u32)((last_phys_stripe - first_phys_stripe) * stripe
+					    + m_end_off - m_start_off + 1);
+		member_has_data[m]  = true;
+		members_with_data++;
+	}
+
+	if (!members_with_data)
+		return BLK_STS_IOERR;
+
+	for (m = 0; m < nm; m++) {
+		if (!member_has_data[m])
+			continue;
+		if (!rc_nvme_sq_reserve(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num], 1)) {
+			while (m-- > 0)
+				if (member_has_data[m])
+					rc_nvme_sq_unreserve(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num], 1);
+			return BLK_STS_DEV_RESOURCE;
+		}
+	}
+
+	pdu->member_idx = -1;
+	pdu->member_mask = 0;
+	for (m = 0; m < nm; m++)
+		if (member_has_data[m])
+			pdu->member_mask |= BIT(m);
+	atomic_set(&pdu->members_pending, members_with_data);
+
+	blk_mq_start_request(req);
+	for (m = 0; m < nm; m++) {
+		struct rc_nvme_sqe cmd;
+
+		if (!member_has_data[m])
+			continue;
+		rc_volume_build_discard_sqe(&cmd, hctx->queue_num, m, tag,
+					    member_start_lba[m],
+					    member_sectors[m]);
+		rc_nvme_io_submit(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num],
+				  &cmd);
+	}
+
+	return BLK_STS_OK;
+}
+
 static blk_status_t rc_volume_queue_rq(struct blk_mq_hw_ctx *hctx,
 				       const struct blk_mq_queue_data *bd)
 {
@@ -3844,13 +4343,17 @@ static blk_status_t rc_volume_queue_rq(struct blk_mq_hw_ctx *hctx,
 	/* Fold freshly-set dead flags into the member state machine and
 	 * check availability.  RAID0 fails on any dead member (every stripe
 	 * needs every member); RAID1 keeps serving degraded from the
-	 * surviving mirror and only fast-fails once no live member is left. */
+	 * surviving mirror; RAID10 keeps serving until a mirror PAIR loses
+	 * both copies.  Only when the level can no longer serve is I/O
+	 * fast-failed until reset/reload. */
 	if (rc_volume_fatal()) {
 		printk_ratelimited(KERN_ERR
 			"rcraid: %s: failing I/O — %s (all I/O fails until reset/reload)\n",
 			rc_volume_disk ? rc_volume_disk->disk_name : "?",
 			rc_volume_raid_level == RC_LDT_RAID1 ?
 				"no live mirror member remains" :
+			rc_volume_raid_level == RC_LDT_RAID10 ?
+				"a mirror pair lost both copies" :
 				"a member controller is dead and RAID0 has no degraded mode");
 		blk_mq_start_request(req);
 		if (rc_volume_claim_completion(pdu)) {
@@ -3951,6 +4454,46 @@ static blk_status_t rc_volume_queue_rq(struct blk_mq_hw_ctx *hctx,
 			blk_mq_end_request(req, BLK_STS_IOERR);
 		}
 		return BLK_STS_OK;
+	}
+
+	/* RAID10: stripe over mirror pairs, writing BOTH copies of each
+	 * column.  Handled BEFORE the RAID0 multi-stripe/stripe-math paths:
+	 *   - every WRITE and DISCARD must mirror to both copies;
+	 *   - a multi-stripe READ needs the pair-aware fan-out too, because
+	 *     chunk_sectors is 0 and a read may span several columns.
+	 * A single-stripe READ falls through to the normal single-member path
+	 * below; rc_volume_map_lba picks a live copy of the pair for it. */
+	if (rc_volume_raid_level == RC_LDT_RAID10) {
+		bool multi = rc_volume_stripe_sectors && nr_sectors > 0 &&
+			(pos / rc_volume_stripe_sectors) !=
+			((pos + nr_sectors - 1) / rc_volume_stripe_sectors);
+		bool pair_dispatch = op == REQ_OP_DISCARD ||
+				     op == REQ_OP_WRITE ||
+				     (op == REQ_OP_READ && multi);
+
+		if (pair_dispatch) {
+			if (op == REQ_OP_DISCARD)
+				st = rc_volume_dispatch_raid10_discard(
+						hctx, req, pdu, pos,
+						nr_sectors);
+			else
+				st = rc_volume_dispatch_raid10(hctx, req, pdu,
+							       pos,
+							       nr_sectors, op);
+			if (st == BLK_STS_DEV_RESOURCE) {
+				/* SQ full — hand back to blk-mq untouched
+				 * for a retry (request never started). */
+				return st;
+			}
+			if (st != BLK_STS_OK) {
+				blk_mq_start_request(req);
+				if (rc_volume_claim_completion(pdu)) {
+					blk_mq_end_request(req, st);
+				}
+			}
+			return BLK_STS_OK;
+		}
+		/* single-stripe READ: fall through to the single-member path */
 	}
 
 	/* RAID1 WRITE/DISCARD: every mirror must receive the data, so these
@@ -4675,15 +5218,16 @@ static int rc_volume_create_disk(void)
 			 * for multi-stripe requests, into one NVMe cmd per
 			 * member via rc_volume_dispatch_multi_stripe). */
 			.max_hw_sectors      = RC_VOLUME_DATA_BYTES / 512,
-			/* RAID1 caps segments at the per-member sg array size:
-			 * mirror writes copy the request's segments into
-			 * ms_sg[member][RC_VOLUME_MS_PAGES_PER_MEMBER], so
-			 * blk-mq must never legally hand queue_rq more
+			/* RAID1 and RAID10 cap segments at the per-member sg
+			 * array size: both fan-outs copy the request's segments
+			 * into ms_sg[member][RC_VOLUME_MS_PAGES_PER_MEMBER],
+			 * so blk-mq must never legally hand queue_rq more
 			 * segments than that array holds.  (virt_boundary
 			 * already bounds a 256 KiB request to ~65 segments in
 			 * practice, but the advertised contract is what
 			 * matters — don't rely on the implicit math.) */
-			.max_segments        = rc_volume_raid_level == RC_LDT_RAID1
+			.max_segments        = (rc_volume_raid_level == RC_LDT_RAID1 ||
+						rc_volume_raid_level == RC_LDT_RAID10)
 						? RC_VOLUME_MS_PAGES_PER_MEMBER
 						: RC_VOLUME_DATA_PAGES,
 			.max_segment_size    = PAGE_SIZE,
@@ -4693,32 +5237,22 @@ static int rc_volume_create_disk(void)
 			 * segment after the first is page-aligned, which is what
 			 * rc_volume_build_prp relies on. */
 			.virt_boundary_mask  = PAGE_SIZE - 1,
-			/* Split READ/WRITE at stripe boundaries so each request
-			 * maps to exactly one member.  blk-mq guarantees no
-			 * request crosses a chunk_sectors-aligned boundary, so
-			 * every READ/WRITE that reaches rc_volume_queue_rq is
-			 * single-member and takes the single-stripe path.
+			/* chunk_sectors = 0: blk-mq does NOT split READ/WRITE
+			 * at stripe boundaries, so a request may span several
+			 * stripes.  rc_volume_queue_rq folds that into ONE NVMe
+			 * command per affected member via
+			 * rc_volume_dispatch_multi_stripe (RAID0) or
+			 * rc_volume_dispatch_raid10 (RAID10), which split the
+			 * bvec at stripe boundaries into per-member sg arrays
+			 * and honour the virt_boundary_mask above.  This caps
+			 * the per-request command count at the member count
+			 * instead of one per stripe.
 			 *
-			 * NOTE: rc_volume_dispatch_multi_stripe IS wired up in
-			 * rc_volume_queue_rq (its bvec walk splits at stripe
-			 * boundaries into per-member sg arrays and honours the
-			 * virt_boundary_mask above, so the old PRP-alignment /
-			 * sg-overflow problems no longer apply).  But with
-			 * chunk_sectors set to the stripe size that fan-out is
-			 * currently UNREACHABLE for READ/WRITE — no request ever
-			 * spans two stripes.  It's retained (not deleted) as the
-			 * ready path for a future change that raises chunk_sectors
-			 * to fold a multi-stripe request into one NVMe cmd per
-			 * member.  Not worth enabling today: 256 KiB single-member
-			 * commands already saturate the members (~18-20 GB/s R/W).
-			 *
-			 * Discards are unaffected — blk-mq splits them by
-			 * max_hw_discard_sectors, not chunk_sectors, so the
-			 * one-DSM-per-member fan-out in
-			 * rc_volume_dispatch_multi_stripe_discard still sees
-			 * genuinely multi-stripe requests. */
-                    .max_hw_sectors      = 2048, /* Scale execution boundary window */ 
-			.chunk_sectors       = 0, /* Lift limit to handle dynamic multi-stripe requests */ 
+			 * Discards are separately split by
+			 * max_hw_discard_sectors, so the one-DSM-per-member
+			 * fan-outs (multi_stripe_discard / raid10_discard) still
+			 * see genuinely multi-stripe requests. */
+			.chunk_sectors       = 0,
 			/* Advertise that the underlying controllers have a volatile
 			 * write cache and that we honour FUA — filesystems will
 			 * now route REQ_OP_FLUSH and REQ_FUA writes through. */
@@ -5241,6 +5775,20 @@ static void rc_volume_member_readmitted(int slot)
 		return;
 	}
 
+	/* RAID10 rebuild is not implemented yet.  The existing resync copies
+	 * the whole logical space identity-mapped, which is correct for a
+	 * full-space mirror (RAID1) but wrong for RAID10: a member only owns
+	 * the stripes of ITS column, so a whole-space copy would overwrite it
+	 * with data belonging to other columns and silently corrupt the pair.
+	 * Leave the member parked — it receives no writes and serves no reads,
+	 * so the array stays safely degraded until pair-aware rebuild lands. */
+	if (rc_volume_raid_level == RC_LDT_RAID10) {
+		rc_printk(RC_WARN,
+			  "rc_volume: member %d needs resync but RAID10 rebuild is not implemented yet — leaving parked (not written, not read)\n",
+			  slot);
+		return;
+	}
+
 	rc_volume_resync_reap_locked();
 
 	if (rc_volume_resync_thread) {
@@ -5364,6 +5912,7 @@ void rc_volume_teardown(void)
 	rc_volume_resync_slot = -1;
 	rc_volume_member_count = 0;
 	rc_volume_stripe_sectors = 0;
+	rc_volume_raid10_cols = 0;
 	/* Re-open resyncs: this path also runs for a mid-runtime last-member
 	 * removal, and a later re-probe must be able to rebuild. */
 	rc_volume_tearing_down = false;
@@ -5387,6 +5936,7 @@ int rc_volume_debugfs_show(struct seq_file *m, void *unused)
 		   rc_volume_disk ? rc_volume_disk->disk_name : "none");
 	seq_printf(m, "level: %s\n",
 		   rc_volume_raid_level == RC_LDT_RAID1 ? "raid1" :
+		   rc_volume_raid_level == RC_LDT_RAID10 ? "raid10" :
 		   rc_volume_raid_level == RC_LDT_RAID0 ? "raid0" : "unknown");
 	seq_printf(m, "members: %d\n", rc_volume_member_count);
 	seq_printf(m, "live_mask: 0x%x\n", live);
@@ -5421,7 +5971,9 @@ int rc_volume_debugfs_show(struct seq_file *m, void *unused)
 	else if (rc_volume_resync_slot >= 0)
 		seq_puts(m, "state: resyncing\n");
 	else if (nlive < rc_volume_member_count &&
-		 rc_volume_raid_level == RC_LDT_RAID1)
+		 (rc_volume_raid_level == RC_LDT_RAID1 ||
+		  (rc_volume_raid_level == RC_LDT_RAID10 &&
+		   rc_volume_can_serve())))
 		seq_puts(m, "state: degraded\n");
 	else if (nlive < rc_volume_member_count)
 		seq_puts(m, "state: failed\n");
@@ -5449,9 +6001,14 @@ static const char *rc_volume_state_str(void)
 		return "failed";
 	if (READ_ONCE(rc_volume_resync_slot) >= 0)
 		return "resyncing";
-	if (nlive < rc_volume_member_count)
-		return rc_volume_raid_level == RC_LDT_RAID1 ? "degraded"
-							    : "failed";
+	if (nlive < rc_volume_member_count) {
+		if (rc_volume_raid_level == RC_LDT_RAID1)
+			return "degraded";
+		if (rc_volume_raid_level == RC_LDT_RAID10 &&
+		    rc_volume_can_serve())
+			return "degraded";
+		return "failed";
+	}
 	return "optimal";
 }
 
@@ -5663,14 +6220,16 @@ void rc_volume_remove_member(struct rc_adapter *adapter)
 	for (i = 0; i < RC_VOLUME_MAX_MEMBERS; i++)
 		if (rc_volume_members[i] == adapter)
 			slot = i;
-	/* RAID1 with another live member keeps serving degraded; everything
-	 * else (RAID0, last mirror, pre-disk assembly) tears down as
-	 * before.  Decided under the lock so a concurrent removal of the
-	 * other member can't leave both paths thinking a survivor exists. */
+	/* RAID1 with another live member keeps serving degraded; RAID10 keeps
+	 * serving as long as no mirror pair loses BOTH copies.  Everything
+	 * else (RAID0, a defeated RAID10 pair, the last mirror, pre-disk
+	 * assembly) tears down as before.  Decided under the lock so a
+	 * concurrent removal of the other copy can't leave both paths
+	 * thinking a survivor exists. */
 	keep_volume = slot >= 0 && rc_volume_disk &&
-		      rc_volume_raid_level == RC_LDT_RAID1 &&
-		      (atomic_read(&rc_volume_live_mask) & ~BIT(slot) &
-		       (BIT(rc_volume_member_count) - 1)) != 0;
+		      (rc_volume_raid_level == RC_LDT_RAID1 ||
+		       rc_volume_raid_level == RC_LDT_RAID10) &&
+		      rc_volume_can_serve_without(slot);
 	if (keep_volume)
 		rc_volume_member_set_state(slot, RC_MEMBER_FAILED);
 	mutex_unlock(&rc_volume_lock);
@@ -5680,7 +6239,7 @@ void rc_volume_remove_member(struct rc_adapter *adapter)
 
 	if (!keep_volume) {
 		rc_printk(RC_WARN,
-			  "rc_volume_remove_member: %s is a live volume member with no RAID1 survivor — tearing down /dev/rcraid0 before releasing the adapter\n",
+			  "rc_volume_remove_member: %s is a live volume member with no surviving copy — tearing down /dev/rcraid0 before releasing the adapter\n",
 			  pci_name(adapter->pdev));
 
 		/* Fail fast: no new dispatches reach this adapter, and every
@@ -5694,8 +6253,9 @@ void rc_volume_remove_member(struct rc_adapter *adapter)
 	}
 
 	rc_printk(RC_WARN,
-		  "rc_volume_remove_member: %s removed — RAID1 volume continues DEGRADED on the surviving mirror\n",
-		  pci_name(adapter->pdev));
+		  "rc_volume_remove_member: %s removed — %s volume continues DEGRADED on the surviving copy/mirror\n",
+		  pci_name(adapter->pdev),
+		  rc_volume_raid_level == RC_LDT_RAID10 ? "RAID10" : "RAID1");
 
 	/* Order matters: dead + drain BEFORE the slot is NULLed (the drain
 	 * disables the departing controller and synthesizes completions for
@@ -6046,13 +6606,14 @@ int rc_nvme_reset_controller(struct rc_adapter *adapter)
 	if (rc_volume_disk)
 		blk_mq_unquiesce_queue(rc_volume_disk->queue);
 
-	/* Rejoin policy for a recovered member (CORRECTNESS-CRITICAL for
-	 * RAID1): while this member was FAILED the volume kept accepting
-	 * writes on the survivor, so this member's data is STALE.  Clearing
-	 * `dead` must NOT put it back into dispatch — a rejoined stale
-	 * mirror serves old data to half the reads.  Park it in
-	 * NEEDS_RESYNC; the resync engine (follow-up to #51) makes that
-	 * state actionable.
+	/* Rejoin policy for a recovered member (CORRECTNESS-CRITICAL for the
+	 * mirrored levels): while this member was FAILED the volume kept
+	 * accepting writes on the surviving copy, so this member's data is
+	 * STALE.  Clearing `dead` must NOT put it back into dispatch — a
+	 * rejoined stale mirror serves old data to half the reads.  Park it in
+	 * NEEDS_RESYNC; the resync engine makes that state actionable for
+	 * RAID1 (RAID10 rebuild is not implemented yet, so its parked members
+	 * stay out of both read and write dispatch).
 	 *
 	 * RAID0 is the opposite: with any member down the volume failed
 	 * EVERY request (no partial writes possible), so nothing diverged —
@@ -6071,7 +6632,8 @@ int rc_nvme_reset_controller(struct rc_adapter *adapter)
 		if (slot >= 0 && slot < RC_VOLUME_MAX_MEMBERS &&
 		    rc_volume_members[slot] == adapter &&
 		    READ_ONCE(rc_volume_member_state[slot]) == RC_MEMBER_FAILED) {
-			if (rc_volume_raid_level == RC_LDT_RAID1) {
+			if (rc_volume_raid_level == RC_LDT_RAID1 ||
+			    rc_volume_raid_level == RC_LDT_RAID10) {
 				rc_volume_member_set_state(slot,
 						RC_MEMBER_NEEDS_RESYNC);
 				rc_printk(RC_WARN,
