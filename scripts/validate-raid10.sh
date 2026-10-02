@@ -15,7 +15,7 @@
 #                forced fail -> rebuild cycle.  Use a scratch array.
 #   --yes        skip the confirmation prompt.
 #   --dev PATH   device to validate (default /dev/rcraid0).
-#   --timeout N  rebuild wait, seconds (default 900).
+#   --timeout N  rebuild wait, seconds (default: auto from device size).
 #
 # Exit: 0 = every executed check passed; 1 = a check failed; 2 = precondition.
 
@@ -24,7 +24,7 @@ set -u
 DEV=/dev/rcraid0
 FULL=0
 ASSUME_YES=0
-REBUILD_TIMEOUT=900
+REBUILD_TIMEOUT=0   # 0 = auto-size from the device
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 while [ $# -gt 0 ]; do
@@ -66,8 +66,18 @@ if [ ! -d "$SYS" ]; then
     exit 2
 fi
 
+if [ "$REBUILD_TIMEOUT" -eq 0 ]; then
+    bytes="$(blockdev --getsize64 "$DEV" 2>/dev/null || echo 0)"
+    [ "$bytes" -gt 0 ] || bytes=$((512 * 2000 * 1000))
+    # A full member rebuild copies the whole member.  Assume a conservative
+    # 300 MB/s floor (slow QLC over PCIe 3.0 can be slower) plus 10 min slack,
+    # with a 15 min minimum so small test arrays still fail fast.
+    REBUILD_TIMEOUT=$((bytes / (300 * 1024 * 1024) + 600))
+    [ "$REBUILD_TIMEOUT" -lt 900 ] && REBUILD_TIMEOUT=900
+fi
+
 echo "RAID 10 certification — $(date -Is)"
-echo "device=$DEV  full=$FULL"
+echo "device=$DEV  full=$FULL  rebuild-timeout=${REBUILD_TIMEOUT}s"
 
 if [ "$FULL" -eq 1 ] && [ "$ASSUME_YES" -eq 0 ]; then
     read -r -p "This will DESTROY data on $DEV. Type 'yes' to continue: " a
