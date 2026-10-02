@@ -10,6 +10,27 @@ Work top to bottom. Steps 1 and 2 are **destructive** — run them against a
 scratch array or a scratch partition (`/dev/rcraid0pN`), never against a disk
 holding anything you care about.
 
+## Fast path — one command
+
+Most of steps 0–4 (trust gate, geometry, cache-dropped reads, one-copy
+failover, rebuild) is automated by `scripts/validate-raid10.sh`, run **on the
+array box**:
+
+```
+sudo ./scripts/validate-raid10.sh                          # read-only dry pass
+sudo ./scripts/validate-raid10.sh --full --yes             # destructive: writes + rebuild
+sudo ./scripts/validate-raid10.sh --full --no-wipe --yes   # rebuild only, data preserved
+```
+
+`--no-wipe` skips `test_write_path.sh`, so the array's contents survive (failing
+and re-admitting one mirror copy is what RAID is for). Use it when you cannot
+erase the array; quiesce it first. It still reads across the whole device,
+exercises degraded failover, and drives the rebuild write path — it only omits
+the standalone write torture. The rebuild wait auto-sizes from the device
+(≈3.5 h for 4 TB at a 300 MB/s floor); override with `--timeout N`. Paste the
+full output for sign-off. The fatal whole-pair boundary, the rebuild-sourcing
+proof, and steps 5–6 stay manual.
+
 ## Preconditions
 
 - [ ] 4 (or any even number of) NVMe members in a **firmware-created RAID 10**.

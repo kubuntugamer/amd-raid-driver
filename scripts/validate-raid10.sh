@@ -11,8 +11,11 @@
 #
 # Options:
 #   (no --full)  read-only: trust gate, level/geometry, cache-dropped reads.
-#   --full       DESTRUCTIVE: runs test_write_path.sh on the array and a
-#                forced fail -> rebuild cycle.  Use a scratch array.
+#   --full       also run the forced fail -> degraded -> rebuild cycle.
+#   --no-wipe    with --full, skip test_write_path.sh so the array's data is
+#                NOT overwritten.  Failing then re-admitting one mirror copy is
+#                data-safe (it is what RAID is for); quiesce the array first.
+#                Use this to certify an array you cannot erase.
 #   --yes        skip the confirmation prompt.
 #   --dev PATH   device to validate (default /dev/rcraid0).
 #   --timeout N  rebuild wait, seconds (default: auto from device size).
@@ -23,6 +26,7 @@ set -u
 
 DEV=/dev/rcraid0
 FULL=0
+NO_WIPE=0
 ASSUME_YES=0
 REBUILD_TIMEOUT=0   # 0 = auto-size from the device
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,10 +34,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 while [ $# -gt 0 ]; do
     case "$1" in
         --full)    FULL=1; shift ;;
+        --no-wipe) NO_WIPE=1; shift ;;
         --yes)     ASSUME_YES=1; shift ;;
         --dev)     DEV="$2"; shift 2 ;;
         --timeout) REBUILD_TIMEOUT="$2"; shift 2 ;;
-        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -66,9 +71,11 @@ if [ ! -d "$SYS" ]; then
     exit 2
 fi
 
+bytes="$(blockdev --getsize64 "$DEV" 2>/dev/null || echo 0)"
+[ "$bytes" -gt 0 ] || bytes=$((512 * 2000 * 1000))
+dev_mib=$((bytes / 1048576))
+
 if [ "$REBUILD_TIMEOUT" -eq 0 ]; then
-    bytes="$(blockdev --getsize64 "$DEV" 2>/dev/null || echo 0)"
-    [ "$bytes" -gt 0 ] || bytes=$((512 * 2000 * 1000))
     # A full member rebuild copies the whole member.  Assume a conservative
     # 300 MB/s floor (slow QLC over PCIe 3.0 can be slower) plus 10 min slack,
     # with a 15 min minimum so small test arrays still fail fast.
@@ -77,10 +84,14 @@ if [ "$REBUILD_TIMEOUT" -eq 0 ]; then
 fi
 
 echo "RAID 10 certification — $(date -Is)"
-echo "device=$DEV  full=$FULL  rebuild-timeout=${REBUILD_TIMEOUT}s"
+echo "device=$DEV  full=$FULL  no-wipe=$NO_WIPE  rebuild-timeout=${REBUILD_TIMEOUT}s"
 
 if [ "$FULL" -eq 1 ] && [ "$ASSUME_YES" -eq 0 ]; then
-    read -r -p "This will DESTROY data on $DEV. Type 'yes' to continue: " a
+    if [ "$NO_WIPE" -eq 1 ]; then
+        read -r -p "This will fail and rebuild a mirror member of $DEV (data preserved). Type 'yes' to continue: " a
+    else
+        read -r -p "This will DESTROY data on $DEV. Type 'yes' to continue: " a
+    fi
     [ "$a" = yes ] || { echo "aborted"; exit 2; }
 fi
 
@@ -118,20 +129,27 @@ sed 's/^/  /' "$DBG" 2>/dev/null || note "debugfs not mounted?"
 hdr "1b. Cache-dropped direct reads"
 sync
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-if dd if="$DEV" of=/dev/null bs=1M count=16 iflag=direct status=none; then
-    ok "16 MiB O_DIRECT read"
-else
-    bad "O_DIRECT read of $DEV failed"
-fi
+for frac in 0 50 100; do
+    off=$((dev_mib * frac / 100))
+    if [ "$off" -gt 16 ]; then off=$((off - 16)); else off=0; fi
+    if dd if="$DEV" of=/dev/null bs=1M count=16 skip="$off" iflag=direct status=none; then
+        ok "16 MiB O_DIRECT read @${frac}% (skip=${off}MiB)"
+    else
+        bad "O_DIRECT read of $DEV @${frac}% failed"
+    fi
+done
 
 # ---------------------------------------------------------------- 2. writes
-if [ "$FULL" -eq 1 ]; then
+if [ "$FULL" -eq 1 ] && [ "$NO_WIPE" -eq 0 ]; then
     hdr "2. Write-path torture (test_write_path.sh)"
     if "$SCRIPT_DIR/../test_write_path.sh" --yes "$DEV"; then
         ok "test_write_path.sh (fragmented writes, mkfs, dmesg tripwire)"
     else
         bad "test_write_path.sh"
     fi
+elif [ "$FULL" -eq 1 ]; then
+    hdr "2. Write-path torture"
+    note "skipped (--no-wipe): array data left intact"
 fi
 
 # ---------------------------------------------------------------- 3. rebuild
@@ -219,8 +237,13 @@ if [ "$FAILED" -ne 0 ]; then
     exit 1
 fi
 if [ "$FULL" -eq 1 ]; then
-    echo "RESULT: RAID10 VALIDATED (automated checks). Complete the manual steps,"
-    echo "        then paste this output to promote the level to 'stable'."
+    if [ "$NO_WIPE" -eq 1 ]; then
+        echo "RESULT: RAID10 VALIDATED (automated checks; --no-wipe skipped write torture)."
+    else
+        echo "RESULT: RAID10 VALIDATED (automated checks)."
+    fi
+    echo "        Complete the manual steps, then paste this output to promote"
+    echo "        the level to 'stable'."
 else
     echo "RESULT: read-only checks passed. Re-run with --full --yes to complete"
     echo "        certification (destructive)."
