@@ -11,9 +11,10 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 ## 🚦 Deployment Status — Baseline Release
 
 > **⚠️ DEPLOYMENT WARNING — READ BEFORE INSTALLING.**
-> This fork is currently **locked to a functional, stable RAID 0 and RAID 1
-> architecture pass**, with **RAID 10 data I/O newly landed** (see the matrix —
-> reads/writes/discards and degraded failover work; member rebuild does not yet).
+> The committed baseline is **RAID 0 and RAID 1**; **RAID 10 is now complete
+> end-to-end** (see the matrix — reads/writes/discards, degraded failover,
+> member rebuild, and boot-time degraded assembly all landed; real-hardware
+> validation is scheduled).
 > The mirror completion and array rebuild paths run on a
 > **modern non-blocking asynchronous thread runner** (`kamd_async_worker` parks
 > parent-bio endio off the hardware completion context; `kamd_resync` owns
@@ -27,14 +28,18 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 *   **Verified build:** the tree compiles **cleanly, with zero warnings and zero
     errors**, against `7.0.0-34-generic` headers (a second clean build was
     verified against `7.0.0-38-generic`).
-*   **RAID 10:** the nested striped-mirror layout now takes a real blk-mq
+*   **RAID 10:** the nested striped-mirror layout takes a real blk-mq
     dispatch path — writes and discards mirror to **both** copies of each
     2-way pair, reads round-robin across the pair, and losing one copy per
-    pair degrades the array instead of failing it. **Rebuild/resync of a
-    replaced RAID 10 member and boot-time degraded assembly are not
-    implemented yet** (a failed member is parked out of read/write dispatch,
-    never rebuilt; an array missing a member at load does not assemble), so
-    treat RAID 10 as I/O-verified but **not rebuild-complete**.
+    pair degrades the array instead of failing it. A stale or replaced member
+    is rebuilt **from its own mirror partner** (the only copy that holds the
+    same column's stripes), one column at a time, with a logical
+    write-exclusion window so application writes can't race the copy. The
+    array **assembles degraded at boot** as long as every pair keeps at least
+    one copy, then rebuilds the missing copy when it returns; a pair that has
+    lost both copies refuses assembly rather than exposing an unreadable
+    volume. Treat RAID 10 as feature-complete pending real-hardware
+    validation.
 *   **Frozen scope:** features outside the RAID 0 / RAID 1 / RAID 10 data
     paths — the RAID 5 / RAID 6 layouts and the remaining experimental engine
     code paths — are **intentionally frozen** for **post-migration execution
@@ -46,14 +51,15 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 ## 🎛️ RAID Format State Matrix
 
 The baseline release is deliberately narrow. RAID 0 and RAID 1 are the
-production-supported rows; RAID 10 now has a working data path but is not yet
-rebuild-complete; RAID 5/6 remain frozen for post-migration work.
+production-supported rows; RAID 10 is feature-complete (data path + rebuild +
+degraded assembly) pending real-hardware validation; RAID 5/6 remain frozen
+for post-migration work.
 
 | Format | State | Notes |
 | --- | --- | --- |
 | **RAID 0 (Stripe)** | ✅ **Baseline — stable** | Full horizontal data chunk striping. |
 | **RAID 1 (Mirror)** | ✅ **Baseline — stable** | Duplicated writes across pairs; round-robin load-balanced reads; degraded failover + non-blocking resync. |
-| RAID 10 (Nested) | 🟡 **I/O landed — rebuild pending** | Striped row segments over 2-way mirrored pairs (≥ 4 drives). Writes/discards mirror to both copies, reads round-robin, per-pair degraded failover. Member rebuild/resync and boot-time degraded assembly are **not implemented yet**. |
+| RAID 10 (Nested) | 🟢 **Feature-complete — validation pending** | Striped row segments over 2-way mirrored pairs (≥ 4 drives). Writes/discards mirror to both copies, reads round-robin, per-pair degraded failover. Pair-aware member rebuild/resync and boot-time degraded assembly landed; a lost pair refuses assembly. |
 | RAID 5 (Parity) | 🧪 Experimental — frozen | Left-asymmetric rotating single-parity. |
 | RAID 6 (Dual Parity) | 🧪 Experimental — frozen | P + Galois-field Q dual parity. |
 
@@ -61,7 +67,7 @@ rebuild-complete; RAID 5/6 remain frozen for post-migration work.
 
 ## 🚀 Key Production Features
 
-*   **Interactive Phase 1 Terminal GUI (TUI):** No pre-configured arrays are required on boot. On clean, blank testing drives, the live-installer automatically spins up a keyboard-driven blue menu canvas (`dialog`). Testers can check off raw NVMe paths using the Spacebar, choose a target level — **0 or 1** for the production baseline (10 has data I/O but no member rebuild yet; 5/6 remain frozen) — and commit layouts on the fly.
+*   **Interactive Phase 1 Terminal GUI (TUI):** No pre-configured arrays are required on boot. On clean, blank testing drives, the live-installer automatically spins up a keyboard-driven blue menu canvas (`dialog`). Testers can check off raw NVMe paths using the Spacebar, choose a target level — **0, 1, or 10** for the production baseline (RAID 10 needs at least four disks; 5/6 remain frozen experimental) — and commit layouts on the fly.
 *   **Defensive Hardware Security Guards:** The TUI contains an automated validation length check that enforces a hard **maximum 8-disk constraint** matching AMD firmware specifications, safely preventing memory overrun kernel oops before touching the PCIe bus registers.
 *   **Advanced Rootfs Probing:** Phase 2 avoids fragile, hardcoded partition name assumptions. It uses a read-only sandboxed mount-and-probe matrix to peak inside array partitions, locate the genuine system `/etc/os-release`, and seamlessly execute chroot boot configurations on any distribution setup.
 *   **Non-Blocking Asynchronous Completion Engine:** Parent-bio completion is parked on the `kamd_async_worker` kthread queue, so hardware completion contexts return immediately and never stall the block-layer queue; a separate `kamd_resync` thread owns long-running rebuilds. Over-reports from faulty member paths are absorbed by a bounded tombstone pool instead of being fatal.
@@ -82,7 +88,7 @@ This is the recommended deployment path for setting up a fresh Linux environment
    sudo ./install-livecd.sh
    ```
 3. The script will automatically pull development dependencies in RAM, compile the driver, and launch the interactive **Terminal GUI**.
-4. Use the **Arrow Keys** to navigate, **Spacebar** to check your member disks, and choose a baseline **RAID Level (0 or 1)** — 10 has data I/O but no member rebuild yet, and 5/6 remain frozen.
+4. Use the **Arrow Keys** to navigate, **Spacebar** to check your member disks, and choose a baseline **RAID Level (0, 1, or 10)** — 5/6 remain frozen experimental.
 5. Hit **OK**. The driver unbinds the raw paths, writes the layout data, and stands up **`/dev/rcraid0`** instantly.
 6. Minimize the terminal and launch your desktop OS installer wizard. Select **Custom Partitioning**, map your layout over `/dev/rcraid0`, and let it copy files. **DO NOT REBOOT** when the installer finishes. Close the wizard panel and return to your open terminal window.
 

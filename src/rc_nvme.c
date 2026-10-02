@@ -99,7 +99,7 @@ static DEFINE_MUTEX(rc_volume_lock);
  * NEEDS_RESYNC  — controller recovered (auto/manual reset) after missing
  *                 writes, or re-plugged.  Its data is stale; it must NOT
  *                 rejoin dispatch until a resync copies the survivor over
- *                 it.  Parked in this state until the resync engine lands.
+ *                 it.  The rebuild scheduler picks these up one at a time.
  * RESYNCING     — reserved for the resync engine (receives writes, serves
  *                 no reads).
  *
@@ -157,11 +157,16 @@ static struct task_struct *rc_volume_resync_thread;	/* under rc_volume_lock */
 static bool rc_volume_resync_done;	/* thread finished, awaiting reap */
 static bool rc_volume_tearing_down;	/* under rc_volume_lock: no new resyncs */
 static int  rc_volume_resync_slot = -1;	/* target slot, -1 = idle */
-static atomic64_t rc_volume_resync_cursor;	/* progress, logical sectors */
-static u64  rc_volume_resync_total;
+static atomic64_t rc_volume_resync_cursor;	/* progress, per-member sectors */
+static u64  rc_volume_resync_total;		/* per-member sectors */
 static atomic64_t rc_volume_resync_window = ATOMIC64_INIT(RC_RESYNC_WINDOW_NONE);
 static atomic_t rc_volume_wgen;
 static atomic_t rc_volume_wgen_count[2];
+
+/* Serialized rebuild scheduler (defined near rc_volume_member_readmitted).
+ * Declared here so the resync thread's exit path can re-arm it. */
+static void rc_volume_rebuild_fn(struct work_struct *w);
+static DECLARE_WORK(rc_volume_rebuild_work, rc_volume_rebuild_fn);
 
 /* Throttle between copy chunks (0 = full speed).  Runtime-tunable. */
 static unsigned int rc_volume_resync_delay_ms;
@@ -2724,6 +2729,11 @@ static u32 rc_volume_chunk_sectors_for(u32 devtype, u32 ld_chunk,
 		return ld_chunk;
 	switch (devtype) {
 	case RC_LDT_RAID0:
+	case RC_LDT_RAID10:
+		/* Both stripe the logical space, so the on-disk chunk encoding
+		 * is a data-layout parameter for both.  RAID10 reuses RAID0's
+		 * chunk_index -> stripe table; rc_amd_map_nested_raid10() only
+		 * takes the resolved stripe size, so the two must agree. */
 		switch (ld_chunk_index) {
 		case 3:  return 512u;
 		case 2:  return 256u;
@@ -2808,20 +2818,25 @@ static void rc_volume_register_member(struct rc_adapter *adapter)
 		 * WRONG for a real 512 KiB / 1 MiB stripe and corrupt the array
 		 * on write.  Keep 64 KiB so reads still work, but distrust the
 		 * geometry so create_disk forces read-only. */
-		if (nvme->ld_level == RC_LDT_RAID0 &&
+		if ((nvme->ld_level == RC_LDT_RAID0 ||
+		     nvme->ld_level == RC_LDT_RAID10) &&
 		    nvme->ld_chunk_sectors == 0 && nvme->ld_chunk_index > 3) {
 			rc_printk(RC_WARN,
-				  "rc_volume_register_member: %s RAID0 chunk_index=%u not understood (only 0..3 map to a known stripe) — geometry UNTRUSTED, writes will be vetoed\n",
-				  pci_name(adapter->pdev), nvme->ld_chunk_index);
+				  "rc_volume_register_member: %s RAID%d chunk_index=%u not understood (only 0..3 map to a known stripe) — geometry UNTRUSTED, writes will be vetoed\n",
+				  pci_name(adapter->pdev),
+				  nvme->ld_level == RC_LDT_RAID10 ? 10 : 0,
+				  nvme->ld_chunk_index);
 			rc_volume_geometry_untrust_reason =
-				"the on-disk RAID0 chunk_index is not one this driver maps to a stripe size (see the earlier chunk_index warning) — an on-disk encoding this driver doesn't recognize, not a parse failure";
+				"the on-disk RAID0/RAID10 chunk_index is not one this driver maps to a stripe size (see the earlier chunk_index warning) — an on-disk encoding this driver doesn't recognize, not a parse failure";
 		}
 		/* Sanity-bound a verbatim on-disk ChunkSize.  Every dispatch
 		 * assumption (per-member sg arrays, one NVMe cmd per member,
 		 * the 1 MiB max request) is derived from sane power-of-two
 		 * stripes; an implausible value means we're misreading the
 		 * field, so keep the array readable but veto writes. */
-		if (nvme->ld_level == RC_LDT_RAID0 && nvme->ld_chunk_sectors &&
+		if ((nvme->ld_level == RC_LDT_RAID0 ||
+		     nvme->ld_level == RC_LDT_RAID10) &&
+		    nvme->ld_chunk_sectors &&
 		    (chunk_sectors < 16u ||
 		     chunk_sectors > (RC_VOLUME_DATA_BYTES / 512u) ||
 		     (chunk_sectors & (chunk_sectors - 1)))) {
@@ -2895,8 +2910,19 @@ static void rc_volume_register_member(struct rc_adapter *adapter)
 	 * dispatch (a rejoined stale mirror serves old blocks to half the
 	 * reads).  Install it parked in NEEDS_RESYNC: the pointer, slot,
 	 * and DMA pool come back, but no live bit — only a completed
-	 * resync (or, until the engine lands, a rebuilt array) flips it. */
+	 * resync flips it. */
 	if (rc_volume_disk) {
+		u64 member_cap = get_capacity(rc_volume_disk);
+
+		/* RAID10's volume capacity is stretched over rc_volume_raid10_cols
+		 * columns (mirrors add none), so the per-member user-data size
+		 * must be compared against the volume size DIVIDED by the column
+		 * count, not the whole volume.  Comparing against the whole
+		 * volume would reject every RAID10 re-add up front. */
+		if (rc_volume_raid_level == RC_LDT_RAID10 &&
+		    rc_volume_raid10_cols)
+			member_cap = div_u64(member_cap, rc_volume_raid10_cols);
+
 		if (!have_ld) {
 			rc_printk(RC_WARN,
 				  "rc_volume_register_member: %s probed while /dev/rcraid0 is live but has no parseable LD — not re-admitting via the legacy fallback\n",
@@ -2938,12 +2964,12 @@ static void rc_volume_register_member(struct rc_adapter *adapter)
 		 * and only fail deep into the resync copy, when a chunk
 		 * write lands past its LBA range — reject the capacity
 		 * mismatch up front with a diagnosable message instead. */
-		if (nvme->ld_userdata_size < get_capacity(rc_volume_disk)) {
+		if (nvme->ld_userdata_size < member_cap) {
 			rc_printk(RC_WARN,
-				  "rc_volume_register_member: %s re-add rejected — capacity mismatch: member user-data %llu sectors < volume %llu sectors\n",
+				  "rc_volume_register_member: %s re-add rejected — capacity mismatch: member user-data %llu sectors < required %llu sectors\n",
 				  pci_name(adapter->pdev),
 				  (unsigned long long)nvme->ld_userdata_size,
-				  (unsigned long long)get_capacity(rc_volume_disk));
+				  (unsigned long long)member_cap);
 			goto out;
 		}
 		/* Install the pointer BEFORE the DMA alloc — the helper
@@ -3709,6 +3735,58 @@ static blk_status_t rc_volume_dispatch_multi_stripe_discard(
 	return BLK_STS_OK;
 }
 
+/* Resync write-exclusion handshake for one application WRITE/DISCARD.
+ *
+ * Counts the request into the current write generation and checks the
+ * published exclusion window (LOGICAL sector coordinates).  On success the
+ * request is "counted": pdu->wgen/wgen_counted are published and the single
+ * completion path (rc_volume_unmap_request_sg) will decrement it.  On
+ * overlap the count is rolled back and false is returned — the caller must
+ * release its SQ reservations / DMA mappings and return BLK_STS_DEV_RESOURCE
+ * so blk-mq retries once the window has moved.
+ *
+ * MUST be the last action before blk_mq_start_request: nothing may fail
+ * after the count is published.  See the protocol comment on the mirror
+ * dispatch for why the generation is counted BEFORE the window is read. */
+static bool rc_volume_resync_gate(struct rc_volume_pdu *pdu, sector_t pos,
+				  u32 nr_sectors)
+{
+	int g;
+	u64 wstart;
+
+	/* Seqlock-style retry: the bucket we count into must be the
+	 * generation live AT increment time.  Without the re-check, a task
+	 * preempted between reading wgen and incrementing the counter for
+	 * long enough to span a generation flip (2-bucket parity can even
+	 * wrap back to the same g) would land its count in a bucket the
+	 * resync thread already drained — letting a chunk copy proceed
+	 * without waiting for this write. */
+	for (;;) {
+		g = atomic_read(&rc_volume_wgen) & 1;
+		atomic_inc(&rc_volume_wgen_count[g]);
+		smp_mb__after_atomic();
+		if ((atomic_read(&rc_volume_wgen) & 1) == g)
+			break;
+		atomic_dec(&rc_volume_wgen_count[g]);
+	}
+	/* Pairs with the resync thread's smp_mb() between publishing the
+	 * window and flipping the generation: having observed the flipped
+	 * generation above, the window read below must not be satisfied by
+	 * an older cached value (message-passing gap on non-TSO
+	 * architectures). */
+	smp_rmb();
+	wstart = (u64)atomic64_read(&rc_volume_resync_window);
+	if (wstart != RC_RESYNC_WINDOW_NONE &&
+	    (u64)pos < wstart + RC_RESYNC_XFER_SECTORS &&
+	    (u64)pos + nr_sectors > wstart) {
+		atomic_dec(&rc_volume_wgen_count[g]);
+		return false;
+	}
+	pdu->wgen = (u8)g;
+	pdu->wgen_counted = true;
+	return true;
+}
+
 /* RAID1: fan a WRITE or DISCARD out to every mirror member.
  *
  * Mirrors hold identical LBA spaces, so every member receives the SAME
@@ -3904,58 +3982,17 @@ static blk_status_t rc_volume_dispatch_mirror(
 			}
 		}
 
-		/* Resync coordination — MUST be the last thing before
-		 * blk_mq_start_request (nothing may fail after the count).
-		 *
-		 * Order matters: count into the current write generation
-		 * FIRST, then check the exclusion window.  The resync thread
-		 * publishes the window, flips the generation, and drains the
-		 * old generation's counter — so every write either lands in
-		 * the drained generation or observes the published window
-		 * here and bounces.  Bounced requests were never started;
-		 * DEV_RESOURCE hands them back to blk-mq for a retry after
-		 * the window has moved on. */
-		{
-			int g;
-			u64 wstart;
-
-			/* Seqlock-style retry: the bucket we count into must
-			 * be the generation live AT increment time.  Without
-			 * the re-check, a task preempted between reading wgen
-			 * and incrementing the counter for long enough to
-			 * span a generation flip (2-bucket parity can even
-			 * wrap back to the same g) would land its count in a
-			 * bucket the resync thread already drained — letting
-			 * a chunk copy proceed without waiting for this
-			 * write. */
-			for (;;) {
-				g = atomic_read(&rc_volume_wgen) & 1;
-				atomic_inc(&rc_volume_wgen_count[g]);
-				smp_mb__after_atomic();
-				if ((atomic_read(&rc_volume_wgen) & 1) == g)
-					break;
-				atomic_dec(&rc_volume_wgen_count[g]);
-			}
-			/* Pairs with the resync thread's smp_mb() between
-			 * publishing the window and flipping the generation:
-			 * having observed the flipped generation above, the
-			 * window read below must not be satisfied by an
-			 * older cached value (message-passing gap on
-			 * non-TSO architectures). */
-			smp_rmb();
-			wstart = (u64)atomic64_read(&rc_volume_resync_window);
-			if (wstart != RC_RESYNC_WINDOW_NONE &&
-			    (u64)pos < wstart + RC_RESYNC_XFER_SECTORS &&
-			    (u64)pos + nr_sectors > wstart) {
-				atomic_dec(&rc_volume_wgen_count[g]);
-				for (m = 0; m < nm; m++)
-					if (mask & BIT(m))
-						rc_nvme_sq_unreserve(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num], 1);
-				rc_volume_unmap_request_sg(pdu);
-				return BLK_STS_DEV_RESOURCE;
-			}
-			pdu->wgen = (u8)g;
-			pdu->wgen_counted = true;
+		/* Resync write-exclusion — MUST be the last thing before
+		 * blk_mq_start_request: nothing may fail after the count.
+		 * On a window hit the request was never started, so hand it
+		 * back to blk-mq (DEV_RESOURCE) for a retry once the resync
+		 * chunk has moved on. */
+		if (!rc_volume_resync_gate(pdu, pos, nr_sectors)) {
+			for (m = 0; m < nm; m++)
+				if (mask & BIT(m))
+					rc_nvme_sq_unreserve(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num], 1);
+			rc_volume_unmap_request_sg(pdu);
+			return BLK_STS_DEV_RESOURCE;
 		}
 
 		blk_mq_start_request(req);
@@ -4201,6 +4238,20 @@ static blk_status_t rc_volume_dispatch_raid10(
 			}
 		}
 
+		/* Resync write-exclusion — the last thing before start.  A
+		 * RAID10 rebuild copies a column's stripes partner -> target;
+		 * a write overlapping the chunk being copied must bounce until
+		 * the window moves.  READs don't modify data, so they are
+		 * ungated (and a single-stripe READ doesn't even come here). */
+		if (op == REQ_OP_WRITE &&
+		    !rc_volume_resync_gate(pdu, pos, nr_sectors)) {
+			for (m = 0; m < nm; m++)
+				if (pdu->ms_nents[m])
+					rc_nvme_sq_unreserve(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num], 1);
+			rc_volume_unmap_request_sg(pdu);
+			return BLK_STS_DEV_RESOURCE;
+		}
+
 		blk_mq_start_request(req);
 		for (m = 0; m < nm; m++)
 			if (pdu->ms_nents[m])
@@ -4294,6 +4345,17 @@ static blk_status_t rc_volume_dispatch_raid10_discard(
 		if (member_has_data[m])
 			pdu->member_mask |= BIT(m);
 	atomic_set(&pdu->members_pending, members_with_data);
+
+	/* Resync write-exclusion — a DISCARD must not race the chunk copy
+	 * either: it deallocates the very ranges the rebuild is copying.
+	 * Bouncing to blk-mq and retrying after the window moves is safe.
+	 * Last thing before blk_mq_start_request. */
+	if (!rc_volume_resync_gate(pdu, pos, nr_sectors)) {
+		for (m = 0; m < nm; m++)
+			if (member_has_data[m])
+				rc_nvme_sq_unreserve(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num], 1);
+		return BLK_STS_DEV_RESOURCE;
+	}
 
 	blk_mq_start_request(req);
 	for (m = 0; m < nm; m++) {
@@ -5377,7 +5439,8 @@ static void rc_volume_assemble_fn(struct work_struct *w)
 	expected = rc_volume_expected_members;
 	if (rc_volume_disk || !expected || expected > RC_VOLUME_MAX_MEMBERS)
 		goto out;
-	if (rc_volume_raid_level != RC_LDT_RAID1)
+	if (rc_volume_raid_level != RC_LDT_RAID1 &&
+	    rc_volume_raid_level != RC_LDT_RAID10)
 		goto out;	/* RAID0 can't run without every member */
 	if (rc_volume_geometry_untrust_reason) {
 		rc_printk(RC_WARN,
@@ -5392,9 +5455,26 @@ static void rc_volume_assemble_fn(struct work_struct *w)
 	if (!present || present >= (int)expected)
 		goto out;	/* nothing here, or complete (normal path) */
 
+	/* RAID10 comes up degraded only while every mirror pair keeps at
+	 * least one copy.  A whole pair missing leaves that half of the
+	 * logical space unmapped — rc_volume_fatal() would reject every
+	 * request, so refuse to expose a permanently-failing volume and
+	 * leave the registry parked for a later full assembly.
+	 * rc_volume_can_serve() reads the live mask, which has bits ONLY for
+	 * the members that registered, so this is exactly the "no pair lost
+	 * both copies" test. */
+	if (rc_volume_raid_level == RC_LDT_RAID10 && !rc_volume_can_serve()) {
+		rc_printk(RC_WARN,
+			  "rc_volume_assemble_fn: RAID10 degraded assembly refused — a mirror pair has NO member present (only %d of %u present)\n",
+			  present, expected);
+		goto out;
+	}
+
 	rc_printk(RC_WARN,
-		  "rc_volume_assemble_fn: only %d of %u RAID1 members present after %u ms — assembling DEGRADED (allow_degraded=1)\n",
-		  present, expected, RC_VOLUME_ASSEMBLE_DELAY_MS);
+		  "rc_volume_assemble_fn: only %d of %u RAID%d members present after %u ms — assembling DEGRADED (allow_degraded=1)\n",
+		  present, expected,
+		  rc_volume_raid_level == RC_LDT_RAID10 ? 10 : 1,
+		  RC_VOLUME_ASSEMBLE_DELAY_MS);
 
 	{
 		int saved_count = rc_volume_member_count;
@@ -5466,13 +5546,30 @@ static int rc_volume_resync_rw(struct rc_adapter *m, u8 opc, u64 slba,
 	return rc_nvme_io_cmd_sync(m, &cmd);
 }
 
-/* Pick the read source for the resync: the first LIVE member that is not
- * the target.  Returns slot or -1. */
+/* Pick the read source for the resync.  Returns slot or -1.
+ *
+ * RAID1: any LIVE member other than the target holds an identical copy,
+ *        so the first one found works.
+ * RAID10: only the target's mirror partner holds a copy of the SAME
+ *        logical stripes at the SAME physical offsets; copying from any
+ *        other member would write another column's data onto the target.
+ *        Adjacent pairing {2c, 2c+1} (see rc_amd_map_nested_raid10), so
+ *        the partner is target ^ 1.  If the partner is not live the
+ *        member cannot be rebuilt and is left parked. */
 static int rc_volume_resync_pick_survivor(int target)
 {
 	unsigned long live =
 		(unsigned long)(unsigned int)atomic_read(&rc_volume_live_mask);
 	int i;
+
+	if (rc_volume_raid_level == RC_LDT_RAID10) {
+		int partner = target ^ 1;
+
+		if (partner >= 0 && partner < RC_VOLUME_MAX_MEMBERS &&
+		    (live & BIT(partner)) && rc_volume_members[partner])
+			return partner;
+		return -1;
+	}
 
 	for_each_set_bit(i, &live, RC_VOLUME_MAX_MEMBERS)
 		if (i != target && rc_volume_members[i])
@@ -5496,6 +5593,14 @@ static int rc_volume_resync_fn(void *arg)
 	int ret = -EIO;
 	int retries = 0;
 	unsigned int order = get_order(RC_RESYNC_XFER_BYTES);
+	/* RAID10 rebuilds the target from its mirror partner only, one
+	 * column's stripes at a time.  cursor/total are PER-MEMBER sectors
+	 * (the caller sets total = volume / cols), and the exclusion window
+	 * is published in LOGICAL sectors so the write gate works unchanged. */
+	bool raid10 = (rc_volume_raid_level == RC_LDT_RAID10);
+	u32 stripe = rc_volume_stripe_sectors;
+	u32 cols = rc_volume_raid10_cols;
+	u32 tcol = cols ? (u32)(target / 2u) : 0u;
 
 	total = rc_volume_resync_total;
 
@@ -5513,9 +5618,9 @@ static int rc_volume_resync_fn(void *arg)
 		  (unsigned long long)(total >> 11));
 
 	while (cursor < total) {
-		u32 nlb = (u32)min_t(u64, RC_RESYNC_XFER_SECTORS,
-				     total - cursor);
-		u32 bytes = nlb * 512u;
+		u32 nlb;
+		u32 bytes;
+		u64 logical, srv_lba, tgt_lba;
 		dma_addr_t dma;
 		int old_gen, err;
 
@@ -5541,6 +5646,42 @@ static int rc_volume_resync_fn(void *arg)
 			goto done;
 		}
 		srv = rc_volume_members[srv_slot];
+
+		/* Translate this chunk's per-member offset into the logical
+		 * sector range it represents.  RAID1 is identity.  RAID10's
+		 * cursor walks ONE member's user-data region, so the logical
+		 * LBA is the cursor's stripe rounded up to this column's
+		 * logical stripe, plus the in-stripe offset.  Cap the chunk
+		 * at the stripe boundary: a chunk that crossed it would map
+		 * to a NON-contiguous logical range (the next physical stripe
+		 * on this member is cols logical stripes later), which the
+		 * single-range write-exclusion window cannot describe — the
+		 * gate would then under-cover and a racing write could be
+		 * overwritten by the copy. */
+		if (raid10) {
+			u32 in_stripe, room;
+
+			if (!stripe || !cols) {
+				rc_printk(RC_ERROR,
+					  "rc_volume_resync: RAID10 resync with bad geometry (stripe=%u cols=%u) — aborting\n",
+					  stripe, cols);
+				goto done;
+			}
+			in_stripe = (u32)(cursor % stripe);
+			room = stripe - in_stripe;
+			nlb = (u32)min_t(u64, RC_RESYNC_XFER_SECTORS,
+					 min_t(u64, room, total - cursor));
+			logical = div_u64(cursor, stripe) *
+				  ((u64)stripe * cols) +
+				  (u64)tcol * stripe + in_stripe;
+		} else {
+			nlb = (u32)min_t(u64, RC_RESYNC_XFER_SECTORS,
+					 total - cursor);
+			logical = cursor;
+		}
+		bytes   = nlb * 512u;
+		srv_lba = cursor + rc_volume_member_phys_offset[srv_slot];
+		tgt_lba = cursor + rc_volume_member_phys_offset[target];
 
 		/* Lazily allocate the per-member PRP-list pages the first
 		 * time each endpoint is known (they are per-IOMMU-domain). */
@@ -5572,7 +5713,7 @@ static int rc_volume_resync_fn(void *arg)
 		 * may have checked the window before publication.  After
 		 * the drain, no application write overlapping this chunk is
 		 * in flight, and none can start until the window moves. */
-		atomic64_set(&rc_volume_resync_window, cursor);
+		atomic64_set(&rc_volume_resync_window, logical);
 		smp_mb();
 		old_gen = atomic_fetch_inc(&rc_volume_wgen) & 1;
 		while (atomic_read(&rc_volume_wgen_count[old_gen])) {
@@ -5592,8 +5733,7 @@ static int rc_volume_resync_fn(void *arg)
 			goto done;
 		}
 		err = rc_volume_resync_rw(srv, RC_NVME_NVM_OP_READ,
-					  cursor + rc_volume_member_phys_offset[srv_slot],
-					  nlb, bytes, dma,
+					  srv_lba, nlb, bytes, dma,
 					  list_va[0], list_pa[0]);
 		dma_unmap_single(&srv->pdev->dev, dma, bytes, DMA_FROM_DEVICE);
 		if (err) {
@@ -5628,8 +5768,7 @@ static int rc_volume_resync_fn(void *arg)
 			goto done;
 		}
 		err = rc_volume_resync_rw(tgt, RC_NVME_NVM_OP_WRITE,
-					  cursor + rc_volume_member_phys_offset[target],
-					  nlb, bytes, dma,
+					  tgt_lba, nlb, bytes, dma,
 					  list_va[1], list_pa[1]);
 		dma_unmap_single(&tgt->pdev->dev, dma, bytes, DMA_TO_DEVICE);
 		if (err) {
@@ -5724,6 +5863,13 @@ completion_settled:
 	 * the exit code without blocking.  Parking here instead would leave
 	 * a blocked rcraid-resync thread lingering after every successful
 	 * resync until an unrelated readmit/remove/teardown reaped it. */
+	/* A clean rebuild frees the single resync slot; let the scheduler
+	 * pick up the next parked member (RAID10 can have several stale
+	 * copies at once).  A FAILED rebuild is deliberately not retried
+	 * automatically — a member that just failed the copy would spin
+	 * read -> park -> retry forever. */
+	if (ret == 0)
+		schedule_work(&rc_volume_rebuild_work);
 	return ret;
 }
 
@@ -5758,12 +5904,28 @@ static void rc_volume_resync_stop(void)
 	}
 }
 
-/* A member just entered NEEDS_RESYNC (re-plug or recovered controller):
- * start the rebuild.  Caller holds rc_volume_lock. */
+/* Per-member sectors the resync engine copies: RAID1 spans the whole
+ * (mirror) volume; RAID10 rebuilds only the target column's stripes, i.e.
+ * one column's worth = volume / cols.  Caller holds rc_volume_lock. */
+static u64 rc_volume_per_member_sectors(void)
+{
+	u64 cap = rc_volume_disk ? get_capacity(rc_volume_disk) : 0;
+
+	if (rc_volume_raid_level == RC_LDT_RAID10 && rc_volume_raid10_cols)
+		cap = div_u64(cap, rc_volume_raid10_cols);
+	return cap;
+}
+
+/* A member just entered NEEDS_RESYNC (re-plug, recovered controller, or
+ * boot-time degraded assembly).  Caller holds rc_volume_lock.
+ *
+ * Members are rebuilt one at a time (the engine has a single resync slot),
+ * so this only nudges the serialized scheduler below; the scheduler picks
+ * the next parked slot whenever the current rebuild finishes.  That matters
+ * for RAID10: unlike a 2-member RAID1, several columns can independently
+ * have a stale copy, and each must be rebuilt in turn. */
 static void rc_volume_member_readmitted(int slot)
 {
-	struct task_struct *t;
-
 	/* A teardown in progress dropped rc_volume_lock for the kernfs
 	 * unregister — it already stopped the resync it knew about and will
 	 * not look again, so spawning one now would orphan a kthread against
@@ -5774,56 +5936,57 @@ static void rc_volume_member_readmitted(int slot)
 			  slot);
 		return;
 	}
+	schedule_work(&rc_volume_rebuild_work);
+}
 
-	/* RAID10 rebuild is not implemented yet.  The existing resync copies
-	 * the whole logical space identity-mapped, which is correct for a
-	 * full-space mirror (RAID1) but wrong for RAID10: a member only owns
-	 * the stripes of ITS column, so a whole-space copy would overwrite it
-	 * with data belonging to other columns and silently corrupt the pair.
-	 * Leave the member parked — it receives no writes and serves no reads,
-	 * so the array stays safely degraded until pair-aware rebuild lands. */
-	if (rc_volume_raid_level == RC_LDT_RAID10) {
-		rc_printk(RC_WARN,
-			  "rc_volume: member %d needs resync but RAID10 rebuild is not implemented yet — leaving parked (not written, not read)\n",
-			  slot);
-		return;
-	}
+/* Serialized rebuild scheduler.  Reaps a finished resync, then starts at
+ * most one parked member whose survivor is live.  Re-armed by every
+ * member_readmitted() and by the resync thread on clean completion, so N
+ * stale members rebuild one after another.  Takes rc_volume_lock itself. */
+static void rc_volume_rebuild_fn(struct work_struct *w)
+{
+	int slot, pick = -1;
+	struct task_struct *t;
+
+	mutex_lock(&rc_volume_lock);
 
 	rc_volume_resync_reap_locked();
 
-	if (rc_volume_resync_thread) {
-		rc_printk(RC_WARN,
-			  "rc_volume: member %d needs resync but a resync is already running — leaving parked\n",
-			  slot);
-		return;
-	}
-	if (!rc_volume_disk || get_disk_ro(rc_volume_disk)) {
-		rc_printk(RC_WARN,
-			  "rc_volume: member %d needs resync but the volume is %s — leaving parked\n",
-			  slot, rc_volume_disk ? "read-only" : "absent");
-		return;
-	}
-	if (rc_volume_resync_pick_survivor(slot) < 0) {
-		rc_printk(RC_ERROR,
-			  "rc_volume: member %d needs resync but no live survivor exists — leaving parked\n",
-			  slot);
-		return;
+	if (rc_volume_tearing_down || rc_volume_resync_thread ||
+	    !rc_volume_disk || get_disk_ro(rc_volume_disk))
+		goto out;
+
+	for (slot = 0;
+	     slot < rc_volume_member_count && slot < RC_VOLUME_MAX_MEMBERS;
+	     slot++) {
+		if (!rc_volume_members[slot])
+			continue;
+		if (READ_ONCE(rc_volume_member_state[slot]) !=
+		    RC_MEMBER_NEEDS_RESYNC)
+			continue;
+		if (rc_volume_resync_pick_survivor(slot) < 0)
+			continue;
+		pick = slot;
+		break;
 	}
 
-	rc_volume_member_set_state(slot, RC_MEMBER_RESYNCING);
-	rc_volume_resync_slot = slot;
-	rc_volume_resync_total = get_capacity(rc_volume_disk);
+	if (pick < 0)
+		goto out;
+
+	rc_volume_member_set_state(pick, RC_MEMBER_RESYNCING);
+	rc_volume_resync_slot = pick;
+	rc_volume_resync_total = rc_volume_per_member_sectors();
 	atomic64_set(&rc_volume_resync_cursor, 0);
 
-	t = kthread_run(rc_volume_resync_fn, (void *)(long)slot,
+	t = kthread_run(rc_volume_resync_fn, (void *)(long)pick,
 			"rcraid-resync");
 	if (IS_ERR(t)) {
 		rc_printk(RC_ERROR,
 			  "rc_volume: failed to start resync thread (%ld)\n",
 			  PTR_ERR(t));
-		rc_volume_member_set_state(slot, RC_MEMBER_NEEDS_RESYNC);
+		rc_volume_member_set_state(pick, RC_MEMBER_NEEDS_RESYNC);
 		rc_volume_resync_slot = -1;
-		return;
+		goto out;
 	}
 	get_task_struct(t);
 	rc_volume_resync_thread = t;
@@ -5834,6 +5997,8 @@ static void rc_volume_member_readmitted(int slot)
 	 * Left stale, the next reap would kthread_stop() THIS live thread
 	 * mid-copy as if it had finished. */
 	rc_volume_resync_done = false;
+out:
+	mutex_unlock(&rc_volume_lock);
 }
 
 /* Tear down everything rc_volume_create_disk allocated.  Called from
@@ -5856,9 +6021,9 @@ void rc_volume_teardown(void)
 	/* Block NEW resyncs before stopping the current one: once the lock
 	 * is dropped for rc_volume_sysfs_unregister() below, a per-adapter
 	 * auto_reset_work queued earlier can still run and would otherwise
-	 * call rc_volume_member_readmitted() and spawn a fresh resync
-	 * kthread this function never learns about — which then races the
-	 * adapters' own queue teardown (use-after-free). */
+	 * call rc_volume_member_readmitted() and have the rebuild scheduler
+	 * spawn a fresh resync kthread this function never learns about —
+	 * which then races the adapters' own queue teardown (use-after-free). */
 	mutex_lock(&rc_volume_lock);
 	rc_volume_tearing_down = true;
 	mutex_unlock(&rc_volume_lock);
@@ -5871,6 +6036,14 @@ void rc_volume_teardown(void)
 	cancel_delayed_work_sync(&rc_volume_assemble_work);
 	/* Stop a running resync before the members it reads/writes go away. */
 	rc_volume_resync_stop();
+	/* The rebuild scheduler may have been re-armed by the resync's exit
+	 * path or by a registration racing the teardown.  tearing_down (set
+	 * above) makes any run that starts from here on bail before spawning;
+	 * this drops a run queued earlier that has not started.  A run already
+	 * in flight is serialized against the tearing_down store by
+	 * rc_volume_lock, so it either bailed or had its kthread caught by
+	 * rc_volume_resync_stop() just above. */
+	cancel_work_sync(&rc_volume_rebuild_work);
 
 	/* Remove the sysfs group BEFORE taking rc_volume_lock: kernfs
 	 * removal blocks until in-flight ->show()/->store() callbacks
@@ -6611,9 +6784,10 @@ int rc_nvme_reset_controller(struct rc_adapter *adapter)
 	 * accepting writes on the surviving copy, so this member's data is
 	 * STALE.  Clearing `dead` must NOT put it back into dispatch — a
 	 * rejoined stale mirror serves old data to half the reads.  Park it in
-	 * NEEDS_RESYNC; the resync engine makes that state actionable for
-	 * RAID1 (RAID10 rebuild is not implemented yet, so its parked members
-	 * stay out of both read and write dispatch).
+	 * NEEDS_RESYNC; the resync engine then rebuilds it from its live
+	 * partner (RAID1: any survivor; RAID10: the same column's mirror
+	 * copy), so it stays out of read AND write dispatch until the copy
+	 * lands.
 	 *
 	 * RAID0 is the opposite: with any member down the volume failed
 	 * EVERY request (no partial writes possible), so nothing diverged —
