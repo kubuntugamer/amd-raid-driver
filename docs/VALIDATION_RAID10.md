@@ -34,6 +34,11 @@ proof, and steps 5–6 stay manual.
 ## Preconditions
 
 - [ ] 4 (or any even number of) NVMe members in a **firmware-created RAID 10**.
+- [ ] Members carry **no foreign RAID metadata** — drives previously used in a
+      HighPoint / Intel / mdadm array must be initialized (RAIDXpert2
+      "Initialize" or secure erase) before the AMD array is created. AMD cannot
+      import foreign metadata, so going from another controller to AMD is a
+      fresh, destructive create.
 - [ ] OS running from a **non-array** drive (or a live USB) for the
       destructive phases.
 - [ ] `make KERNELDIR=/lib/modules/$(uname -r)/build` builds clean, zero
