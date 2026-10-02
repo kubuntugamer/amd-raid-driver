@@ -83,33 +83,5 @@ This is the recommended deployment path for setting up a fresh Linux environment
 
 ---
 
-## 🧰 Developer Sandbox: Portable VirtualBox Emulation
-
-The repository packages a portable development workspace companion inside the **`1022-b000/`** directory footprint. 
-
-If you are modifying script logic or testing layout variations on your laptop before taking code down to bare-metal production rigs, you can use this extension pack module to mock an authentic AMD NVMe RAID Controller bus tree (`1022:B000`) natively inside VirtualBox.
-
-### Deploying the Loose Development Pack
-To bypass fragile zipped archive signature parsing locks (`VERR_PARSE_ERROR`), register the files straight as an unpacked loose development package:
-```bash
-# 1. Clean previous build paths and compile the C++ shared object library
-make -C 1022-b000
-
-# 2. Re-create VirtualBox's global system directory and link the workspace
-sudo mkdir -p /usr/lib/virtualbox/ExtensionPacks/AmdRcraidEmulator
-sudo cp -r 1022-b000/ExtPack.xml /usr/lib/virtualbox/ExtensionPacks/AmdRcraidEmulator/
-sudo mkdir -p /usr/lib/virtualbox/ExtensionPacks/AmdRcraidEmulator/linux.amd64
-sudo cp -r 1022-b000/linux.amd64/libmy_plugin.so /usr/lib/virtualbox/ExtensionPacks/AmdRcraidEmulator/linux.amd64/
-sudo chown -R root:root /usr/lib/virtualbox/ExtensionPacks/AmdRcraidEmulator
-
-# 3. Enable hypervisor overrides and boot your headless test virtual instance
-export VBOX_EXTPACK_ALLOW_UNSECURE=1
-export VBOX_DEVELOPER_MODE=1
-VBoxManage startvm "PluginTestVM" --type headless
-```
-The hypervisor Pluggable Device Manager (PDM) will natively recognize the `AmdRcraidEmulator` extension pack out of the box, allowing you to debug guest binding behaviors cleanly via your machine's `VBox.log` file.
-
----
-
 ## ⚖️ License & Cleanroom Verification
 This project is licensed under the **GPL-2.0-only** standard. It is a 100% clean-room, independently authored driver framework reverse-engineered from publicly distributed vendor binaries under DMCA §1201(f) interoperability protections—**no proprietary source code or confidential documentation was utilized.**
