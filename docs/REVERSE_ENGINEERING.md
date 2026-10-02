@@ -334,7 +334,11 @@ striped/mirrored volume". Whatever the `0x1BF7` dispatch arm in
 `FUN_14001c674` consumes, it is not what this firmware writes to disk —
 the Windows in-memory DeviceType is presumably recomputed from the counts.
 The Linux driver derives the level from the counts (`rc_ld_level_from`)
-and refuses combinations it has no dispatch path for.
+and refuses combinations it has no dispatch path for. This encoding was
+independently corroborated on X399 SATA RAID10 (`FirstCount=2,
+SecondCount=2, devices=4`) — see
+[External corroboration](#external-corroboration-x399-zenith-extreme-sata-raid10)
+below.
 
 AMD also writes one single-device "raw disk" LD per physical member
 (`devtype=0x1BF9, devices=1, capacity=NSZE`); the parser skips those by
@@ -411,6 +415,42 @@ Same pipeline on 9.3.3: the binary differs (SHA256 `3f241608…` vs `f0a6fc8b…
 ladder (no index ≥ 4), same `[0x32]`←`+0x110` field, same ChunkSize `+0xAC`,
 same RAID-level magics (`0x1BF6/7/A/B`). All geometry conclusions hold for
 9.3.3 because the code is unchanged, not because the binary is.
+
+### External corroboration: X399 (Zenith Extreme) SATA RAID10
+
+Reported in issue #57 (George "PlaidPiper" Crossley, 2026-10). A
+firmware-created **SATA** RAID10 over 4× WD100EMAZ on X399 (Zenith
+Extreme) parses to the same packet this driver expects:
+
+| Field | Observed |
+|---|---|
+| `DeviceType` (`+0x0C`) | `0x1BF6` (generic striped/mirrored) |
+| `devices` (`0x68`) | 4 |
+| `FirstCount × SecondCount` | `2 × 2` |
+| `chunk_index` (`+0x110`) | `1` → 64 KiB |
+| per-member `UserDataOffset` (LE `+0x20`) | 1069056 sectors |
+
+All four members carried byte-identical committed records, and the config
+ring's **stale generations were correctly skipped** — the same
+journal/commit-block semantics documented above. He assembled a
+**read-only** view with `dm-stripe` over the two columns (one member per
+mirror pair, chunk-interleaved) and mounted it `ntfs3` with the MFT
+parsing cleanly (~395 MB/s sustained).
+
+What this establishes, on firmware years older and on a different bus
+than the TRX50 NVMe dumps: the `FirstCount = stripe columns`,
+`SecondCount = mirror depth` encoding; the committed-generation journal
+behaviour; the `chunk_index` ladder; and the column-chunk interleave
+model (`logical chunk N` → column `N mod cols`, physical chunk
+`N div cols`, both copies).
+
+What it does **not** establish: the `1022:B000` NVMe path (bring-up,
+completion, degraded failover, rebuild — separate code, never run here),
+and it does not settle whether a column's two copies are **adjacent**
+(`{2c, 2c+1}`, the Linux driver's current assumption) or **strided**
+(`{c, c+cols}`) — the members were not cross-dumped. Comparing a small
+raw region past each member's `UserDataOffset` would settle it, since
+mirror copies are byte-identical.
 
 ---
 
