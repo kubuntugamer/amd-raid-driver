@@ -383,7 +383,7 @@ int fabriczc_get_block(struct inode *inode, sector_t iblock, struct buffer_head 
     int ret = fabriczc_bmap_block(inode, (u32)(iblock >> (inode->i_sb->s_blocksize_bits - 9)), &phys, create != 0);
     if (ret) return ret;
     if (phys == FABRICZC_BLOCK_FREE) return 0;
-    map_bh(bh_result, inode->i_sb->s_bdev, phys << (inode->i_sb->s_blocksize_bits - 9));
+    map_bh(bh_result, inode->i_sb, phys << (inode->i_sb->s_blocksize_bits - 9));
     return 0;
 }
 
@@ -405,7 +405,7 @@ int fabriczc_write_block(struct super_block *sb, u32 block, const void *buf, u32
     return 0;
 }
 
-int fabriczc_load_block_bitmap(struct super_block *sb, unsigned int block_group_idx, struct fabriczc_block_group_desc *desc) { return NULL; }
+struct buffer_head *fabriczc_load_block_bitmap(struct super_block *sb, unsigned int block_group_idx, struct fabriczc_block_group_desc *desc) { return NULL; }
 int fabriczc_execute_block_allocation(struct super_block *sb, struct fabriczc_block_group_desc *desc, unsigned int block_group_idx, unsigned int start_block) { return -ENOSPC; }
 int fabriczc_sync_block_groups(struct super_block *sb, struct fabriczc_block_group_desc *caches, u32 group_count) { return 0; }
 int fabriczc_sync_block_bitmaps(struct super_block *sb, struct fabriczc_block_group_desc *caches, u32 group_count) { return 0; }

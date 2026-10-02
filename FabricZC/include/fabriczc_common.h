@@ -32,8 +32,6 @@ struct fabriczc_array_metadata {
     u32 checksum;            /* Structural integrity validation check */
 };
 
-#endif /* __FABRICZC_COMMON_H__ */
-
 #define FABRICZC_SB_MAGIC       0x465A4353  /* "FZCS" Superblock Magic */
 #define FABRICZC_STATE_CLEAN    0x00000001
 #define FABRICZC_STATE_DIRTY    0x00000002
@@ -184,3 +182,5 @@ struct fabriczc_extent {
     u32 ee_start_hi;      /* High 16 bits of physical block start */
     u32 ee_start_lo;      /* Low 32 bits of physical block start */
 };
+
+#endif /* __FABRICZC_COMMON_H__ */

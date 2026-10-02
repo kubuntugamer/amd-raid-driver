@@ -24,6 +24,10 @@ struct fabriczc_runtime_context core_ctx;
 static int fabriczc_major = 0;
 static dev_t host_os_dev = 0;
 
+static char *fabriczc_target = "/dev/rcraid0";
+module_param_named(target, fabriczc_target, charp, 0444);
+MODULE_PARM_DESC(target, "Backing block device for the FabricZC layer");
+
 
 struct fabriczc_runtime_context *fabriczc_get_runtime_ctx(void)
 {
@@ -70,7 +74,7 @@ static void fabriczc_probe_device_path(const char *path_str)
     loff_t pos = 0;
     ssize_t bytes_read;
 
-    bdev_file = bdev_file_open_by_path(path_str, BLK_OPEN_READ, &core_ctx, NULL);
+    bdev_file = bdev_file_open_by_path(path_str, BLK_OPEN_READ | BLK_OPEN_WRITE, &core_ctx, NULL);
     if (IS_ERR(bdev_file))
         return;
 
@@ -99,6 +103,7 @@ static void fabriczc_probe_device_path(const char *path_str)
         core_ctx.bdev = bdev;
         core_ctx.bdev_file_ptr = bdev_file; bdev_file = NULL;
         pr_info("FabricZC: Successfully bound hardware target array pipeline to [%s] natively\n", bdev->bd_disk->disk_name);
+        fabriczc_refresh_disk_capacity();
     }
 
     kfree(sector_buffer);
@@ -109,8 +114,10 @@ static void fabriczc_probe_device_path(const char *path_str)
 
 void fabriczc_discover_hardware_targets(void)
 {
+    if (core_ctx.bdev_file_ptr)
+        return; /* already bound */
     pr_info("FabricZC: Launching dynamic un-hardcoded block storage discovery scan...\n");
-    fabriczc_probe_device_path("/dev/nvme0n1");
+    fabriczc_probe_device_path(fabriczc_target);
 }
 
 static int __init fabriczc_core_init(void)
@@ -132,6 +139,7 @@ static int __init fabriczc_core_init(void)
     }
 
     fabriczc_audit_host_os_identity();
+    fabriczc_discover_hardware_targets();
 
     ret = fabriczc_fs_init();
     if (ret < 0) {
@@ -145,7 +153,6 @@ static int __init fabriczc_core_init(void)
 static void __exit fabriczc_core_exit(void)
 {
     fabriczc_fs_exit();
-    if (core_ctx.bdev_file_ptr) { bdev_fput(core_ctx.bdev_file_ptr); core_ctx.bdev_file_ptr = NULL; }
     if (core_ctx.bdev_file_ptr) { bdev_fput(core_ctx.bdev_file_ptr); core_ctx.bdev_file_ptr = NULL; }
     fabriczc_unregister_block_layer(fabriczc_major);
     pr_info("FabricZC: Unregistering Layer 1 Core Engine Setup Complete\n");
