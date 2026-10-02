@@ -263,7 +263,12 @@ why disabling Secure Boot remains the supported path.
 Check that BIOS is in **RAID mode**, not AHCI. In AHCI mode the
 controller doesn't expose itself as `1022:B000` at all.
 
-### Build fails on Debian-family kernels newer than 6.8
+### Build fails on an older distro kernel (below 6.15)
+
+The driver uses block-layer APIs that only exist on modern kernels — it
+targets Linux 7.x and needs at least 6.15 (the 2-argument
+`blk_rq_map_sg()` landed then). On Ubuntu 24.04 that means the HWE stack,
+not the 6.8 GA kernel. If an otherwise-modern kernel still fails:
 
 ```bash
 sudo make clean

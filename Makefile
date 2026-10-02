@@ -65,6 +65,7 @@ clean:
 	@echo "Cleaning build files..."
 	@rm -f *.o *.ko *.mod.c *.mod *.symvers *.order .*.cmd
 	@rm -rf .tmp_versions
+	@rm -rf $(ASYNC_TEST_BIN) $(dir $(ASYNC_TEST_BIN))
 	@echo "Clean completed"
 
 # Lenient build target: extra warnings suppressed via KCFLAGS (the
@@ -82,13 +83,75 @@ simple:
 install:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules_install
 
+# ------------------------------------------------------------------------------
+# Userspace concurrency harness for the async mirror engine.
+#
+# src/test_async_worker_harness.c #includes the REAL src/patch_async_worker.c
+# behind a shim for the kernel primitives, so it runs the engine's actual
+# locking and accounting code under real threads and real preemption — which is
+# where bugs in this kind of code live, and where a module on a RAID box with no
+# spare machine to debug on cannot be observed.  It needs no kernel headers at
+# all, so it deliberately does not touch KERNELDIR and is not an rcraid-objs
+# member.
+#
+# The engine #includes <linux/*.h>, which do not exist in userspace.  The target
+# materializes empty stand-ins in a scratch include dir: the harness defines
+# every primitive itself before including the engine, so the preprocessor only
+# needs those paths to resolve.  Generating them beats checking in a fake
+# linux/ tree, which would otherwise invite editor indexers and greps into it.
+#
+# Drain budget is shortened from the engine's 5000 ms default because the
+# stuck-member unload test is deliberately slower than any real drain.
+# ------------------------------------------------------------------------------
+ASYNC_TEST_BIN  ?= $(CURDIR)/.async-test/async_test
+# Recursive (=) on purpose: it has to track an overridden ASYNC_TEST_BIN, so the
+# sanitizer variants below get their own scratch dir instead of racing each
+# other over the same empty stub headers.
+ASYNC_SHIM_DIR  = $(dir $(ASYNC_TEST_BIN))shim
+ASYNC_TEST_SRC  := src/test_async_worker_harness.c
+ASYNC_TEST_DEPS := $(ASYNC_TEST_SRC) src/patch_async_worker.c src/patch_prototypes.h
+# Exactly the <linux/*.h> set the engine includes.  A new kernel include in the
+# engine without an entry here fails the build loudly, which is the point.
+ASYNC_SHIM_HDRS := atomic bio blk_types err kernel kthread list module sched \
+                   slab spinlock wait
+ASYNC_TEST_CFLAGS ?=
+
+test-async: $(ASYNC_TEST_BIN)
+	@$(ASYNC_TEST_BIN)
+
+$(ASYNC_TEST_BIN): $(ASYNC_TEST_DEPS)
+	@mkdir -p $(ASYNC_SHIM_DIR)/linux
+	@for h in $(ASYNC_SHIM_HDRS); do : > $(ASYNC_SHIM_DIR)/linux/$$h.h; done
+	@echo "Building async engine harness (userspace, no kernel headers)..."
+	$(CC) -O1 -g -pthread -Wall -Wextra -Wno-unused-parameter \
+		-DRC_ASYNC_DRAIN_TIMEOUT_MS=300 $(ASYNC_TEST_CFLAGS) \
+		-o $(ASYNC_TEST_BIN) $(ASYNC_TEST_SRC) \
+		-I$(ASYNC_SHIM_DIR) -Isrc
+
+# Same build under the sanitizers.  Separate targets because the point is to run
+# it once per configuration rather than to build a universal binary:
+#   make test-async-asan     memory errors + undefined behaviour + leaks
+#   make test-async-tsan     data races (the reason this harness exists)
+test-async-asan:
+	@$(MAKE) test-async \
+		ASYNC_TEST_BIN=$(ASYNC_TEST_BIN)-asan \
+		ASYNC_TEST_CFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+
+test-async-tsan:
+	@$(MAKE) test-async \
+		ASYNC_TEST_BIN=$(ASYNC_TEST_BIN)-tsan \
+		ASYNC_TEST_CFLAGS="-fsanitize=thread -fno-omit-frame-pointer"
+
 # Help target
 help:
 	@echo "AMD RAID Driver for Linux"
 	@echo "Targets:"
-	@echo "  all     - Build the driver"
-	@echo "  clean   - Clean build files"
-	@echo "  install - Install the driver"
-	@echo "  help    - Show this help"
+	@echo "  all            - Build the driver"
+	@echo "  clean          - Clean build files"
+	@echo "  install        - Install the driver"
+	@echo "  test-async      - Build and run the async engine harness (userspace)"
+	@echo "  test-async-asan - Same, under AddressSanitizer + UBSan + LeakSanitizer"
+	@echo "  test-async-tsan - Same, under ThreadSanitizer"
+	@echo "  help            - Show this help"
 
-.PHONY: all clean install help
+.PHONY: all clean install help test-async test-async-asan test-async-tsan

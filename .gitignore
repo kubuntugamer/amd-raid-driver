@@ -38,3 +38,7 @@ Module.symvers
 1022-b000/*.vbox-extpack
 1022-b000/*.signature
 1022-b000/*.manifest
+.aider*
+
+# Userspace async-engine harness build dir (make test-async)
+.async-test/
