@@ -452,6 +452,41 @@ and it does not settle whether a column's two copies are **adjacent**
 raw region past each member's `UserDataOffset` would settle it, since
 mirror copies are byte-identical.
 
+### External corroboration: the vendor blob runs on modern Linux (DesktopECHO)
+
+[`DesktopECHO/rcraid-nvme`](https://github.com/DesktopECHO/rcraid-nvme) (v2.0,
+2026-03) takes the *opposite* approach to this port: it repackages AMD's own
+`rcraid` 9.3.3.302 (Lenovo distribution, February 2026) and binary-patches the
+proprietary `rcblob` so it loads on kernels 6.12–7.0+, targeting Ryzen APUs
+(MinisForum UM890 Pro, Ryzen 9 8945HS). It is a different driver — it never
+executes this clean-room code — but its technical write-up documents the vendor
+architecture from the inside, and that independently corroborates several
+load-bearing conclusions here:
+
+| This port's finding | Vendor blob, as described by DesktopECHO |
+|---|---|
+| `0xB000` is the NVMe RAID trap; NVMe class `CC_010802` | wrapper adds `AMD_NVME_DID = 0xb000` to `rcraid_id_tbl[]` |
+| Trapped device resolves to the real drive via EFI | wrapper implements `RC_Unmap_VidDid()`; Promontory EFI exposes `NvmeTrapDeviceVar`, APUs do not |
+| No descriptor accessor; queue init is direct BAR0 + PCI config | blob embeds a complete NVMe controller (168 `NVM_` symbols) that owns admin/I/O queues, doorbells and MSI-X and does **not** wrap the kernel nvme driver |
+| Thin OS seam around a proprietary core | 56 `RC_HW_OS_` callbacks are described as "the only seam between the proprietary RAID engine and the Linux kernel" |
+| Simple mirror/stripe levels need no generic state machine | Bypass path (`RC_StartBypassIo`) handles RAID 0/1/JBOD; the 1,180-state generic path handles the complex levels |
+| RAID 10 is a first-class level, and levels are gated | engine supports 0/1/5/6/10/50/60/Volume/RAIDABLE; gated by CPUID license level (`RC_HW_OS_GetLicenseLevel`) and `RC_CoreFeatureSet` |
+
+Two further takeaways. First, the architecture is unchanged in the **newest**
+engine build, 9.3.3.302 (Feb 2026) versus the 9.3.3-00291 analysed here — the
+same maintenance-only story as the 9.3.2→9.3.3 delta above. Second, the vendor
+rebuild path uses a **QSync bitmap** for sub-stripe targeted resynchronization
+where this port currently rebuilds a whole member.
+
+What it does **not** establish: it runs the vendor engine, not this port, so it
+cannot surface port bugs; it does not settle the RAID 10 adjacent-vs-strided
+copy pairing (the same gap as the X399 report above); and its primary validation
+target is an APU without a Promontory chipset, though it documents the
+Promontory `1022:B000` path. Its repo also ships
+`raidxpert2-9.3.3_00302-1.x86_64.rpm`, whose engine is newer than the binary
+analysed here — a possible target for the Ghidra pipeline once a Linux-ELF
+(rather than PE) workflow is in place.
+
 ---
 
 ## Debunked theories (do not re-investigate)
