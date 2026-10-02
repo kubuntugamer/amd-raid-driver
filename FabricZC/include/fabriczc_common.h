@@ -92,6 +92,37 @@ struct fabriczc_dir_entry {
 
 #define FABRICZC_EXTENT_MAGIC   0xE17E6463 /* "EXDC" Extent Descriptor Container Magic */
 
+/*
+ * Minimal-correct on-disk layout (4 KiB blocks):
+ *   block 0                : root directory entries
+ *   block FABRICZC_SB_BLOCK: superblock
+ *   block FABRICZC_JOURNAL_BLOCK: journal header
+ *   blocks [4, 4+bmp)      : free-block bitmap (1 bit per 4 KiB block)
+ *   blocks [itis, itis+32) : inode table (slot index == inode number)
+ *   rest                   : file data
+ * Free direct-block slots inside an inode are marked FABRICZC_BLOCK_FREE.
+ */
+#define FABRICZC_BLOCK_FREE  0xFFFFFFFFu
+#define FABRICZC_SB_BLOCK    2u
+#define FABRICZC_JOURNAL_BLOCK 3u
+#define FABRICZC_BITMAP_START  4u
+#define FABRICZC_INODE_TABLE_BLOCKS 32u
+
+static inline u32 fabriczc_bitmap_block_count(u64 total_blocks)
+{
+    return (u32)((total_blocks + FABRICZC_BITS_PER_BLOCK - 1) / FABRICZC_BITS_PER_BLOCK);
+}
+
+static inline u32 fabriczc_inode_table_start(u64 total_blocks)
+{
+    return FABRICZC_BITMAP_START + fabriczc_bitmap_block_count(total_blocks);
+}
+
+static inline u64 fabriczc_data_start(u64 total_blocks)
+{
+    return (u64)fabriczc_inode_table_start(total_blocks) + FABRICZC_INODE_TABLE_BLOCKS;
+}
+
 /* Master compact on-disk layout representing a contiguous span of data block allocations */
 struct fabriczc_extent_descriptor {
     u32 ee_block;             /* First logical file block cluster offset tracked by this entry */
