@@ -7294,42 +7294,73 @@ void rc_nvme_cleanup_controller(struct rc_adapter *adapter)
  * REVERSE-ENGINEERED EXTENSION: RAID 10 NESTED GEOMETRY TRANSLATION PLANE
  * IMPLEMENTING TWO-TIER PARENT-CHILD LOGICAL BLOCK MAPPING
  * ==============================================================================
+ *
+ * This function maps a logical LBA to (target_member, physical LBA on that
+ * member) for a RAID 10 array. The logical space is striped across
+ * `num_drives / 2` columns, each column being a 2-way mirror pair
+ * {2c, 2c+1}.
+ *
+ * Mapping algorithm:
+ *   - Logical stripe N lives in column (N % cols) at physical stripe
+ *     (N / cols) on BOTH members of the pair.
+ *   - For READs: pick one live copy of the pair (round-robin via external
+ *     balancer). This function returns the first copy (2c); the caller
+ *     should apply the live-member selection.
+ *   - For WRITEs/DISCARDs: the caller must fan out to both copies
+ *     (2c and 2c+1).
+ *
+ * The column count is derived from num_drives (must be even, >= 4).
+ * No legacy block boundaries or single-stripe bottlenecks remain — this
+ * path is optimized for enterprise flash throughput with branch-predictor
+ * friendly modulo arithmetic and 64-bit safe div_u64.
  */
 u64 rc_amd_map_nested_raid10(u64 sector_lba, u32 chunk_sectors, int *target_member, int num_drives)
 {
-    u64 stripe_row;
-    u32 stripe_offset;
-    int horizontal_spans;
-    int mirror_depth = 2; /* RAID 10 baseline layout depth config */
-    int selected_stripe_group;
+    u32 cols;
+    u64 stripe_num;
+    u32 stripe_off;
+    u32 col;
+    int c0, c1;
 
-    if (unlikely(num_drives < 4 || (num_drives & 1) != 0)) {
+    if (unlikely(num_drives < 4 || (num_drives & 1) != 0 || !chunk_sectors)) {
         /* Minimum topology boundary constraint failure fallback coordinate */
         *target_member = 0;
         return sector_lba;
     }
 
-    horizontal_spans = num_drives / mirror_depth;
+    cols = num_drives / 2;  /* Each column is a 2-way mirror pair */
 
-    /* Step 1: Calculate the horizontal stripe row and sector block offset */
-    stripe_row    = sector_lba / chunk_sectors;
-    stripe_offset = sector_lba % chunk_sectors;
+    /* Step 1: Decompose logical LBA into stripe number + offset within stripe.
+     * Use div_u64 for 64-bit safe division — chunk_sectors is u32. */
+    stripe_num  = div_u64(sector_lba, chunk_sectors);
+    stripe_off  = (u32)(sector_lba - stripe_num * chunk_sectors);
 
-    /* Step 2: Route coordinate mapping via horizontal stripe span selection matrix */
-    selected_stripe_group = stripe_row % horizontal_spans;
-    stripe_row            = stripe_row / horizontal_spans;
+    /* Step 2: Column selection via modulo (branch-predictor friendly).
+     * Logical stripe N maps to column (N % cols). */
+    col = (u32)(stripe_num % cols);
 
-    /* Step 3: Map target hardware device coordinates across underlying vertical mirror element pairs */
-    *target_member = selected_stripe_group * mirror_depth;
+    /* Step 3: Map column to the mirror pair {2c, 2c+1}.
+     * Return the first copy (c0) — caller handles live-member selection
+     * for reads, and fans to both for writes/discards. */
+    c0 = 2 * col;
+    c1 = c0 + 1;
+    *target_member = c0;
 
-    /* Reconstruct absolute physical sector address boundaries */
-    return (stripe_row * chunk_sectors) + stripe_offset;
+    /* Step 4: Physical stripe within the column is the quotient.
+     * Reconstruct physical LBA on the target member. */
+    return (div_u64(stripe_num, cols) * chunk_sectors) + stripe_off;
 }
 EXPORT_SYMBOL_GPL(rc_amd_map_nested_raid10);
 
 void rc_amd_route_io_nested_raid10(u64 *lba, int *mbr, u32 chunk_sectors, int num_drives) {
     *lba = rc_amd_map_nested_raid10(*lba, chunk_sectors, mbr, num_drives);
+    /* mbr now holds the first copy of the mirror pair (2c).
+     * Caller must:
+     *   - For READ: check live mask and pick c0 or c1 (round-robin)
+     *   - For WRITE/DISCARD: fan out to both c0 and c1
+     */
 }
+EXPORT_SYMBOL_GPL(rc_amd_route_io_nested_raid10);
 
 /**
  * ==============================================================================

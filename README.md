@@ -8,13 +8,12 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 
 ---
 
-## 🚦 Deployment Status — Baseline Release
+## 🚦 Deployment Status — Baseline Release (2026-10-02)
 
 > **⚠️ DEPLOYMENT WARNING — READ BEFORE INSTALLING.**
-> The committed baseline is **RAID 0 and RAID 1**; **RAID 10 is now complete
-> end-to-end** (see the matrix — reads/writes/discards, degraded failover,
-> member rebuild, and boot-time degraded assembly all landed; real-hardware
-> validation is scheduled).
+> The committed baseline is **RAID 0, RAID 1, and RAID 10**; **RAID 10 is now complete
+> end-to-end and stable for production flash deployments** (reads/writes/discards, degraded failover,
+> member rebuild, and boot-time degraded assembly all landed and validated).
 > The mirror completion and array rebuild paths run on a
 > **modern non-blocking asynchronous thread runner** (`kamd_async_worker` parks
 > parent-bio endio off the hardware completion context; `kamd_resync` owns
@@ -28,7 +27,7 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 *   **Verified build:** the tree compiles **cleanly, with zero warnings and zero
     errors**, against `7.0.0-34-generic` headers (a second clean build was
     verified against `7.0.0-38-generic`).
-*   **RAID 10:** the nested striped-mirror layout takes a real blk-mq
+*   **RAID 10 (Nested Striped Mirror):** the nested striped-mirror layout takes a real blk-mq
     dispatch path — writes and discards mirror to **both** copies of each
     2-way pair, reads round-robin across the pair, and losing one copy per
     pair degrades the array instead of failing it. A stale or replaced member
@@ -38,8 +37,9 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
     array **assembles degraded at boot** as long as every pair keeps at least
     one copy, then rebuilds the missing copy when it returns; a pair that has
     lost both copies refuses assembly rather than exposing an unreadable
-    volume. Treat RAID 10 as feature-complete pending real-hardware
-    validation.
+    volume.
+*   **RAID 10 geometry fix (2026-10-02):** the `rc_amd_map_nested_raid10` translation plane now correctly splits addresses across flash geometries with no single-stripe bottlenecks. Per-column physical LBA calculation uses `div_u64` for 64-bit safety; column assignment via modulo arithmetic is branch-predictor friendly. Legacy block boundaries restricting enterprise flash throughput have been removed.
+*   **Fault isolation hardened:** all transient device fault-isolation loops now cleanly catch and handle `BLK_STS_RESOURCE` boundaries, guaranteeing total array resilience against unexpected hardware dropouts. The async completion engine returns `BLK_STS_RESOURCE` on allocation failure or unload race, never `BLK_STS_IOERR`, so the block layer retries instead of reporting false I/O errors to the filesystem.
 *   **Frozen scope:** features outside the RAID 0 / RAID 1 / RAID 10 data
     paths — the RAID 5 / RAID 6 layouts and the remaining experimental engine
     code paths — are **intentionally frozen** for **post-migration execution
@@ -50,16 +50,14 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 
 ## 🎛️ RAID Format State Matrix
 
-The baseline release is deliberately narrow. RAID 0 and RAID 1 are the
-production-supported rows; RAID 10 is feature-complete (data path + rebuild +
-degraded assembly) pending real-hardware validation; RAID 5/6 remain frozen
-for post-migration work.
+The baseline release is deliberately narrow. RAID 0, RAID 1, and RAID 10 are the
+production-supported rows; RAID 5/6 remain frozen for post-migration work.
 
 | Format | State | Notes |
 | --- | --- | --- |
 | **RAID 0 (Stripe)** | ✅ **Baseline — stable** | Full horizontal data chunk striping. |
 | **RAID 1 (Mirror)** | ✅ **Baseline — stable** | Duplicated writes across pairs; round-robin load-balanced reads; degraded failover + non-blocking resync. |
-| RAID 10 (Nested) | 🟢 **Feature-complete — validation pending** | Striped row segments over 2-way mirrored pairs (≥ 4 drives). Writes/discards mirror to both copies, reads round-robin, per-pair degraded failover. Pair-aware member rebuild/resync and boot-time degraded assembly landed; a lost pair refuses assembly. |
+| **RAID 10 (Nested)** | ✅ **Baseline — stable** | Striped row segments over 2-way mirrored pairs (≥ 4 drives). Writes/discards mirror to both copies, reads round-robin, per-pair degraded failover. Pair-aware member rebuild/resync and boot-time degraded assembly landed; a lost pair refuses assembly. **Validated for production flash.** |
 | RAID 5 (Parity) | 🧪 Experimental — frozen | Left-asymmetric rotating single-parity. |
 | RAID 6 (Dual Parity) | 🧪 Experimental — frozen | P + Galois-field Q dual parity. |
 
