@@ -59,9 +59,11 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 | **3** | **OCE (Online Capacity Expansion)** | 🗺️ **Roadmap — this driver** | Add drives online, restripe, grow FS |
 | **4** | **ORLM (Online RAID Level Migration)** | 🗺️ **Roadmap — this driver** | RAID 0↔5↔6↔10 online, zero CPU |
 | **5** | COW snapshots + instant clone | 🗺️ Future | 0.001s clones, zero space |
-| **6** | Hardware offload (NVMe ZNS/FDP) | 🗺️ Future | Zero CPU, hardware longevity |
+| **6** | **P2PDMA (Peer-to-Peer DMA)** | 🗺️ Future | Drive-to-drive DMA, zero CPU/RAM copy |
+| **7** | **io_uring support** | 🗺️ Future | Userspace async I/O, zero-copy, SPDK |
+| **8** | Hardware offload (NVMe ZNS/FDP) | 🗺️ Future | Zero CPU, hardware longevity |
 
-**Prime directive: nothing from experimental branch migrates to main. OCE/ORLM are first-class features of *this* driver.**
+**Prime directive: nothing from experimental branch migrates to main. OCE/ORLM/P2PDMA/io_uring are first-class features of *this* driver.**
 
 ---
 
