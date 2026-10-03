@@ -41,7 +41,27 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 *   **RAID 10 geometry fix (2026-10-02):** the `rc_amd_map_nested_raid10` translation plane now correctly splits addresses across flash geometries with no single-stripe bottlenecks. Per-column physical LBA calculation uses `div_u64` for 64-bit safety; column assignment via modulo arithmetic is branch-predictor friendly. Legacy block boundaries restricting enterprise flash throughput have been removed.
 *   **Fault isolation hardened:** all transient device fault-isolation loops now cleanly catch and handle `BLK_STS_RESOURCE` boundaries, guaranteeing total array resilience against unexpected hardware dropouts. The async completion engine returns `BLK_STS_RESOURCE` on allocation failure or unload race, never `BLK_STS_IOERR`, so the block layer retries instead of reporting false I/O errors to the filesystem.
 *   **RAID 5/6 parity engine implemented (2026-10-02):** cleanroom GF(2⁸) arithmetic with polynomial x⁸+x⁴+x³+x²+1 (0x11D), generator α=0x02. RAID 5 P parity (XOR) and RAID 6 P+Q dual parity (Reed-Solomon Σ(dᵢ×αⁱ)) implemented in `src/patch_parity_math.c`. Distributed left-asymmetric layout mapping for N=3..8 (RAID 5) and N=4..8 (RAID 6) matches vendor on-disk FirstCount/SecondCount encoding. **Awaiting hardware validation** — dispatch paths, rebuild logic, and metadata writer not yet wired.
-*   **Frozen scope:** remaining experimental engine code paths (FabricZC, HighPoint metadata import) are **intentionally frozen** for **post-migration execution phases**. They remain in-tree but are experimental; do not rely on them for production data.
+*   **Enterprise roadmap (this driver, not experimental):**
+    *   **OCE (Online Capacity Expansion)** — add drives to RAID 5/6 arrays online, restripe parity, grow filesystems without downtime.
+    *   **ORLM (Online RAID Level Migration)** — migrate RAID 0↔5↔6↔10 online, zero host CPU, instant metadata commit.
+    *   These are **first-class roadmap items for this driver** — not experimental, not imported. Enterprise management ops are first-class citizens.
+*   **Frozen scope:** remaining experimental engine code paths (FabricZC, HighPoint metadata import) are **intentionally frozen** for **post-migration execution phases**. They remain in-tree but are experimental; do not rely on them for production data. **Prime directive: nothing from experimental migrates to main.**
+
+---
+
+## 🗺️ Enterprise Roadmap (This Driver — Not Experimental)
+
+| Phase | Feature | Status | Enables |
+|-------|---------|--------|---------|
+| **0** | RAID 0/1/10 stable | ✅ Done | Production baseline |
+| **1** | RAID 5/6 I/O + rebuild | 🟡 Math done, wiring pending | Basic parity arrays |
+| **2** | Metadata writer + TUI create | ⏳ Planned | Create RAID 5/6 arrays |
+| **3** | **OCE (Online Capacity Expansion)** | 🗺️ **Roadmap — this driver** | Add drives online, restripe, grow FS |
+| **4** | **ORLM (Online RAID Level Migration)** | 🗺️ **Roadmap — this driver** | RAID 0↔5↔6↔10 online, zero CPU |
+| **5** | COW snapshots + instant clone | 🗺️ Future | 0.001s clones, zero space |
+| **6** | Hardware offload (NVMe ZNS/FDP) | 🗺️ Future | Zero CPU, hardware longevity |
+
+**Prime directive: nothing from experimental branch migrates to main. OCE/ORLM are first-class features of *this* driver.**
 
 ---
 
