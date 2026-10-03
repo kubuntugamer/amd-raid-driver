@@ -134,4 +134,10 @@ void rc_amd_exit_ioctl_bridge(void);
 u64 rc_amd_map_distributed_raid5(u64 sector_lba, u32 chunk_sectors, int *target_member, int *parity_member, int num_drives);
 void rc_amd_route_io_distributed_raid5(u64 *lba, int *mbr, int *parity_mbr, u32 chunk_sectors, int num_drives);
 
+/* RAID 6 Distributed Parity Layout */
+u64 rc_amd_map_distributed_raid6(u64 sector_lba, u32 chunk_sectors,
+                                  int *target_member, int *p_member, int *q_member, int num_drives);
+void rc_amd_route_io_distributed_raid6(u64 *lba, int *mbr, int *p_mbr, int *q_mbr,
+                                        u32 chunk_sectors, int num_drives);
+
 #endif /* PATCH_PROTOTYPES_H */
