@@ -100,7 +100,7 @@ This is the recommended deployment path for setting up a fresh Linux environment
 1. Boot into your live USB installer media environment, select **"Try"** (Live Session), and open a terminal window.
 2. Clone this repository fork and execute the unified installation entry script:
    ```bash
-   git clone https://github.com
+   git clone https://github.com/kubuntugamer/amd-raid-driver.git
    cd amd-raid-driver
    sudo ./install-livecd.sh
    ```
