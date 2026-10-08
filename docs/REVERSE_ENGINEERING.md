@@ -418,9 +418,15 @@ same RAID-level magics (`0x1BF6/7/A/B`). All geometry conclusions hold for
 
 ### External corroboration: X399 (Zenith Extreme) SATA RAID10
 
-Reported in issue #57 (George "PlaidPiper" Crossley, 2026-10). A
-firmware-created **SATA** RAID10 over 4× WD100EMAZ on X399 (Zenith
-Extreme) parses to the same packet this driver expects:
+Reported in issue #57 (George "PlaidPiper" Crossley; original report July
+2026, cross-dump 2026-10-07), cross-linked
+from [this repo's issue #1](https://github.com/kubuntugamer/amd-raid-driver/issues/1).
+A firmware-created **SATA** RAID10 over 4× WD100EMAZ on X399 (Zenith
+Extreme) parses to the same packet this driver expects; the four raw
+metadata dumps are published as
+[`PlaidPiper/x399-raidcore-fixtures`](https://github.com/PlaidPiper/x399-raidcore-fixtures)
+(commit block at LBA `0x5001`, config ring at `0x5800`, 2048 sectors) and
+were verified against this port's parser (bottom of this section):
 
 | Field | Observed |
 |---|---|
@@ -444,13 +450,48 @@ behaviour; the `chunk_index` ladder; and the column-chunk interleave
 model (`logical chunk N` → column `N mod cols`, physical chunk
 `N div cols`, both copies).
 
+**Cross-dump settles the pair convention (2026-10-07).** PlaidPiper
+subsequently dd'd all four members and compared the raw data at the same
+`UserDataOffset` (joeytroy#57 comment, 2026-10-07): element 0 ≡ element 1
+and element 2 ≡ element 3 byte-for-byte, while the two pairs differ from
+each other — sampled at both `UserDataOffset + 0` and
+`UserDataOffset + 1 GiB`. That is exactly the **adjacent** pairing
+`[A0, A1] | [B0, B1]` this driver assumes (`BIT(2*c) | BIT(2*c+1)`), at
+both elements of both pairs. The last unverified RAID10 geometry
+assumption in this port is now confirmed on real hardware — see
+[RAID10 and parity geometry validation](VALIDATION_RAID10.md).
+
+Caveats: the cross-dump covers a 2×2 set only (no 4-way `0x41BF7` or
+8-way `0x81BF8` topology has been cross-dumped), and "element index"
+means the order of records *inside the committed LD* — nothing yet proves
+that order equals physical port order (for a 2-way set a permutation of
+elements is equivalent, so the pairing conclusion holds either way).
+
+**Fixtures independently verified against this port's parser (2026-10-07).**
+The four 2 MiB raw metadata dumps (LBA `0x5000`) are published as
+[`PlaidPiper/x399-raidcore-fixtures`](https://github.com/PlaidPiper/x399-raidcore-fixtures)
+(referenced from [this repo's issue #1](https://github.com/kubuntugamer/amd-raid-driver/issues/1)).
+All four were run through a userspace port of this driver's exact
+validation chain (`src/rc_nvme.c`): magic `RAIDCore`, version
+`0x00030000`, XOR-lane-shuffle checksum over `[0x08..0x1FF]` valid,
+commit block at `0x5001` valid, generation-timestamp linkage
+(`0x44e3270d8b7f9c46`, byte-identical across members) matching the
+generation header, LD tag `0x25BD` found — **all four parse clean, no
+warnings.** Further corroborated: the committed LD record is byte-identical
+across members; RAID10 derived as 2×2 with `devices = 4`, `devtype
+0x1BF6`; capacity `39,063,609,344 = 2 × UserDataSize 19,531,804,672`;
+`chunk_index = 1` → 64 KiB; element `DeviceID`s match each member's own
+`device_id`; `my_pos` 0–3 consistent; per-member header fields (`mbr_checksum`,
+`checksum`, `device_id`, generation LBA/sequence) differ exactly as
+designed while the committed records match. The committed generation
+contains **no** single-disk `0x1BF9` logical devices — they appear only in
+stale ring generations, and the commit-block-following logic correctly
+ignores them: the dead-generation pitfall documented above is present in
+real X399 data and handled.
+
 What it does **not** establish: the `1022:B000` NVMe path (bring-up,
 completion, degraded failover, rebuild — separate code, never run here),
-and it does not settle whether a column's two copies are **adjacent**
-(`{2c, 2c+1}`, the Linux driver's current assumption) or **strided**
-(`{c, c+cols}`) — the members were not cross-dumped. Comparing a small
-raw region past each member's `UserDataOffset` would settle it, since
-mirror copies are byte-identical.
+since these dumps are from a SATA/Promontory array.
 
 ### External corroboration: the vendor blob runs on modern Linux (DesktopECHO)
 
@@ -479,10 +520,10 @@ rebuild path uses a **QSync bitmap** for sub-stripe targeted resynchronization
 where this port currently rebuilds a whole member.
 
 What it does **not** establish: it runs the vendor engine, not this port, so it
-cannot surface port bugs; it does not settle the RAID 10 adjacent-vs-strided
-copy pairing (the same gap as the X399 report above); and its primary validation
+cannot surface port bugs; and its primary validation
 target is an APU without a Promontory chipset, though it documents the
-Promontory `1022:B000` path. Its repo also ships
+Promontory `1022:B000` path. (The RAID 10 adjacent-vs-strided pairing it also
+left unsettled has since been closed by the X399 cross-dump above.) Its repo also ships
 `raidxpert2-9.3.3_00302-1.x86_64.rpm`, whose engine is newer than the binary
 analysed here — a possible target for the Ghidra pipeline once a Linux-ELF
 (rather than PE) workflow is in place.

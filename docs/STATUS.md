@@ -65,6 +65,30 @@ The sections below are the dated implementation log — how each piece was built
 kept for forensics. Where an early "Not started" / "Next steps" note has since
 been implemented, it's marked.
 
+## 2026-10-07 — X399 fixtures verified; RAID10 pair convention settled
+
+PlaidPiper's four raw X399 metadata dumps
+([`PlaidPiper/x399-raidcore-fixtures`](https://github.com/PlaidPiper/x399-raidcore-fixtures),
+via [issue #1](https://github.com/kubuntugamer/amd-raid-driver/issues/1) and
+joeytroy#57) were run through a userspace port of this driver's exact
+validation chain — **all four parse clean** (magic, XOR-lane checksum, commit
+block at `0x5001`, generation-timestamp linkage, LD tag `0x25BD`), with the
+committed LD record byte-identical across members and the per-member header
+fields differing exactly as designed. The dead-generation pitfall (#44) shows
+up in the real data: stale ring generations ahead of the committed one, plus
+`0x1BF9` single-disk LDs that exist *only* outside the committed generation —
+and the commit-block-following logic handles both.
+
+The same reporter then cross-dumped all four members at a common
+`UserDataOffset`: element 0 ≡ element 1, element 2 ≡ element 3 (byte-identical
+within a pair, different between pairs), at both element 0/1 and element 2/3.
+That settles the **last unverified RAID10 assumption** — the pair convention
+is **adjacent** (`{2c, 2c+1}`), as `rc_nvme.c` assumes, not strided. Still
+open for the runbook: confirming the same on this box's NVMe path, and 4-way /
+8-way topologies (2×2 only was cross-dumped). See
+[`REVERSE_ENGINEERING.md`](REVERSE_ENGINEERING.md) (X399 section) and
+[`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) step 1.
+
 ## 2026-07-10 — RAID1 hardware validation (PRs #43, #44, #45)
 
 Reformatting the dev box for a real BIOS RAID1 array turned hardware

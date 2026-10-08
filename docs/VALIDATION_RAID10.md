@@ -67,11 +67,16 @@ changed at runtime.
 
 ## 1. Geometry and the pair convention — do this FIRST
 
-The one assumption never checked against real drives is **which two members
-form a mirror column**: the driver assumes adjacent (`{2c, 2c+1}`), the
-alternative is strided (`{c, c+cols}`). A wrong pairing does not crash — it
+**Status: the pair convention is now settled.** PlaidPiper's 2026-10-07
+cross-dump of an X399 SATA RAID10 (all four members read at the same
+`UserDataOffset`; element 0 ≡ element 1, element 2 ≡ element 3, pairs
+differ) confirms the driver's **adjacent** assumption (`{2c, 2c+1}`) on
+real hardware — see [REVERSE_ENGINEERING.md](REVERSE_ENGINEERING.md)
+"External corroboration: X399". What that experiment did not cover is
+this box's NVMe path, so keep the falsification below as a cheap sanity
+check before trusting writes: a wrong pairing does not crash — it
 mirrors to the wrong partner and reads across non-partners, i.e. silent
-corruption. Resolve it before trusting any write.
+corruption.
 
 - [ ] Confirm geometry: `members` count is even, `cols = members/2`, and the
       debugfs `volume` line agrees with the firmware (`FirstCount × SecondCount`).
@@ -86,6 +91,9 @@ corruption. Resolve it before trusting any write.
       Adjacent expected → proceed. Strided → **STOP**; only the
       copy→member mapping in `rc_volume_phys_for_member` changes (`{c, c+cols}`),
       fix, rebuild, re-run from step 0.
+      (Strided would contradict the X399 cross-dump — if that is what you see,
+      it means SATA and NVMe firmware use different conventions; re-check
+      element order vs. port order before changing anything.)
 
 ## 2. Data path
 
@@ -143,7 +151,7 @@ corruption. Resolve it before trusting any write.
 | # | Check | Result | Notes |
 |---|---|---|---|
 | 0 | Trust gate | | |
-| 1 | Pair convention | | adjacent / strided |
+| 1 | Pair convention | | adjacent — confirmed on X399 (2026-10-07); verify on this box |
 | 2 | Write path | | |
 | 3 | Degraded + fatal boundary | | |
 | 4 | Rebuild + concurrent writes | | |
