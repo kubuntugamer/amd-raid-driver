@@ -180,7 +180,7 @@ static __attribute__((constructor)) void rc_parity_init(void)
  * Left-asymmetric algorithm (matches Linux md, vendor decompile):
  *   - Parity rotates backward: parity = (N-1) - (stripe % N)
  *   - Data drives indexed 0..N-2, skipping parity position
- *   - Phys LBA = (stripe / (N-1)) * chunk_sectors + offset
+ *   - Phys LBA = stripe * chunk_sectors + offset (each stripe is one row on every member)
  *
  * Returns: physical sector on target_member
  */
@@ -214,7 +214,7 @@ u64 rc_amd_map_distributed_raid5(u64 sector_lba, u32 chunk_sectors,
     *target_member = data_idx;
 
     /* Physical stripe within the data drive */
-    return (div_u64(stripe_num, data_drives) * chunk_sectors) + stripe_off;
+    return (stripe_num * chunk_sectors) + stripe_off;
 }
 EXPORT_SYMBOL_GPL(rc_amd_map_distributed_raid5);
 
@@ -270,7 +270,7 @@ u64 rc_amd_map_distributed_raid6(u64 sector_lba, u32 chunk_sectors,
     *target_member = data_idx;
 
     /* Physical stripe within the data drive */
-    return (div_u64(stripe_num, data_drives) * chunk_sectors) + stripe_off;
+    return (stripe_num * chunk_sectors) + stripe_off;
 }
 EXPORT_SYMBOL_GPL(rc_amd_map_distributed_raid6);
 

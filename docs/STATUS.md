@@ -671,6 +671,19 @@ single hung command or transient fault without intervention.
 
 ### Limits (still open)
 
+- **RAID 5/6 distributed-parity mapping is not one-to-one** (issue #2). The
+  mapping divided the stripe number by the data-drive count, so distinct
+  logical sectors could land on the same (member, LBA) and overwrite each
+  other. Fixed in `rc_amd_map_distributed_raid5/6` (`src/patch_parity_math.c`,
+  mirrored in `src/test_parity_userspace.c`); the bijection test in
+  `test_parity` passes. Fix not yet released.
+- **RAID 5/6 metadata is rejected by `rc_ld_level_from`, and RAID 6 N=4 is
+  misparsed as RAID 10** (issue #3). RAID 6 Q in the vendor blob appears to be
+  EVENODD (prime 17), not the GF(2⁸) Reed-Solomon Q in `patch_parity_math.c`.
+  Not yet confirmed against a test vector.
+- **QEMU RAID test depends on PATH order for static busybox** (issue #5).
+- **rcraid ioctl control node has no `capable()`/`ns_capable()` check**
+  (issue #4).
 - **Retry on transient SCs.** Distinguish DNR=0 (retryable) from DNR=1 and
   re-dispatch rather than ending the request. Belongs on top of reset (a
   recovered controller is the right place to retry). *This is the caveat the

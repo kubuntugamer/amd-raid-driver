@@ -598,6 +598,23 @@ Still needing Ghidra investigation. Run via `scripts/ghidra/HuntBlockers.java`
    (a 0x1c-byte struct `0x1c,4,2,2,2,2,1`) may set adapter parameters we don't
    replicate. Worth a look if NVMe init produces a controller fatal status.
 
+### RAID 5/6 layout (open, from the blob)
+
+7. **Where the blob's parity rotation is computed.** Traced from
+   `RC_RAID5DriveMap` / `RC_RAID6DriveMap` (data member = `(LBA >> s) % (N-1)`
+   or `% (N-2)`; no rotation) through `RC_FlushDirtyDataRAID5DoneGetDataLocks`
+   (parity at fixed `IocList[SecondCount - k]`). `RC_LookupParityBlock` is a
+   cache lookup, `RC_GetQParityIoc` is RAID 60 only, and
+   `RC_GetStripeStartSector` picks no parity member. `RC_ConfigUpdateMapDriver`
+   gives RAID 5/6 the `default` case, `RC_VolumeLogicalToPhysical`, which walks
+   `RAID0List` by sector offset and never reads a parity layout. So parity
+   placement seems to come from the element table built at array creation,
+   which is not yet traced. This conflicts with the left-asymmetric rotation in
+   `patch_parity_math.c` and needs confirming before anyone relies on it.
+8. **RAID 6 Q algorithm.** The decompiled Q routine indicates EVENODD (prime 17).
+   The repo's Q is GF(2⁸) Reed-Solomon. Not yet checked against an EVENODD test
+   vector (issue #3).
+
 ### Resolved
 
 - **Volume-metadata parsing** — fully understood (see "rcraid geometry" above,

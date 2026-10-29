@@ -148,7 +148,7 @@ uint64_t rc_amd_map_distributed_raid5(uint64_t sector_lba, uint32_t chunk_sector
         data_idx++;
     *target_member = data_idx;
 
-    return ((stripe_num / data_drives) * chunk_sectors) + stripe_off;
+    return (stripe_num * chunk_sectors) + stripe_off;
 }
 
 uint64_t rc_amd_map_distributed_raid6(uint64_t sector_lba, uint32_t chunk_sectors,
@@ -182,7 +182,7 @@ uint64_t rc_amd_map_distributed_raid6(uint64_t sector_lba, uint32_t chunk_sector
     if (data_idx >= q_pos) data_idx++;
     *target_member = data_idx;
 
-    return ((stripe_num / data_drives) * chunk_sectors) + stripe_off;
+    return (stripe_num * chunk_sectors) + stripe_off;
 }
 
 /* =========================================================================
