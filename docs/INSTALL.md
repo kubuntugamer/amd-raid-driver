@@ -286,9 +286,12 @@ The driver loaded but the PCI table doesn't match. Confirm:
 lspci -d 1022: -nn
 ```
 
-Both `1022:43bd` (AHCI variant) and `1022:b000` (NVMe variant) should
-be claimed by the driver via the table in `rc_bottom.c`. If your
-device ID is something else, it's not currently supported.
+Only `1022:b000` (NVMe variant) is claimed by the driver via the table in
+`rc_bottom.c`.  The SATA-RAID IDs (`43bd`, `7905`, `7916`, `7917`) are
+deliberately *not* claimed — their AHCI path is unimplemented, so those
+controllers stay bound to `ahci` and keep working at whatever level `ahci`
+supports.  If your device ID is something else, it's not currently
+supported.
 
 ### Driver loads, NVMe init runs, but `ASQ/ACQ` read-back mismatch
 

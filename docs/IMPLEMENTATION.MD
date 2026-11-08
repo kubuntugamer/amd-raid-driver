@@ -379,9 +379,10 @@ remaining items:
 
 - [ ] `rcraid.sys` completion ISR (`FUN_14000d2b8`) — never decompiled.
       Confirm CQ entry layout vs. NVMe-standard.
-- [ ] AHCI path bring-up (devices 0x7905 / 7916 / 7917 / 43BD) —
-      MODULE_DEVICE_TABLE already claims them; the AHCI submit /
-      complete path needs to be implemented fresh from `rcbottom.sys`.
+- [ ] AHCI path bring-up (devices 0x7905 / 7916 / 7917 / 43BD) — not in
+      MODULE_DEVICE_TABLE on purpose (claiming them would take the device
+      from `ahci` and drive nothing); re-add them with the AHCI submit /
+      complete path, implemented fresh from `rcbottom.sys`.
 
 ---
 

@@ -2,7 +2,8 @@
 
 Current focus: **PCI 1022:B000 only** (TRX50 NVMe RAID Bottom). The AHCI
 variants (`7905 / 7916 / 7917 / 43BD`) are not on the target hardware and
-are best-effort/untested.
+are **not claimed** — there is no code path yet, so those controllers stay
+bound to `ahci` (see #7).
 
 ## Current state (2026-07)
 
@@ -485,9 +486,11 @@ done — see "Since done" above. What remains, in rough priority:
 2. **Multi-volume support** — one gendisk per LD instead of a single
    `/dev/rcraid0`.
 3. **Hot-plug / drive-failure handling** — clean member teardown + drain.
-4. **SATA RAID (AHCI) path** — the `1022:7905 / 43BD / 7916 / 7917`
-   MODULE_DEVICE_TABLE claims are in place; the AHCI bring-up must be
-   implemented fresh from `rcbottom.sys` (not the old deleted scaffolding).
+4. **SATA RAID (AHCI) path** — the `1022:7905 / 43BD / 7916 / 7917` IDs are
+   deliberately absent from MODULE_DEVICE_TABLE, because claiming a device
+   with no code path strands it; add them back together with the AHCI
+   bring-up, implemented fresh from `rcbottom.sys` (not the old deleted
+   scaffolding).
 
 ---
 

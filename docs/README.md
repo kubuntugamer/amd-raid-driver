@@ -54,7 +54,7 @@ NVMe RAID controller as PCI `1022:B000`, which is fully implemented here.
 | PCI ID | Controller | Status |
 |--------|-----------|--------|
 | `1022:B000` | NVMe RAID Bottom (TRX50, WRX90, X870/X670, B850/B650, …) | ✅ **RAID0 + RAID1 read/write, boot-from-array validated** |
-| `1022:43BD` `7905` `7916` `7917` | SATA RAID (Promontory / older) | ⚙️ Claimed but stubbed — not yet implemented |
+| `1022:43BD` `7905` `7916` `7917` | SATA RAID (Promontory / older) | ⛔ **Not claimed** — AHCI path unimplemented, so the device stays with `ahci` |
 
 > **Heads-up for RAID1 users:** degraded mode and resync work — a member
 > failure (or hot-unplug) keeps the volume serving from the surviving
@@ -299,8 +299,9 @@ Full setup, troubleshooting, and the Secure-Boot / signing details are in
   reverse engineering of the config-ring writer and is a roadmap item.
 - **RAID10** — roadmap. **RAID5** — not planned (AMD only supports it on
   3rd-gen Threadripper).
-- **SATA RAID** — the `43BD / 7905 / 7916 / 7917` controllers are claimed
-  but the AHCI path is a stub.
+- **SATA RAID** — the `43BD / 7905 / 7916 / 7917` controllers are **not
+  claimed**; the AHCI path is unimplemented, so those devices stay bound to
+  `ahci` (see #7).
 - **No array management** — create/modify the array in BIOS/RAIDXpert.
 - **No Secure Boot signing** out of the box.
 - **No retry of transient NVMe errors** — a failed command surfaces as an
