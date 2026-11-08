@@ -2182,6 +2182,10 @@ static u32 rc_ld_level_from(u32 devtype, u32 first, u32 second, u32 devices)
 	if (devtype == RC_LDT_RAID0) {
 		if (!first || !second || first * second != devices)
 			return 0;
+		if (first == 1 && second == 2)
+			return RC_LDT_RAID1;	/* 2-way mirror: firmware's RAID1
+						 * encoding (0x1BF6 + 1x2, see
+						 * rc_linux.h) */
 		if (second == 1)
 			return RC_LDT_RAID0;	/* Pure RAID 0 */
 		if (first >= 2 && second == 2)
