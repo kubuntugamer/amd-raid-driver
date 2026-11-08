@@ -19,6 +19,9 @@
 #                         [--level raid0|raid1]
 #                         [--members N] [--size-mib M] [--workdir DIR]
 #
+# The statically linked busybox packed into the initramfs is found
+# automatically; set BUSYBOX=/path/to/busybox to force a specific binary.
+#
 # --kver builds the module against /lib/modules/<version>/build and boots
 # /boot/vmlinuz-<version> (unless --kernel overrides), so the test can run
 # against an installed kernel that is NOT the running one — e.g. CI runners
@@ -78,11 +81,29 @@ command -v qemu-system-x86_64 >/dev/null || {
     echo "qemu-system-x86_64 not found (install qemu-system-x86)" >&2
     exit 2
 }
-BUSYBOX="$(command -v busybox)" || { echo "busybox not found" >&2; exit 2; }
-file "$BUSYBOX" | grep -q "statically linked" || {
-    echo "$BUSYBOX is not static (install busybox-static)" >&2
+# The initramfs has no libc, so the busybox packed into it must be static.
+# `command -v busybox` resolves by PATH order and typically returns the
+# DYNAMIC /usr/bin/busybox from busybox-initramfs, which fails the check
+# below even though /usr/bin/busybox-static is installed alongside it.  Probe
+# the static names as well, and let BUSYBOX pick an explicit binary.
+BUSYBOX=""
+BUSYBOX_DYNAMIC=""
+for cand in "${BUSYBOX:-}" "$(command -v busybox || true)" \
+            /usr/bin/busybox-static /bin/busybox-static /usr/bin/busybox; do
+    [ -n "$cand" ] && [ -x "$cand" ] || continue
+    if file "$cand" | grep -q "statically linked"; then
+        BUSYBOX="$cand"
+        break
+    fi
+    BUSYBOX_DYNAMIC="${BUSYBOX_DYNAMIC:+$BUSYBOX_DYNAMIC }$cand"
+done
+if [ -z "$BUSYBOX" ]; then
+    echo "no statically linked busybox found (install busybox-static)" >&2
+    [ -n "$BUSYBOX_DYNAMIC" ] && \
+        echo "  rejected, dynamically linked: $BUSYBOX_DYNAMIC" >&2
     exit 2
-}
+fi
+echo "==> busybox: $BUSYBOX"
 
 if [ -z "$WORKDIR" ]; then
     WORKDIR="$(mktemp -d /tmp/rcraid-qemu.XXXXXX)"
