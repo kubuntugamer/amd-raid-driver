@@ -56,8 +56,10 @@ window keep concurrent writes coherent); volume state is exposed in
 kill the original survivor → checksums intact) and `--omit-member`
 degraded-boot scenarios.
 Not yet: **persistent degraded state** (in-memory only — a reload
-re-assembles as if in sync; needs config-ring writer RE), RAID10/5,
-hot-plug/rebuild, SMART pass-through,
+re-assembles as if in sync; needs config-ring writer RE), **RAID10 hardware
+validation** (the level is feature-complete; the array-box run in
+[`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) is what's missing), RAID5/6
+dispatch wiring, hot-plug/rebuild, SMART pass-through,
 multi-volume, Secure Boot signing out of the box, array creation from Linux.
 The prioritized roadmap is in [`IMPLEMENTATION.MD`](IMPLEMENTATION.MD); the
 RE ground truth is in [`REVERSE_ENGINEERING.md`](REVERSE_ENGINEERING.md).
@@ -480,9 +482,10 @@ sudo modprobe -r rcraid && sudo insmod rcraid.ko enable_writes=1
 The original bring-up backlog (interrupt-driven completion, per-CPU queues) is
 done — see "Since done" above. What remains, in rough priority:
 
-1. **Non-RAID0 support (RAID1 first, then RAID10)** — the LD parser already
-   recognises other `RC_LDT_*` device types; the stripe mapping and dispatch
-   need RAID-level-specific paths. See [`IMPLEMENTATION.MD`](IMPLEMENTATION.MD).
+1. **RAID10 hardware validation** — RAID0/1/10 dispatch is implemented and
+   RAID0/1 are hardware-validated; what remains for RAID10 is the array-box run
+   and sign-off in [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md), then promoting
+   the row in `README.md` and here. See [`IMPLEMENTATION.MD`](IMPLEMENTATION.MD).
 2. **Multi-volume support** — one gendisk per LD instead of a single
    `/dev/rcraid0`.
 3. **Hot-plug / drive-failure handling** — clean member teardown + drain.

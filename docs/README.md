@@ -34,7 +34,7 @@ from it**.
 
 | | |
 |---|---|
-| **RAID levels** | RAID0 ✅ &nbsp;·&nbsp; RAID1 ✅ &nbsp;·&nbsp; RAID10 🗺️ roadmap &nbsp;·&nbsp; RAID5 ❌ not planned |
+| **RAID levels** | RAID0 ✅ &nbsp;·&nbsp; RAID1 ✅ &nbsp;·&nbsp; RAID10 🟡 feature-complete, validation pending &nbsp;·&nbsp; RAID5 🟡 math only |
 | **Boot from the array** | ✅ Validated on hardware for **both** levels — installer script, DKMS rebuilds, initramfs hook, UEFI fallback entry |
 | **Throughput** (2× T700, PCIe 5.0) | RAID0 **20.6 / 19.7 GB/s** · RAID1 **20.5 / 11.1 GB/s** (seq R/W — [details](#benchmarks)) |
 | **Filesystem safety** | FLUSH · FUA · DISCARD/TRIM — `fsync`, journaling, and `fstrim` behave correctly |
@@ -297,8 +297,12 @@ Full setup, troubleshooting, and the Secure-Boot / signing details are in
   failed and writes continued), let the resync finish — or rebuild the
   array — before rebooting. On-disk state tracking requires further
   reverse engineering of the config-ring writer and is a roadmap item.
-- **RAID10** — roadmap. **RAID5** — not planned (AMD only supports it on
-  3rd-gen Threadripper).
+- **RAID10 hardware validation** — the level itself is feature-complete
+  (dispatch, per-pair failover, rebuild, degraded boot), but it has not been run
+  on the `1022:B000` array box yet, so don't put data you can't lose on it. See
+  [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md). **RAID5/6** — parity math and
+  layout mapping are in place, but dispatch/rebuild/metadata-writing are not
+  wired, so the level can't be created or mounted.
 - **SATA RAID** — the `43BD / 7905 / 7916 / 7917` controllers are **not
   claimed**; the AHCI path is unimplemented, so those devices stay bound to
   `ahci` (see #7).

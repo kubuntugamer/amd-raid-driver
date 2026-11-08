@@ -173,12 +173,17 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
       rejoins).  Still to come from #51: degraded boot assembly (opt-in
       module param), member re-add plumbing, and the resync engine.
 
-- [ ] **RAID10** — combination of RAID0 + RAID1. Stripe across
+- [x] **RAID10** — combination of RAID0 + RAID1. Stripe across
       mirrored pairs. Reuses RAID0 stripe math + RAID1 mirror dispatch.
+      *Landed 2026-10-02:* `rc_volume_dispatch_raid10()` plus the nested
+      column mapping, per-pair degraded failover, pair-aware rebuild, and
+      boot-time degraded assembly.  **Not yet hardware-validated on
+      `1022:B000`** — [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) is the
+      gate before the README/STATUS rows may say "stable".
 
-- [ ] **RAID5 / RAID6** — parity calculation in the write path
-      (rmw + p / p+q). Significant work: scrub, rebuild, async XOR.
-      Probably won't land soon; flag as future.
+- [ ] **RAID5 / RAID6** — GF(2^8) parity math and the left-asymmetric layout
+      mapping are done (`src/patch_parity_math.c`); the dispatch/rebuild
+      paths, the metadata writer, and hardware validation are still open.
 
 - [ ] **Multi-volume support** — BIOS can create multiple arrays
       on the same members. We hardcode one `/dev/rcraid0`. Refactor
