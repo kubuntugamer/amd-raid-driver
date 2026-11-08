@@ -8,6 +8,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
+#include <linux/capability.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include "patch_prototypes.h"
@@ -22,7 +23,14 @@ static int amd_ctl_major_number;
 
 /**
  * Core Core IOCTL Execution Router Matrix
- * Bridges user-space unprivileged requests directly to bare-metal kernel actions.
+ * Routes user-space management requests to the engine.
+ *
+ * This node can evict a member from a live array and start a resync, so it is
+ * a privileged interface: every command is gated on CAP_SYS_ADMIN.  The check
+ * lives here rather than in an open handler so that it also covers commands
+ * added later, and it is namespace-unaware (capable(), not ns_capable()) on
+ * purpose — these actions reshape state shared by the whole system, not a
+ * per-namespace resource.
  */
 static long amd_raid_ioctl_multiplexer(struct file *file, unsigned int cmd, unsigned long arg)
 {
@@ -31,6 +39,12 @@ static long amd_raid_ioctl_multiplexer(struct file *file, unsigned int cmd, unsi
     uint32_t resync_end_sector;
     struct rc_resync_progress progress;
     long ret;
+
+    if (!capable(CAP_SYS_ADMIN)) {
+        pr_warn_ratelimited("rcraid_ctl: rejected ioctl 0x%x from unprivileged process %s (pid %d)\n",
+                            cmd, current->comm, current->pid);
+        return -EPERM;
+    }
 
     switch (cmd) {
     case AMD_IOCTL_GET_STATUS:
