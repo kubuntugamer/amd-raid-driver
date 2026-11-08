@@ -30,3 +30,7 @@ Module.symvers
 
 # Userspace async-engine harness build dir (make test-async)
 .async-test/
+
+# Python bytecode from scripts/qemu-test (mkmeta.py)
+__pycache__/
+*.pyc
