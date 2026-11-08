@@ -59,7 +59,8 @@ Not yet: **persistent degraded state** (in-memory only — a reload
 re-assembles as if in sync; needs config-ring writer RE), **RAID10 hardware
 validation** (the level is feature-complete; the array-box run in
 [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) is what's missing), RAID5/6
-dispatch wiring, hot-plug/rebuild, SMART pass-through,
+**write** dispatch (parity volumes assemble and read today, read-only),
+hot-plug/rebuild, SMART pass-through,
 multi-volume, Secure Boot signing out of the box, array creation from Linux.
 The prioritized roadmap is in [`IMPLEMENTATION.MD`](IMPLEMENTATION.MD); the
 RE ground truth is in [`REVERSE_ENGINEERING.md`](REVERSE_ENGINEERING.md).
@@ -677,16 +678,30 @@ single hung command or transient fault without intervention.
 
 ### Limits (still open)
 
-- **RAID 5/6 distributed-parity mapping is not one-to-one** (issue #2). The
-  mapping divided the stripe number by the data-drive count, so distinct
-  logical sectors could land on the same (member, LBA) and overwrite each
-  other. Fixed in `rc_amd_map_distributed_raid5/6` (`src/patch_parity_math.c`,
-  mirrored in `src/test_parity_userspace.c`); the bijection test in
-  `test_parity` passes. Fix not yet released.
-- **RAID 5/6 metadata is rejected by `rc_ld_level_from`, and RAID 6 N=4 is
-  misparsed as RAID 10** (issue #3). RAID 6 Q in the vendor blob appears to be
-  EVENODD (prime 17), not the GF(2⁸) Reed-Solomon Q in `patch_parity_math.c`.
-  Not yet confirmed against a test vector.
+- **RAID 5/6 distributed-parity mapping is not one-to-one** (issue #2) —
+  **fixed 2026-11-08, and it was still wrong after the first fix.** The
+  original mapping divided the stripe number by the data-drive count *and*
+  rotated parity per chunk, and its physical address was the logical LBA
+  unchanged. The bijection test passed anyway because the identity address made
+  every (member, LBA) pair trivially unique, while the layout actually needed
+  room for the whole logical space on every member — reads would have run past
+  the member's user-data region. Rotating parity per chunk also cannot work
+  once chunks are packed per row: for N=3, stripes 2 and 3 resolve to the same
+  member *and* the same row, so the second overwrites the first. The map now
+  rotates parity per **row** and packs densely (`row * chunk + offset`),
+  which matches the `(N-1)` / `(N-2)` × per-member capacity the LD record
+  reports. `test_parity` grew a packing check
+  (one chunk per member per row, rows contiguous, no holes) that fails on both
+  earlier versions.
+- **RAID 5/6 metadata was rejected by `rc_ld_level_from`, and RAID 6 N=4 was
+  misparsed as RAID 10** (issue #3) — **fixed 2026-11-08.** A parity level is
+  now identified from its explicit `DeviceType` only (`0x1BFA` RAID5, `0x1BF5`
+  RAID6), because `FirstCount × SecondCount = Devices` cannot express a parity
+  layout; a count-encoded `0x1BF6` record stays RAID0/RAID10 and an explicit
+  RAID 6 record can no longer fall through to the RAID10 arm. Still open: RAID 6
+  Q in the vendor blob appears to be EVENODD (prime 17), not the GF(2⁸)
+  Reed-Solomon Q in `patch_parity_math.c` — not confirmed against a test
+  vector.
 - **QEMU RAID test depends on PATH order for static busybox** (issue #5).
 - **rcraid ioctl control node has no `capable()`/`ns_capable()` check**
   (issue #4).

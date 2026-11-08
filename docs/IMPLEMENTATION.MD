@@ -181,9 +181,17 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
       `1022:B000`** — [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) is the
       gate before the README/STATUS rows may say "stable".
 
-- [ ] **RAID5 / RAID6** — GF(2^8) parity math and the left-asymmetric layout
-      mapping are done (`src/patch_parity_math.c`); the dispatch/rebuild
-      paths, the metadata writer, and hardware validation are still open.
+- [ ] **RAID5 / RAID6** — **read-only, 2026-11-08.** GF(2^8) parity math and
+      the row-rotating layout map are done (`src/patch_parity_math.c`, the one
+      place to change once a vendor array confirms the placement); the level is
+      identified from the LD `DeviceType` (`0x1BFA` / `0x1BF5`), a parity volume
+      assembles at `(N-1)` / `(N-2)` × per-member user size, and reads go
+      through the shared map with the queue capped at one stripe per request.
+      Writes and discards are refused and the volume is forced read-only.
+      Still open: the parity **write** path (P/Q generation plus
+      read-modify-write of a partial stripe), rebuild, the metadata writer,
+      hardware validation, and confirming the on-disk placement itself
+      (issues #6 and #3).
 
 - [ ] **Multi-volume support** — BIOS can create multiple arrays
       on the same members. We hardcode one `/dev/rcraid0`. Refactor

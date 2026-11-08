@@ -274,6 +274,9 @@ static void rc_volume_member_set_state(int idx, enum rc_member_state st)
  *   RAID10: every column still has at least one live copy — one failure per
  *           pair is tolerated, losing a whole pair is fatal.
  *   RAID0 : every member is live (each stripe crosses all of them).
+ *   RAID5/6: every member is live — the read mapping has no
+ *           reconstruction step yet, so a dead member makes some
+ *           stripes unreadable rather than degraded.
  * Reads and writes both require this; a RAID10 column with no live member
  * would leave that half of the logical space unmapped. */
 static bool rc_volume_can_serve(void)
@@ -2144,14 +2147,30 @@ static int rc_volume_bdf_cmp(struct rc_adapter *a, struct rc_adapter *b)
 #define RC_LD_SCAN_CHUNK_SECTORS	16u
 #define RC_LD_SCAN_OVERLAP_SECTORS	2u
 
+/* Human-readable normalized level (RC_LDT_*) for log lines. */
+static const char *rc_level_name(u32 level)
+{
+	switch (level) {
+	case RC_LDT_RAID0:	return "RAID0";
+	case RC_LDT_RAID1:	return "RAID1";
+	case RC_LDT_RAID5:	return "RAID5";
+	case RC_LDT_RAID6:	return "RAID6";
+	case RC_LDT_RAID10:	return "RAID10";
+	default:		return "UNSUPPORTED";
+	}
+}
+
 /* Derive the effective RAID level from the on-disk DeviceType +
  * FirstCount (stripe width) x SecondCount (mirror count).  Real firmware
  * writes DeviceType 0x1BF6 for BOTH RAID0 and RAID1 and encodes the layout
  * in the counts (verified on TRX50 hardware dumps, 2026-07-10 — see the
  * RC_LDT_* note in rc_linux.h).  Returns a normalized RC_LDT_RAID0 /
- * RC_LDT_RAID1 / RC_LDT_RAID10, or 0 for any layout this driver has no
- * dispatch path for (RAID5/6, >2-way mirrors, count/device mismatches) —
- * the caller must refuse to assemble those rather than guess. */
+ * RC_LDT_RAID1 / RC_LDT_RAID10 (and, from an explicit parity DeviceType,
+ * RC_LDT_RAID5 / RC_LDT_RAID6), or 0 for any layout this driver has no
+ * mapping for (>2-way mirrors, count/device mismatches) — the caller must
+ * refuse to assemble those rather than guess.  Parity levels are
+ * read-only: assembly and the single-member read path know them, the
+ * write path does not. */
 static u32 rc_ld_level_from(u32 devtype, u32 first, u32 second, u32 devices)
 {
 	/* 1. Dedicated Baseline Mirror Gating */
@@ -2169,12 +2188,26 @@ static u32 rc_ld_level_from(u32 devtype, u32 first, u32 second, u32 devices)
 			return RC_LDT_RAID10;	/* Nested RAID 10 */
 	}
 
-	/* 3. RAID5 / RAID6: recognized on-disk levels but NO dispatch path
-	 *    yet.  Deliberately fall through to the safety reject below.
+	/* 3. Parity levels (RAID5 / RAID6).  Identified ONLY by the explicit
+	 *    DeviceType: a parity layout cannot be expressed in
+	 *    FirstCount x SecondCount ((N-1) x 1 and (N-2) x 2 never equal
+	 *    N), so a count-encoded 0x1BF6 record is never a parity array and
+	 *    an unlabelled four-member (2,2) record stays RAID10 — the
+	 *    encoding confirmed on hardware.  These arms deliberately ignore
+	 *    the counts, so an explicit RAID6 DeviceType can never fall
+	 *    through to the RAID10 classification above (issue #3).  If
+	 *    0x1BF5 turns out to be a NESTED parity level (RAID50/60), this
+	 *    arm is the one to change: nested parity is neither this map nor
+	 *    a plain RAID6 map.
+	 *
 	 *    (An earlier iteration carried 0x1BF7/0x1BF8 branches here; both
 	 *    were miswired — 0x1BF7 IS RAID1 and 0x1BF8 has no define — and
 	 *    returning either would have assembled a parity array with RAID0
 	 *    stripe math, corrupting every stripe.) */
+	if (devtype == RC_LDT_RAID5)
+		return devices >= 3 ? RC_LDT_RAID5 : 0;
+	if (devtype == RC_LDT_RAID6)
+		return devices >= 4 ? RC_LDT_RAID6 : 0;
 
 	return 0; /* Safety reject on unmapped structural variations */
 }
@@ -2399,10 +2432,7 @@ static void rc_volume_parse_logical_device(struct rc_adapter *adapter)
 				  pci_name(adapter->pdev),
 				  (pos + i) / 512, (pos + i) % 512,
 				  devtype, first_count, second_count,
-				  level == RC_LDT_RAID1 ? "RAID1" :
-				  level == RC_LDT_RAID10 ? "RAID10" :
-				  level == RC_LDT_RAID0 ? "RAID0" :
-							  "UNSUPPORTED",
+				  rc_level_name(level),
 				  devices, chunk, chunk_index,
 				  (unsigned long long)capacity, my_pos,
 				  (unsigned long long)alloc_off,
@@ -2477,6 +2507,10 @@ static u64 rc_volume_phys_for_member(int m, u64 logical_lba)
  * writes and discards must touch every mirror and go through
  * rc_volume_dispatch_mirror instead.  The pick is
  * round-robin, which halves each mirror's read load.
+ *
+ * RAID5/6: distributed parity — the stripe picks one data member (the
+ * parity position rotates), delegated to the parity maps in
+ * patch_parity_math.c.  Read-only today (see register_member).
  *
  * RAID10: stripe over rc_volume_raid10_cols columns, each column a 2-way
  * mirror pair.  The stripe picks the column and the physical stripe is
@@ -2561,6 +2595,42 @@ static void rc_volume_map_lba(u64 logical_lba, int *out_member, u64 *out_phys)
 			chosen = c0;
 		*out_member = chosen;
 		*out_phys   = rc_volume_phys_for_member(chosen, logical_lba);
+		return;
+	}
+
+	/* RAID5/RAID6: distributed-parity stripe map.  The layout lives in
+	 * patch_parity_math.c (rc_amd_map_distributed_raid5/6) so the driver
+	 * and the userspace bijection harness share ONE implementation, and
+	 * that file is the single place to change once the real vendor
+	 * placement is confirmed (issue #6).  These levels never see a
+	 * request that spans a stripe boundary: create_disk caps the queue
+	 * at the stripe size for them, so one data member holds every sector
+	 * of the request.  The volume is read-only (see register_member), so
+	 * the parity member returned here is only ever informational. */
+	if (rc_volume_raid_level == RC_LDT_RAID5 ||
+	    rc_volume_raid_level == RC_LDT_RAID6) {
+		int tgt = -1, p = -1, q = -1;
+		u64 phys;
+
+		if (unlikely(!stripe || nmembers < 3)) {
+			*out_member = 0;
+			*out_phys   = logical_lba;
+			return;
+		}
+		if (rc_volume_raid_level == RC_LDT_RAID5)
+			phys = rc_amd_map_distributed_raid5(logical_lba, stripe,
+							    &tgt, &p, nmembers);
+		else
+			phys = rc_amd_map_distributed_raid6(logical_lba, stripe,
+							    &tgt, &p, &q,
+							    nmembers);
+		if (unlikely(tgt < 0 || tgt >= nmembers)) {
+			*out_member = 0;
+			*out_phys   = logical_lba;
+			return;
+		}
+		*out_member = tgt;
+		*out_phys   = phys + rc_volume_member_phys_offset[tgt];
 		return;
 	}
 
@@ -2730,10 +2800,13 @@ static u32 rc_volume_chunk_sectors_for(u32 devtype, u32 ld_chunk,
 	switch (devtype) {
 	case RC_LDT_RAID0:
 	case RC_LDT_RAID10:
-		/* Both stripe the logical space, so the on-disk chunk encoding
-		 * is a data-layout parameter for both.  RAID10 reuses RAID0's
-		 * chunk_index -> stripe table; rc_amd_map_nested_raid10() only
-		 * takes the resolved stripe size, so the two must agree. */
+	case RC_LDT_RAID5:
+	case RC_LDT_RAID6:
+		/* All of these stripe the logical space, so the on-disk chunk
+		 * encoding is a data-layout parameter for each.  RAID10 reuses
+		 * RAID0's chunk_index -> stripe table and the parity levels reuse
+		 * the same ladder (the parity blob's chunk sizes are the RAID0
+		 * ones), so they must all agree on the resolved size. */
 		switch (ld_chunk_index) {
 		case 3:  return 512u;
 		case 2:  return 256u;
@@ -2767,15 +2840,18 @@ static void rc_volume_register_member(struct rc_adapter *adapter)
 	}
 
 	if (have_ld) {
-		/* Refuse layouts with no dispatch path (>2-way mirrors, RAID5/6,
+		/* Refuse layouts with no mapping path (>2-way mirrors,
 		 * FirstCount x SecondCount != Devices, and any level the
-		 * classifier did not normalize to 0/1/10).  Guessing a mapping
-		 * for them turns every read into garbage and every write into
-		 * corruption, so the member is not registered at all and the
-		 * volume never assembles. */
+		 * classifier did not normalize).  RAID5/6 IS accepted here —
+		 * it has a read mapping — but is forced read-only below.
+		 * Guessing a mapping for anything else turns every read into
+		 * garbage and every write into corruption, so the member is
+		 * not registered at all and the volume never assembles. */
 		if (nvme->ld_level != RC_LDT_RAID0 &&
 		    nvme->ld_level != RC_LDT_RAID1 &&
-		    nvme->ld_level != RC_LDT_RAID10) {
+		    nvme->ld_level != RC_LDT_RAID10 &&
+		    nvme->ld_level != RC_LDT_RAID5 &&
+		    nvme->ld_level != RC_LDT_RAID6) {
 			rc_printk(RC_WARN,
 				  "rc_volume_register_member: %s unsupported RAID layout (DeviceType=0x%x FirstCount=%u SecondCount=%u Devices=%u) — ignoring member\n",
 				  pci_name(adapter->pdev), nvme->ld_device_type,
@@ -2784,22 +2860,35 @@ static void rc_volume_register_member(struct rc_adapter *adapter)
 			goto out;
 		}
 		/* Cross-check: total capacity must equal the per-member
-		 * user-data size times the stripe width (mirrors don't add
-		 * capacity).  A mismatch means we misread the geometry
-		 * somewhere — keep the volume readable but veto writes.
-		 * Runs here rather than in the parser so the write to the
-		 * lock-protected untrust reason happens under rc_volume_lock
-		 * like every other writer. */
-		if (nvme->ld_capacity_sectors !=
-		    nvme->ld_userdata_size * nvme->ld_first_count) {
-			rc_printk(RC_WARN,
-				  "rc_volume_register_member: %s capacity %llu != user_sz %llu x first_count %u — geometry UNTRUSTED, writes will be vetoed\n",
-				  pci_name(adapter->pdev),
-				  (unsigned long long)nvme->ld_capacity_sectors,
-				  (unsigned long long)nvme->ld_userdata_size,
-				  nvme->ld_first_count);
-			rc_volume_geometry_untrust_reason =
-				"the LD record's total capacity doesn't equal per-member user size x stripe width — the on-disk geometry doesn't add up, so some field is being misread";
+		 * user-data size times the DATA column count (mirrors don't add
+		 * capacity; a parity level loses one — RAID5 — or two — RAID6 —
+		 * members' worth to parity).  For RAID0/RAID10 the on-disk
+		 * FirstCount is that count; for parity it is derived from the
+		 * member count, because FirstCount's meaning in a parity record
+		 * is not confirmed (issue #3).  A mismatch means we misread the
+		 * geometry somewhere — keep the volume readable but veto
+		 * writes.  Runs here rather than in the parser so the write to
+		 * the lock-protected untrust reason happens under
+		 * rc_volume_lock like every other writer. */
+		{
+			u32 data_cols =
+				nvme->ld_level == RC_LDT_RAID5 ?
+					nvme->ld_devices - 1u :
+				nvme->ld_level == RC_LDT_RAID6 ?
+					nvme->ld_devices - 2u :
+					nvme->ld_first_count;
+
+			if (nvme->ld_capacity_sectors !=
+			    nvme->ld_userdata_size * data_cols) {
+				rc_printk(RC_WARN,
+					  "rc_volume_register_member: %s capacity %llu != user_sz %llu x %s data columns %u — geometry UNTRUSTED, writes will be vetoed\n",
+					  pci_name(adapter->pdev),
+					  (unsigned long long)nvme->ld_capacity_sectors,
+					  (unsigned long long)nvme->ld_userdata_size,
+					  rc_level_name(nvme->ld_level), data_cols);
+				rc_volume_geometry_untrust_reason =
+					"the LD record's total capacity doesn't equal per-member user size x data columns — the on-disk geometry doesn't add up, so some field is being misread";
+			}
 		}
 		expected = nvme->ld_devices;
 		chunk_sectors = rc_volume_chunk_sectors_for(nvme->ld_level,
@@ -2846,6 +2935,23 @@ static void rc_volume_register_member(struct rc_adapter *adapter)
 				  RC_VOLUME_DATA_BYTES / 512u);
 			rc_volume_geometry_untrust_reason =
 				"the on-disk ChunkSize is not a plausible stripe size (power of two, 8 KiB..1 MiB) — the field is probably being misread, so the write path cannot trust the stripe math";
+		}
+		/* RAID5/6 is wired for ASSEMBLY and READS only.  The write
+		 * path would have to generate P (and Q) and read-modify-write
+		 * the affected stripe, and the on-disk parity placement is
+		 * still unconfirmed (issue #6), so a write could encode parity
+		 * in a layout no vendor controller reads back.  Force read-only
+		 * through the same veto every other untrusted-geometry path
+		 * uses — the volume still comes up and its data can be
+		 * inspected, which is the point of a read-only assembly. */
+		if (nvme->ld_level == RC_LDT_RAID5 ||
+		    nvme->ld_level == RC_LDT_RAID6) {
+			rc_printk(RC_WARN,
+				  "rc_volume_register_member: %s %s recognised — assembly and READS only (no parity write path, parity placement unconfirmed; issue #6) — volume will be READ-ONLY\n",
+				  pci_name(adapter->pdev),
+				  rc_level_name(nvme->ld_level));
+			rc_volume_geometry_untrust_reason =
+				"RAID 5/6 is assembled READ-ONLY: the parity write path is not implemented and the on-disk parity placement is unconfirmed (issue #6)";
 		}
 	} else {
 		expected = RC_VOLUME_EXPECTED_MEMBERS;
@@ -4416,6 +4522,9 @@ static blk_status_t rc_volume_queue_rq(struct blk_mq_hw_ctx *hctx,
 				"no live mirror member remains" :
 			rc_volume_raid_level == RC_LDT_RAID10 ?
 				"a mirror pair lost both copies" :
+			(rc_volume_raid_level == RC_LDT_RAID5 ||
+			 rc_volume_raid_level == RC_LDT_RAID6) ?
+				"a RAID5/6 member is dead and reconstruction is not implemented yet" :
 				"a member controller is dead and RAID0 has no degraded mode");
 		blk_mq_start_request(req);
 		if (rc_volume_claim_completion(pdu)) {
@@ -4515,6 +4624,25 @@ static blk_status_t rc_volume_queue_rq(struct blk_mq_hw_ctx *hctx,
 		if (rc_volume_claim_completion(pdu)) {
 			blk_mq_end_request(req, BLK_STS_IOERR);
 		}
+		return BLK_STS_OK;
+	}
+
+	/* RAID5/6: READS only.  The volume is forced read-only at
+	 * create_disk (untrusted geometry), so this is the safety net for a
+	 * submitter that ignores the RO flag (a resync/format tool, a raw
+	 * write).  Refuse it here instead of letting the single-member path
+	 * below write one data chunk and leave its stripe's parity stale —
+	 * that would report success and corrupt the array on the next
+	 * degraded read. */
+	if ((rc_volume_raid_level == RC_LDT_RAID5 ||
+	     rc_volume_raid_level == RC_LDT_RAID6) && op != REQ_OP_READ) {
+		printk_ratelimited(KERN_ERR
+			"rcraid: %s: op=%u rejected — %s volume is READ-ONLY (parity write path not implemented; issue #6)\n",
+			rc_volume_disk ? rc_volume_disk->disk_name : "?",
+			op, rc_level_name(rc_volume_raid_level));
+		blk_mq_start_request(req);
+		if (rc_volume_claim_completion(pdu))
+			blk_mq_end_request(req, BLK_STS_IOERR);
 		return BLK_STS_OK;
 	}
 
@@ -5331,6 +5459,18 @@ static int rc_volume_create_disk(void)
 			.max_discard_segments    = 1,
 		};
 
+		/* RAID5/6: one stripe per request.  The parity member moves
+		 * from stripe to stripe, so a request that straddled a boundary
+		 * would need several commands from ONE logical range — cap the
+		 * queue at the stripe size and the single-member read path below
+		 * is exact.  (chunk_sectors also bounds discards, which are
+		 * rejected for these levels anyway.) */
+		if (rc_volume_raid_level == RC_LDT_RAID5 ||
+		    rc_volume_raid_level == RC_LDT_RAID6) {
+			lim.max_hw_sectors = rc_volume_stripe_sectors;
+			lim.chunk_sectors  = rc_volume_stripe_sectors;
+		}
+
 		rc_volume_disk = blk_mq_alloc_disk(&rc_volume_tagset, &lim, NULL);
 	}
 	if (IS_ERR(rc_volume_disk)) {
@@ -6110,6 +6250,8 @@ int rc_volume_debugfs_show(struct seq_file *m, void *unused)
 	seq_printf(m, "level: %s\n",
 		   rc_volume_raid_level == RC_LDT_RAID1 ? "raid1" :
 		   rc_volume_raid_level == RC_LDT_RAID10 ? "raid10" :
+		   rc_volume_raid_level == RC_LDT_RAID5 ? "raid5" :
+		   rc_volume_raid_level == RC_LDT_RAID6 ? "raid6" :
 		   rc_volume_raid_level == RC_LDT_RAID0 ? "raid0" : "unknown");
 	seq_printf(m, "members: %d\n", rc_volume_member_count);
 	seq_printf(m, "live_mask: 0x%x\n", live);

@@ -314,7 +314,7 @@ explicitly; every other value (including `1` and `0`→`1`) falls to 64 KiB.
 
 | DeviceType | RAID level | Linux `#define` |
 |---|---|---|
-| `0x1BF5` | (RAID-related; not in Linux enum) | — |
+| `0x1BF5` | RAID6 (per the writer's dispatch table — inferred) | `RC_LDT_RAID6` |
 | `0x1BF6` | RAID0 | `RC_LDT_RAID0` ✅ |
 | `0x1BF7` | RAID1 | `RC_LDT_RAID1` (never yet seen on disk) |
 | `0x1BF9` | (per-member "raw disk" variant) | `RC_LDT_SINGLE` |
@@ -333,8 +333,11 @@ the `0x1BF9` raw-disk LDs at 1×1), and `0x1BF6` is best read as "generic
 striped/mirrored volume". Whatever the `0x1BF7` dispatch arm in
 `FUN_14001c674` consumes, it is not what this firmware writes to disk —
 the Windows in-memory DeviceType is presumably recomputed from the counts.
-The Linux driver derives the level from the counts (`rc_ld_level_from`)
-and refuses combinations it has no dispatch path for. This encoding was
+The Linux driver derives the RAID0/RAID10/RAID1 level from the counts
+(`rc_ld_level_from`) and refuses combinations it has no mapping for. Parity
+levels are the one exception — the counts cannot express them at all, so
+`0x1BFA` / `0x1BF5` select RAID5 / RAID6 directly and a count-encoded
+`0x1BF6` record is never read as a parity array (issue #3). This encoding was
 independently corroborated on X399 SATA RAID10 (`FirstCount=2,
 SecondCount=2, devices=4`) — see
 [External corroboration](#external-corroboration-x399-zenith-extreme-sata-raid10)
@@ -609,8 +612,24 @@ Still needing Ghidra investigation. Run via `scripts/ghidra/HuntBlockers.java`
    gives RAID 5/6 the `default` case, `RC_VolumeLogicalToPhysical`, which walks
    `RAID0List` by sector offset and never reads a parity layout. So parity
    placement seems to come from the element table built at array creation,
-   which is not yet traced. This conflicts with the left-asymmetric rotation in
-   `patch_parity_math.c` and needs confirming before anyone relies on it.
+   which is not yet traced. This conflicts with the row-rotating layout in
+   `patch_parity_math.c` and needs confirming before anyone relies on it —
+   which is why the driver assembles parity volumes **read-only**.
+
+   Our own layout (unconfirmed, not vendor-derived): a *row* is one chunk on
+   every member; the logical stripe number selects the data chunk within its
+   row; parity (one member for RAID 5, two for RAID 6) rotates one member per
+   row; the chunk sits at `row * chunk + offset` on its member, so each member
+   covers the whole row space and capacity is `(N-1)`/`(N-2)` × per-member
+   user size. Rotating parity per *chunk* instead is not a bijection, and
+   addressing chunks at their logical stripe number needs the full logical
+   space on every member — both were shipped bugs, caught by the userspace
+   harness's bijection + packing checks.
+
+   A parity level is selected by `DeviceType` alone: `FirstCount ×
+   SecondCount = Devices` holds on every real record and cannot express
+   `(N-1) × 1` or `(N-2) × 2`, so the counts never identify a parity array
+   (issue #3).
 8. **RAID 6 Q algorithm.** The decompiled Q routine indicates EVENODD (prime 17).
    The repo's Q is GF(2⁸) Reed-Solomon. Not yet checked against an EVENODD test
    vector (issue #3).

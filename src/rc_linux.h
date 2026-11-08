@@ -717,7 +717,17 @@ struct rc_raidcore_md {
  * derives the effective level from the counts (rc_ld_level_from()) and only
  * uses these RC_LDT_* values as its own normalized level identifiers.
  * 0x1BF7 is retained as an explicit RAID1 encoding (accepted if some
- * firmware writes it; also what our synthetic rig wrote historically). */
+ * firmware writes it; also what our synthetic rig wrote historically).
+ *
+ * RAID5/6 are the exception: a parity layout cannot be written in
+ * FirstCount x SecondCount at all ((N-1) x 1 and (N-2) x 2 never equal N),
+ * so the counts never identify a parity array and a 0x1BF6 record is never
+ * read as RAID5/6.  Only an explicit parity DeviceType selects one, which
+ * is also what keeps a four-member (2,2) record on RAID10 — the encoding
+ * confirmed on hardware — unless the DeviceType itself says RAID6
+ * (issue #3).  Both parity DeviceType values are INFERRED from the vendor
+ * dispatch table, and the on-disk parity placement is unverified
+ * (issue #6): the driver assembles these volumes READ-ONLY. */
 #define RC_LDT_RAID0			0x1BF6u
 #define RC_LDT_RAID1			0x1BF7u
 #define RC_LDT_SINGLE			0x1BF9u	/* per-disk raw/JBOD LD published
@@ -729,7 +739,11 @@ struct rc_raidcore_md {
 						 * check and assemble a bogus
 						 * 1-member volume (the parser
 						 * skips all devices<2 records) */
-#define RC_LDT_RAID5			0x1BFAu
+#define RC_LDT_RAID5			0x1BFAu	/* inferred from the writer's
+						 * dispatch table — never seen
+						 * in a firmware dump */
+#define RC_LDT_RAID6			0x1BF5u	/* likewise inferred; see the
+						 * RAID5/6 note above */
 #define RC_LDT_RAID10			0x1BFBu
 
 /* Config-commit block — one sector at RC_MetaData.config_commit_lba

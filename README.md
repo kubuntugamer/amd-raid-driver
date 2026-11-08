@@ -16,6 +16,9 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 > rebuild, and boot-time degraded assembly are all implemented — **but it has not had
 > its own array-box run yet**, so treat it as unproven for production data until
 > [`docs/VALIDATION_RAID10.md`](docs/VALIDATION_RAID10.md) is signed off.
+> **RAID 5/6** assemble **read-only**: the driver identifies them and reads
+> them, but the parity write path is not implemented and the on-disk parity
+> placement is unconfirmed, so they are not deployable yet.
 > The mirror completion and array rebuild paths run on a
 > **modern non-blocking asynchronous thread runner** (`kamd_async_worker` parks
 > parent-bio endio off the hardware completion context; `kamd_resync` owns
@@ -43,7 +46,7 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 *   **RAID 10 geometry fix (2026-10-02):** the `rc_amd_map_nested_raid10` translation plane now correctly splits addresses across flash geometries with no single-stripe bottlenecks. Per-column physical LBA calculation uses `div_u64` for 64-bit safety; column assignment via modulo arithmetic is branch-predictor friendly. Legacy block boundaries restricting enterprise flash throughput have been removed.
 *   **Real-firmware corroboration (2026-10-07):** the metadata format and the RAID 10 geometry model were validated against four raw member dumps from a firmware-created X399 array (George "PlaidPiper" Crossley, [`PlaidPiper/x399-raidcore-fixtures`](https://github.com/PlaidPiper/x399-raidcore-fixtures), reported in [joeytroy#57](https://github.com/joeytroy/amd-raid-driver/issues/57) and cross-linked from [issue #1](https://github.com/kubuntugamer/amd-raid-driver/issues/1)). All four dumps parse clean through this driver's validation chain, and a byte-level cross-dump of the members confirms the mirror-pair convention is **adjacent** (pairs `{0,1}` / `{2,3}`) — the last unverified RAID 10 assumption. Details in [`docs/REVERSE_ENGINEERING.md`](docs/REVERSE_ENGINEERING.md).
 *   **Fault isolation hardened:** all transient device fault-isolation loops now cleanly catch and handle `BLK_STS_RESOURCE` boundaries, guaranteeing total array resilience against unexpected hardware dropouts. The async completion engine returns `BLK_STS_RESOURCE` on allocation failure or unload race, never `BLK_STS_IOERR`, so the block layer retries instead of reporting false I/O errors to the filesystem.
-*   **RAID 5/6 parity engine implemented (2026-10-02):** cleanroom GF(2⁸) arithmetic with polynomial x⁸+x⁴+x³+x²+1 (0x11D), generator α=0x02. RAID 5 P parity (XOR) and RAID 6 P+Q dual parity (Reed-Solomon Σ(dᵢ×αⁱ)) implemented in `src/patch_parity_math.c`. Distributed left-asymmetric layout mapping for N=3..8 (RAID 5) and N=4..8 (RAID 6) matches vendor on-disk FirstCount/SecondCount encoding. **Awaiting hardware validation** — dispatch paths, rebuild logic, and metadata writer not yet wired.
+*   **RAID 5/6: recognised and READABLE, not writable (2026-11-08).** The level is taken from the LD `DeviceType` alone (`0x1BFA` RAID5, `0x1BF5` RAID6) — `FirstCount × SecondCount` cannot express a parity layout, so a count-encoded `0x1BF6` record is never mistaken for one, and a RAID 6 record can no longer be assembled as RAID 10. A parity volume now assembles, reports the right capacity (`(N-1)` / `(N-2)` × per-member user size) and serves reads through the shared row-rotating map in `src/patch_parity_math.c`; writes and discards are refused and the volume is forced read-only. The layout is **not** yet confirmed against a vendor array (issue #6), the RAID 6 Q algorithm may be EVENODD rather than the GF(2⁸) Reed-Solomon Q, and the parity write path, rebuild, and metadata writer are still open.
 *   **Enterprise roadmap (this driver, not experimental):**
     *   **OCE (Online Capacity Expansion)** — add drives to RAID 5/6 arrays online, restripe parity, grow filesystems without downtime.
     *   **ORLM (Online RAID Level Migration)** — migrate RAID 0↔5↔6↔10 online, zero host CPU, instant metadata commit.
@@ -57,7 +60,7 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 | Phase | Feature | Status | Enables |
 |-------|---------|--------|---------|
 | **0** | RAID 0/1/10 I/O + rebuild | ✅ Done — 10 awaiting hardware validation | Production baseline |
-| **1** | RAID 5/6 I/O + rebuild | 🟡 Math done, wiring pending | Basic parity arrays |
+| **1** | RAID 5/6 I/O + rebuild | 🟡 Assembly + reads wired, writes refused | Inspect and read existing parity arrays |
 | **2** | Metadata writer + TUI create | ⏳ Planned | Create RAID 5/6 arrays |
 | **3** | **OCE (Online Capacity Expansion)** | 🗺️ **Roadmap — this driver** | Add drives online, restripe, grow FS |
 | **4** | **ORLM (Online RAID Level Migration)** | 🗺️ **Roadmap — this driver** | RAID 0↔5↔6↔10 online, zero CPU |
@@ -74,22 +77,22 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 
 The baseline release is deliberately narrow. RAID 0 and RAID 1 are the
 production-supported, hardware-validated rows; RAID 10 is feature-complete and
-next in line for its array-box run; RAID 5/6 have parity math and layout mapping
-but no dispatch path yet.
+next in line for its array-box run; RAID 5/6 assemble and read, but refuse every
+write until the parity write path and the layout itself are confirmed.
 
 | Format | State | Notes |
 | --- | --- | --- |
 | **RAID 0 (Stripe)** | ✅ **Baseline — stable** | Full horizontal data chunk striping. |
 | **RAID 1 (Mirror)** | ✅ **Baseline — stable** | Duplicated writes across pairs; round-robin load-balanced reads; degraded failover + non-blocking resync. |
 | **RAID 10 (Nested)** | 🟡 **Feature-complete — validation pending** | Striped row segments over 2-way mirrored pairs (≥ 4 drives). Writes/discards mirror to both copies, reads round-robin, per-pair degraded failover. Pair-aware member rebuild/resync and boot-time degraded assembly landed; a lost pair refuses assembly. Mirror-pair convention (adjacent `{2c, 2c+1}`) confirmed against real X399 firmware dumps (2026-10-07), but the NVMe `1022:B000` data path has **not** had its own array-box run — the [runbook's](docs/VALIDATION_RAID10.md) results table is still empty. |
-| RAID 5 (Parity) | 🟡 **Math done — wiring pending** | Left-asymmetric rotating single-parity. Parity math + layout mapping complete. Dispatch/rebuild/metadata writer pending. |
-| RAID 6 (Dual Parity) | 🟡 **Math done — wiring pending** | P + Galois-field Q dual parity. Parity math + layout mapping complete. Dispatch/rebuild/metadata writer pending. |
+| RAID 5 (Parity) | 🟡 **Read-only — assembly + reads wired** | Single-parity, row-rotating map shared with the userspace harness (`rc_amd_map_distributed_raid5`, dense per-member packing, one chunk per member per row). Level comes from the LD `DeviceType` only (`0x1BFA`). Volume assembles at `(N-1)` × per-member capacity and serves reads; writes/discards are refused and the queue is capped at one stripe per request, because the parity-chunk address is the *same* row slot as the data chunk it protects. **Not** hardware-confirmed, and no parity write path, rebuild, or metadata writer yet (issue #6). |
+| RAID 6 (Dual Parity) | 🟡 **Read-only — assembly + reads wired** | P + GF(2⁸) Q dual parity, two row-rotating parity slots per row (`0x1BF5`). Same read-only contract as RAID 5, capacity `(N-2)` × per-member. The vendor blob's Q may be EVENODD (prime 17) rather than Reed-Solomon — unconfirmed against a test vector (issue #3) — so treat reconstructed data as unverified. |
 
 ---
 
 ## 🚀 Key Production Features
 
-*   **Interactive Phase 1 Terminal GUI (TUI):** No pre-configured arrays are required on boot. On clean, blank testing drives, the live-installer automatically spins up a keyboard-driven blue menu canvas (`dialog`). Testers can check off raw NVMe paths using the Spacebar, choose a target level — **0, 1, 10, 5, or 6** (**RAID 5/6 have parity math only — their dispatch isn't wired**, so those levels can't be mounted; RAID 10 needs at least four disks and is awaiting hardware validation) — and commit layouts on the fly.
+*   **Interactive Phase 1 Terminal GUI (TUI):** No pre-configured arrays are required on boot. On clean, blank testing drives, the live-installer automatically spins up a keyboard-driven blue menu canvas (`dialog`). Testers can check off raw NVMe paths using the Spacebar, choose a target level — **0, 1, 10, 5, or 6** (**RAID 5/6 come up read-only — their parity write path isn't wired**, so those levels can only be read; RAID 10 needs at least four disks and is awaiting hardware validation) — and commit layouts on the fly.
 *   **Defensive Hardware Security Guards:** The TUI contains an automated validation length check that enforces a hard **maximum 8-disk constraint** matching AMD firmware specifications, safely preventing memory overrun kernel oops before touching the PCIe bus registers.
 *   **Advanced Rootfs Probing:** Phase 2 avoids fragile, hardcoded partition name assumptions. It uses a read-only sandboxed mount-and-probe matrix to peak inside array partitions, locate the genuine system `/etc/os-release`, and seamlessly execute chroot boot configurations on any distribution setup.
 *   **Non-Blocking Asynchronous Completion Engine:** Parent-bio completion is parked on the `kamd_async_worker` kthread queue, so hardware completion contexts return immediately and never stall the block-layer queue; a separate `kamd_resync` thread owns long-running rebuilds. Over-reports from faulty member paths are absorbed by a bounded tombstone pool instead of being fatal.
@@ -110,7 +113,7 @@ This is the recommended deployment path for setting up a fresh Linux environment
    sudo ./install-livecd.sh
    ```
 3. The script will automatically pull development dependencies in RAM, compile the driver, and launch the interactive **Terminal GUI**.
-4. Use the **Arrow Keys** to navigate, **Spacebar** to check your member disks, and choose a baseline **RAID Level (0, 1, 10, 5, or 6)** — **5/6 have parity math only, no dispatch yet**; RAID 10 needs at least four disks and is awaiting hardware validation.
+4. Use the **Arrow Keys** to navigate, **Spacebar** to check your member disks, and choose a baseline **RAID Level (0, 1, 10, 5, or 6)** — **5/6 assemble read-only, their parity write path isn't wired**; RAID 10 needs at least four disks and is awaiting hardware validation.
 5. Hit **OK**. The driver unbinds the raw paths, writes the layout data, and stands up **`/dev/rcraid0`** instantly.
 6. Minimize the terminal and launch your desktop OS installer wizard. Select **Custom Partitioning**, map your layout over `/dev/rcraid0`, and let it copy files. **DO NOT REBOOT** when the installer finishes. Close the wizard panel and return to your open terminal window.
 

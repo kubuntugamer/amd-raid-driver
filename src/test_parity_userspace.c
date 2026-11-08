@@ -126,10 +126,10 @@ void rc_amd_generate_raid6_parity(uint8_t **data_buffers, uint8_t *p_buffer,
 uint64_t rc_amd_map_distributed_raid5(uint64_t sector_lba, uint32_t chunk_sectors,
                                        int *target_member, int *parity_member, int num_drives)
 {
-    uint64_t stripe_num;
+    uint64_t stripe_num, row;
     uint32_t stripe_off;
     int data_drives = num_drives - 1;
-    int parity_pos, data_idx;
+    int parity_pos, j, m;
 
     if (num_drives < 3 || !chunk_sectors) {
         *target_member = 0;
@@ -140,25 +140,33 @@ uint64_t rc_amd_map_distributed_raid5(uint64_t sector_lba, uint32_t chunk_sector
     stripe_num  = sector_lba / chunk_sectors;
     stripe_off  = (uint32_t)(sector_lba - stripe_num * chunk_sectors);
 
-    parity_pos = (num_drives - 1) - (int)(stripe_num % num_drives);
+    /* Parity rotates per ROW; the stripe number picks the data chunk
+     * within its row. */
+    row = stripe_num / (uint64_t)data_drives;
+    j   = (int)(stripe_num - row * (uint64_t)data_drives);
+
+    parity_pos = (num_drives - 1) - (int)(row % (uint64_t)num_drives);
     *parity_member = parity_pos;
 
-    data_idx = (int)(stripe_num % data_drives);
-    if (data_idx >= parity_pos)
-        data_idx++;
-    *target_member = data_idx;
+    for (m = 0; m < num_drives; m++) {
+        if (m == parity_pos)
+            continue;
+        if (j-- == 0)
+            break;
+    }
+    *target_member = m;
 
-    return (stripe_num * chunk_sectors) + stripe_off;
+    return row * chunk_sectors + stripe_off;
 }
 
 uint64_t rc_amd_map_distributed_raid6(uint64_t sector_lba, uint32_t chunk_sectors,
                                        int *target_member, int *p_member, int *q_member,
                                        int num_drives)
 {
-    uint64_t stripe_num;
+    uint64_t stripe_num, row;
     uint32_t stripe_off;
     int data_drives = num_drives - 2;
-    int q_pos, p_pos, data_idx;
+    int q_pos, p_pos, j, m;
 
     if (num_drives < 4 || !chunk_sectors) {
         *target_member = 0;
@@ -170,19 +178,26 @@ uint64_t rc_amd_map_distributed_raid6(uint64_t sector_lba, uint32_t chunk_sector
     stripe_num  = sector_lba / chunk_sectors;
     stripe_off  = (uint32_t)(sector_lba - stripe_num * chunk_sectors);
 
-    q_pos = (num_drives - 1) - (int)(stripe_num % num_drives);
-    p_pos = (num_drives - 2) - (int)(stripe_num % num_drives);
-    if (p_pos < 0) p_pos += num_drives;
+    row = stripe_num / (uint64_t)data_drives;
+    j   = (int)(stripe_num - row * (uint64_t)data_drives);
+
+    q_pos = (num_drives - 1) - (int)(row % (uint64_t)num_drives);
+    p_pos = q_pos - 1;
+    if (p_pos < 0)
+        p_pos += num_drives;
 
     *q_member = q_pos;
     *p_member = p_pos;
 
-    data_idx = (int)(stripe_num % data_drives);
-    if (data_idx >= p_pos) data_idx++;
-    if (data_idx >= q_pos) data_idx++;
-    *target_member = data_idx;
+    for (m = 0; m < num_drives; m++) {
+        if (m == p_pos || m == q_pos)
+            continue;
+        if (j-- == 0)
+            break;
+    }
+    *target_member = m;
 
-    return (stripe_num * chunk_sectors) + stripe_off;
+    return row * chunk_sectors + stripe_off;
 }
 
 /* =========================================================================
@@ -579,6 +594,53 @@ static int check_bijection(int n, int is_raid6)
     return ok;
 }
 
+/* Dense packing: every row must place exactly one chunk per member, and a
+ * member's chunks must occupy rows 0..rows-1 with no holes and no overlaps.
+ * That is what makes per-member user data equal the volume capacity divided
+ * by the data column count — if a member stored its chunks at their logical
+ * stripe numbers instead, it would need room for the whole logical space
+ * and a read would address past the user-data region. */
+static int check_packing(int n, int is_raid6)
+{
+    const uint32_t chunk_sectors = 8;
+    const int data_cols = is_raid6 ? n - 2 : n - 1;
+    const int rows = n * 100;
+    const uint64_t stripes = (uint64_t)data_cols * rows;
+    uint8_t *seen = calloc((size_t)n * rows, 1);
+    int own[8] = {0};
+    int ok = 1;
+
+    assert(seen);
+    for (uint64_t s = 0; s < stripes && ok; s++) {
+        int t, p, q;
+        uint64_t phys = is_raid6
+            ? rc_amd_map_distributed_raid6(s * chunk_sectors, chunk_sectors,
+                                           &t, &p, &q, n)
+            : rc_amd_map_distributed_raid5(s * chunk_sectors, chunk_sectors,
+                                           &t, &p, n);
+        uint64_t row = phys / chunk_sectors;
+
+        if (phys % chunk_sectors || row >= (uint64_t)rows)
+            ok = 0;
+        else if (seen[(size_t)t * rows + row]++)
+            ok = 0;
+        else
+            own[t]++;
+    }
+
+    /* Each member holds one chunk per row in one of the data roles, so
+     * every member must see exactly data_cols x 100 of the rows. */
+    for (int m = 0; m < n && ok; m++)
+        if (own[m] != data_cols * 100)
+            ok = 0;
+
+    if (!ok)
+        printf("  RAID%d n=%d: packing is not dense/one-per-row\n",
+               is_raid6 ? 6 : 5, n);
+    free(seen);
+    return ok;
+}
+
 static void test_mapping_bijection(void)
 {
     printf("Testing distributed mapping is one-to-one...\n");
@@ -587,6 +649,13 @@ static void test_mapping_bijection(void)
     for (int n = 4; n <= 8; n++)
         assert(check_bijection(n, 1));
     printf("  Mapping bijection: PASS\n");
+
+    printf("Testing distributed mapping packs densely...\n");
+    for (int n = 3; n <= 8; n++)
+        assert(check_packing(n, 0));
+    for (int n = 4; n <= 8; n++)
+        assert(check_packing(n, 1));
+    printf("  Mapping packing: PASS\n");
 }
 
 int main(void)
