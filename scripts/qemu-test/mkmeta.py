@@ -40,20 +40,33 @@ PhysicalDevice/Controller records), so images made with this tool are
 for driver testing only — don't expect RAIDXpert or the Windows driver
 to accept them.
 
+Targets may be regular image files or real block devices (/dev/nvmeXn1);
+the latter lets the same metadata drive a bare-metal driver test.  Writing
+to a block device overwrites LBAs 0x5000..0x6000 (magic, commit block and
+config ring) and nothing else — it does NOT create a firmware array, so
+RAIDXpert/Windows will not accept the result.
+
 Usage:
   mkmeta.py --level raid0 --chunk-index 3 member0.img member1.img
   mkmeta.py --level raid1 member0.img member1.img
+  mkmeta.py --level raid0 --chunk-index 3 /dev/nvme1n1 /dev/nvme2n1
 
 Prints "capacity_sectors=<N>" on success — the expected size of the
 assembled volume, for the guest test to verify against.
 """
 
 import argparse
+import fcntl
 import os
+import stat
 import struct
 import sys
 
 SECTOR = 512
+# _IOR(0x12, 114, size_t) — asks a block device how many bytes it holds.
+# fstat() reports st_size == 0 for block devices, so os.path.getsize()
+# cannot size them.
+BLKGETSIZE64 = 0x80081272
 RAIDCORE_LBA = 0x5000
 CONFIG_COMMIT_LBA = 0x5001
 CONFIG_RING_LBA = 0x5800
@@ -118,6 +131,16 @@ USERDATA_START = 0x6000
 # rc_volume_chunk_sectors_for in rc_nvme.c): only 2 and 3 are explicit,
 # everything else means 128 sectors.
 CHUNK_INDEX_SECTORS = {3: 512, 2: 256, 1: 128, 0: 128}
+
+
+def target_size_bytes(path: str) -> int:
+    """Capacity of an image file or block device, in bytes."""
+    st = os.stat(path)
+    if stat.S_ISBLK(st.st_mode):
+        with open(path, "rb", buffering=0) as f:
+            buf = fcntl.ioctl(f.fileno(), BLKGETSIZE64, b"\0" * 8)
+        return struct.unpack("<Q", buf)[0]
+    return st.st_size
 
 
 def rc_checksum(payload: bytes) -> int:
@@ -263,7 +286,7 @@ def main():
 
     sizes = []
     for img in args.images:
-        sz = os.path.getsize(img)
+        sz = target_size_bytes(img)
         if sz % SECTOR:
             sys.exit(f"mkmeta: {img} size is not sector-aligned")
         sizes.append(sz // SECTOR)
@@ -311,7 +334,8 @@ def main():
                                 len(active_gen), ACTIVE_GEN_TS)
 
     for pos, img in enumerate(args.images):
-        with open(img, "r+b") as f:
+        is_block = stat.S_ISBLK(os.stat(img).st_mode)
+        with open(img, "r+b", buffering=0 if is_block else -1) as f:
             f.seek(RAIDCORE_LBA * SECTOR)
             f.write(build_metadata_block(device_ids[pos]))
             f.seek(CONFIG_COMMIT_LBA * SECTOR)
@@ -320,6 +344,11 @@ def main():
             f.write(decoy_gen)
             f.seek((CONFIG_RING_LBA + ACTIVE_GEN_SECTOR) * SECTOR)
             f.write(active_gen)
+            if is_block:
+                # The next reader is rcraid's own NVMe queues, and the
+                # controller is about to be reset when we unbind it from
+                # nvme — put the metadata on media first.
+                os.fsync(f.fileno())
 
     print(f"level={args.level} members={len(args.images)} "
           f"chunk_sectors={chunk_sectors} user_size={user_size} "
