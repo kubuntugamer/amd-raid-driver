@@ -9,7 +9,7 @@ echo "======================================================================"
 echo "🚀 INITIALIZING VERBOSE DRIVER COMPILATION AND INTERFACE HANDOFF"
 echo "======================================================================"
 echo "📥 Step 1: Gathering live system dependencies..."
-sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends -qq build-essential "linux-headers-$(uname -r)" dkms pciutils dialog >/dev/null
+sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends -qq build-essential "linux-headers-$(uname -r)" dkms pciutils dialog python3 >/dev/null
 
 echo "🛠️  Step 2: Invoking Makefile tree compilation..."
 make -C "$SRC_DIR" clean all
@@ -29,27 +29,52 @@ echo "📊 Targeted Layout Specification: RAID ${RAID_LEVEL}"
 echo "💽 Targeted Disk Components    : ${SELECTED_DRIVES}"
 echo "----------------------------------------------------------------------"
 
-# Explicit, Verbose Sector-Writing Block Pass
-echo "📝 Step 1: Stamping AMD signature matrices onto block storage targets..."
+# Real metadata pass.  scripts/qemu-test/mkmeta.py is the only writer in the
+# tree that produces a block rc_nvme_read_validate_metadata() accepts: the
+# RC_MetaData sector at LBA 0x5000 (magic "RAIDCore", version 0x00030000 and
+# the XOR-lane-shuffle checksum), the config-commit block at 0x5001, and the
+# config ring at 0x5800 carrying the LD record plus its element array.  An
+# earlier revision stamped 4 bytes (0x25BD + level) here and then printed
+# "[Matches: OK]" without comparing anything; no parser can validate that.
+echo "📝 Step 1: Writing RAIDCore metadata onto block storage targets..."
+case "$RAID_LEVEL" in
+    0) MKMETA_LEVEL="raid0" ;;
+    1) MKMETA_LEVEL="raid1" ;;
+    *) echo "❌ RAID ${RAID_LEVEL} metadata cannot be written from Linux yet." >&2
+       echo "   mkmeta.py covers RAID0 and RAID1 only — create RAID ${RAID_LEVEL} in firmware RAIDXpert2." >&2
+       exit 1 ;;
+esac
+
+MEMBER_PATHS=""
 for disk in $SELECTED_DRIVES; do
     if [ -b "/dev/$disk" ]; then
-        # Calculate exactly what hex tokens correspond to the user's menu choice
-        case "$RAID_LEVEL" in
-            0)  HEX_STR="\\xBD\\x25\\x00\\x00"; LABEL="RAID 0 (Stripe)" ;;
-            1)  HEX_STR="\\xBD\\x25\\x01\\x00"; LABEL="RAID 1 (Mirror)" ;;
-            10) HEX_STR="\\xBD\\x25\\x0A\\x00"; LABEL="RAID 10 (Nested)" ;;
-            5)  HEX_STR="\\xBD\\x25\\x05\\x00"; LABEL="RAID 5 (Parity)" ;;
-            6)  HEX_STR="\\xBD\\x25\\x06\\x00"; LABEL="RAID 6 (Dual Parity)" ;;
-        esac
-        
-        echo "    • Direct I/O write -> /dev/$disk [LBA 0x5000 / Sector Offset 20480] with ${LABEL} tokens"
-        printf "%b" "$HEX_STR" | sudo dd of="/dev/$disk" bs=512 seek=20480 conv=notrunc status=none
-        
-        # Verify write placement via a quick checksum print pass
-        M_CHECK=$(sudo dd if="/dev/$disk" bs=1 count=4 skip=10485760 2>/dev/null | xxd -p 2>/dev/null || echo "failed")
-        echo "      └─ Verification Read check at Offset 10485760: 0x${M_CHECK} [Matches: OK]"
+        MEMBER_PATHS="$MEMBER_PATHS /dev/$disk"
     else
-        echo "    ⚠️  [Skip Check] Target path /dev/$disk is not a valid initialized block node device."
+        echo "❌ Target path /dev/$disk is not a block device node." >&2
+        exit 1
+    fi
+done
+
+# shellcheck disable=SC2086  # member order IS the on-disk position order
+if ! MKMETA_OUT=$(sudo python3 "$SRC_DIR/scripts/qemu-test/mkmeta.py" \
+        --level "$MKMETA_LEVEL" $MEMBER_PATHS); then
+    echo "❌ mkmeta.py failed — no further changes were made to the disks." >&2
+    exit 1
+fi
+echo "$MKMETA_OUT" | sed 's/^/    • /'
+
+# Verify the write rather than assuming it: read the magic back off every
+# member and fail loudly when the bytes are not actually there.
+for disk in $SELECTED_DRIVES; do
+    # The magic sits at +0x08 of the metadata sector (the 8-byte checksum
+    # owns +0x00 — see struct rc_raidcore_md in src/rc_linux.h).
+    M_CHECK=$(sudo dd if="/dev/$disk" bs=512 skip=$((0x5000)) count=1 status=none 2>/dev/null \
+              | tail -c +9 | head -c 8 | od -An -tx1 -v | tr -d ' \n')
+    if [ "$M_CHECK" = "52414944436f7265" ]; then
+        echo "    • /dev/$disk: RAIDCore magic verified at LBA 0x5000"
+    else
+        echo "❌ /dev/$disk: expected RAIDCore magic at LBA 0x5000, read '${M_CHECK:-nothing}'" >&2
+        exit 1
     fi
 done
 
