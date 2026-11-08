@@ -61,13 +61,97 @@ validation** (the level is feature-complete; the array-box run in
 [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) is what's missing), RAID5/6
 **write** dispatch (parity volumes assemble and read today, read-only),
 hot-plug/rebuild, SMART pass-through,
-multi-volume, Secure Boot signing out of the box, array creation from Linux.
+multi-volume, Secure Boot signing out of the box, array creation from Linux
+beyond RAID0/RAID1 (the live installer now stamps real RAIDCore metadata for
+the 0/1 layouts via `scripts/qemu-test/mkmeta.py`; 10/5/6 metadata, and the
+firmware-compatible records RAIDXpert2/Windows would accept, are still open).
 The prioritized roadmap is in [`IMPLEMENTATION.MD`](IMPLEMENTATION.MD); the
 RE ground truth is in [`REVERSE_ENGINEERING.md`](REVERSE_ENGINEERING.md).
 
 The sections below are the dated implementation log — how each piece was built,
 kept for forensics. Where an early "Not started" / "Next steps" note has since
 been implemented, it's marked.
+
+## 2026-11-08 — RAID1 classification fix; installer stamps real metadata
+
+- **`rc_ld_level_from()` never mapped firmware's RAID1 encoding.** Real
+  firmware writes `DeviceType 0x1BF6` with `FirstCount=1 SecondCount=2` for a
+  2-way mirror (see `rc_linux.h`), but the `0x1BF6` arm only mapped
+  `SecondCount == 1` to RAID0 and `FirstCount >= 2 && SecondCount == 2` to
+  RAID10. A mirror record therefore fell through to the safety reject, and each
+  member was dropped with "unsupported RAID layout … ignoring member", so the
+  volume could not assemble at all. The mirror branch existed only under the
+  phantom `0x1BF7` encoding (added in `eaf5c34`), which real firmware does not
+  write. Caught by the QEMU rig's RAID1 runs, which failed at **assembly**
+  rather than in failure handling; with the branch restored, RAID0 and RAID1
+  both pass on the rig, including `--fail-member` and `--omit-member`.
+- **`install-livecd.sh` now writes metadata instead of a 4-byte tag.** It
+  stamped `0x25BD` + level at LBA `0x5000` and then printed `[Matches: OK]`
+  without comparing anything, which no parser can validate
+  (`rc_nvme_read_validate_metadata()` needs `RAIDCore` magic at `+0x08`, the
+  version, the XOR-lane checksum, a config-commit block and an LD record in the
+  ring). It now calls `scripts/qemu-test/mkmeta.py` — the only writer in the
+  tree that produces valid blocks — and reads the magic back off every member
+  before reporting success. RAID10/5/6 selections fail with a message pointing
+  at firmware RAIDXpert2 rather than stamping an unvalidatable layout.
+- **The `amd_ctl0` ioctl node is now privileged (issue #4).** Nothing in
+  `amd_raid_ioctl_multiplexer()` checked the caller, so any local user could
+  force-evict a member (`AMD_IOCTL_FAIL_MEMBER`) or start a resync on a live
+  array. Every command is now gated on `capable(CAP_SYS_ADMIN)` — `capable()`
+  rather than `ns_capable()`, because these actions reshape state shared by the
+  whole system — returning `-EPERM` and a rate-limited log naming the caller.
+  The check sits in the dispatcher so commands added later inherit it. No
+  in-tree consumer regresses: `rcraidXpert` issues its commands under magic
+  `'a'` (`0x30..0x32`), which already fell to `-EINVAL`.
+  Runtime-verified on the host with a throwaway build that wires the bridge up:
+  an unprivileged process opening the node and issuing `FAIL_MEMBER` got `OK`
+  before the gate (the vulnerability was real and reachable, not theoretical)
+  and `EPERM` with a `rejected ioctl … from unprivileged process` log after it.
+  **`rc_amd_init_ioctl_bridge()` currently has no caller**, so in the shipped
+  NVMe path `/dev/amd_ctl0` is never registered and issue #4 is latent: the gate
+  matters the day the bridge is wired into `rc_init()`, and only then.
+- **The QEMU rig resolves a static busybox itself (issue #5).** It used
+  `command -v busybox`, i.e. PATH order, which normally lands on the dynamic
+  `/usr/bin/busybox` from `busybox-initramfs`; the "not static" check then
+  aborted the run *even though `busybox-static` was installed*, and the only
+  workaround was prepending a private directory to PATH. It now probes the
+  `busybox-static` paths explicitly (`BUSYBOX=` overrides), names the binaries
+  it rejected, and prints the one it chose. With the dynamic binary first in
+  PATH: `==> busybox: /usr/bin/busybox-static`, then RAID0 PASS.
+- **Hardware probe of this tree's NVMe path** (4× `1022:B000`, Sabrent Rocket Q
+  `1987:5012`): `insmod` alone claims 0 adapters (the PCI core never steals
+  devices bound to `nvme`); binding three spare slots by `driver_override`
+  probes them clean — admin queue, 4× 256-deep I/O queues per drive, VWC on,
+  `bad magic … orphan`. No volume, as expected without metadata.
+  Box: MSI MAG X870E TOMAHAWK MAX WIFI (MS-7E59), Ryzen 7 9700X (8C/16T),
+  32 GB, kernel `7.3.0-10-generic`, Secure Boot on. Four `1022:B000` at
+  `03`/`11`/`15`/`16:00.0` (all Sabrent Rocket Q 3.7 TB, fw `RKT30Q.3`),
+  plus two `1022:43bd` SATA-RAID controllers at `06:00.0`/`0a:00.0` left on
+  `ahci` — the same class-`0104` "invisible members until ahci claims it"
+  behaviour PlaidPiper reported on X399. No member carries `RAIDCore`
+  metadata (LBA `0x5000` is zeros on the three spare disks), so a firmware
+  array — and with it every NVMe bottom-path claim — still needs a BIOS
+  RAIDXpert2 create.
+- **X399 fixtures re-verified independently (2026-11-08).** The 2026-10-07
+  pass went through a throwaway harness that was never committed, so the
+  claim was re-checked from scratch against the published dumps
+  (`sha256sum -c` clean) using a fresh userspace reimplementation of the
+  `rc_linux.h`/`rc_nvme.c` rules: **15/15 checks pass** — magic/version/
+  XOR-lane checksum on all four, commit block `0x5001` and ring `0x5800`,
+  timestamp linkage `0x44e3270d8b7f9c46` equal to each generation header,
+  `0x1BF6`/`devices=4`/2×2/`chunk_index=1`→64 KiB, capacity
+  `39063609344 = 2 × UserDataSize`, `UserDataOffset` uniform at `1069056`,
+  element DeviceIDs matching each member's own header ID, committed LD
+  packet (784 B) byte-identical while generation LBA and commit sequence
+  differ per member, and the `0x1BF9` raw-disk LDs present *only* in stale
+  journal sectors. The harness is not in the tree; if this check is worth
+  repeating, it belongs in `scripts/`.
+- **RAID10 wider than 2×2 is admitted on an unverified assumption.**
+  `rc_ld_level_from()` accepts any `FirstCount >= 2` with `SecondCount == 2`
+  (`SecondCount > 2` is rejected), and the mapping then pairs `{0,1}`,
+  `{2,3}`, … — so a 6-member 3×2 assembles on the adjacent-pair convention
+  that only 2×2 hardware corroborates. Documented as a boundary in
+  [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) step 1.
 
 ## 2026-10-07 — X399 fixtures verified; RAID10 pair convention settled
 

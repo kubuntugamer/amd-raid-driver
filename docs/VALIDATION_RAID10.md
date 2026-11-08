@@ -72,7 +72,16 @@ cross-dump of an X399 SATA RAID10 (all four members read at the same
 `UserDataOffset`; element 0 ≡ element 1, element 2 ≡ element 3, pairs
 differ) confirms the driver's **adjacent** assumption (`{2c, 2c+1}`) on
 real hardware — see [REVERSE_ENGINEERING.md](REVERSE_ENGINEERING.md)
-"External corroboration: X399". What that experiment did not cover is
+"External corroboration: X399".
+
+**Scope of that confirmation: 2×2 only.** The corroborated set is
+`FirstCount=2, SecondCount=2`. `rc_ld_level_from()` admits any
+`FirstCount >= 2` with `SecondCount == 2` as RAID10 (`SecondCount > 2` is
+rejected), and `rc_volume_phys_for_member` then pairs `{0,1}`, `{2,3}`,
+`{4,5}`, … — so a 6-member 3×2 array would be assembled on the same
+**unverified** adjacent assumption. No 3×2 (or 2×3) firmware creation has
+been cross-dumped; the same 1 MiB per-member compare below is what would
+settle it. Until then, treat a non-2×2 RAID10 as read-only/scratch. What that experiment did not cover is
 this box's NVMe path, so keep the falsification below as a cheap sanity
 check before trusting writes: a wrong pairing does not crash — it
 mirrors to the wrong partner and reads across non-partners, i.e. silent
