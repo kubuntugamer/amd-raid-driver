@@ -57,17 +57,18 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 
 ## 🗺️ Enterprise Roadmap (This Driver — Not Experimental)
 
-| Phase | Feature | Status | Enables |
-|-------|---------|--------|---------|
-| **0** | RAID 0/1/10 I/O + rebuild | ✅ Done — 10 awaiting hardware validation | Production baseline |
-| **1** | RAID 5/6 I/O + rebuild | 🟡 Assembly + reads wired, writes refused | Inspect and read existing parity arrays |
-| **2** | Metadata writer + TUI create | ⏳ Planned | Create RAID 5/6 arrays |
-| **3** | **OCE (Online Capacity Expansion)** | 🗺️ **Roadmap — this driver** | Add drives online, restripe, grow FS |
-| **4** | **ORLM (Online RAID Level Migration)** | 🗺️ **Roadmap — this driver** | RAID 0↔5↔6↔10 online, zero CPU |
-| **5** | COW snapshots + instant clone | 🗺️ Future | 0.001s clones, zero space |
-| **6** | **P2PDMA (Peer-to-Peer DMA)** | 🗺️ Future | Drive-to-drive DMA, zero CPU/RAM copy |
-| **7** | **io_uring support** | 🗺️ Future | Userspace async I/O, zero-copy, SPDK |
-| **8** | Hardware offload (NVMe ZNS/FDP) | 🗺️ Future | Zero CPU, hardware longevity |
+Phases 0–8 — including **OCE**, **ORLM**, COW snapshots, P2PDMA, io_uring and
+ZNS/FDP offload — are tracked in **[`docs/IMPLEMENTATION.MD`](docs/IMPLEMENTATION.MD)**
+under "Long-horizon phases", with one status per phase. That file is the
+single source of truth for both the long view and the near-term order; the
+table is deliberately not duplicated here, so the two can't drift apart.
+
+Where the phases actually stand: **Phase 0** (RAID 0/1/10 + rebuild) is done
+for RAID 0/1 and awaiting the RAID 10 array-box run; **Phase 1** (parity)
+assembles and reads but refuses writes; **Phase 2** (metadata writer + TUI
+create) is the next PR — the TUI can select 10/5/6 today, but the metadata
+writer only produces 0/1, so those choices stop at an error instead of
+stamping a layout the driver can't validate; phases 3–8 are long-horizon.
 
 **Prime directive: nothing from experimental branch migrates to main. OCE/ORLM/P2PDMA/io_uring are first-class features of *this* driver.**
 
@@ -92,7 +93,7 @@ write until the parity write path and the layout itself are confirmed.
 
 ## 🚀 Key Production Features
 
-*   **Interactive Phase 1 Terminal GUI (TUI):** No pre-configured arrays are required on boot. On clean, blank testing drives, the live-installer automatically spins up a keyboard-driven blue menu canvas (`dialog`). Testers can check off raw NVMe paths using the Spacebar, choose a target level — **0, 1, 10, 5, or 6** (**RAID 5/6 come up read-only — their parity write path isn't wired**, so those levels can only be read; RAID 10 needs at least four disks and is awaiting hardware validation) — and commit layouts on the fly.
+*   **Interactive Phase 1 Terminal GUI (TUI):** No pre-configured arrays are required on boot. On clean, blank testing drives, the live-installer automatically spins up a keyboard-driven blue menu canvas (`dialog`). Testers can check off raw NVMe paths using the Spacebar, choose a target level — **0, 1, 10, 5, or 6** (**RAID 5/6 come up read-only — their parity write path isn't wired**, so those levels can only be read; RAID 10 needs at least four disks and is awaiting hardware validation) — and commit layouts on the fly. Layout metadata is written by `scripts/qemu-test/mkmeta.py`, which covers **RAID 0 and 1** only: selecting 10/5/6 stops with an explicit message instead of stamping a layout the driver cannot validate.
 *   **Defensive Hardware Security Guards:** The TUI contains an automated validation length check that enforces a hard **maximum 8-disk constraint** matching AMD firmware specifications, safely preventing memory overrun kernel oops before touching the PCIe bus registers.
 *   **Advanced Rootfs Probing:** Phase 2 avoids fragile, hardcoded partition name assumptions. It uses a read-only sandboxed mount-and-probe matrix to peak inside array partitions, locate the genuine system `/etc/os-release`, and seamlessly execute chroot boot configurations on any distribution setup.
 *   **Non-Blocking Asynchronous Completion Engine:** Parent-bio completion is parked on the `kamd_async_worker` kthread queue, so hardware completion contexts return immediately and never stall the block-layer queue; a separate `kamd_resync` thread owns long-running rebuilds. Over-reports from faulty member paths are absorbed by a bounded tombstone pool instead of being fatal.
