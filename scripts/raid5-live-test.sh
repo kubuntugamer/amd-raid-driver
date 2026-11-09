@@ -42,7 +42,10 @@ if [ ! -f rcraid.ko ]; then
     make -j"$(nproc)" || { bad "build failed"; exit 1; }
 fi
 
-if ! modinfo -F signer ./rcraid.ko 2>/dev/null | grep -q .; then
+# NOTE: `writer | grep -q` is unusable here — grep exits on the first match,
+# the writer takes SIGPIPE, and `set -o pipefail` reports 141, so the test is
+# always false.  Test the value directly instead.
+if [ -z "$(modinfo -F signer ./rcraid.ko 2>/dev/null)" ]; then
     if [ -r "$MOK_PRIV" ] && [ -r "$MOK_DER" ]; then
         note "signing rcraid.ko with the local MOK key"
         /usr/src/linux-headers-$(uname -r)/scripts/sign-file sha256 \
@@ -100,7 +103,7 @@ done
 
 # ---------------------------------------------------------------- load
 hdr "Load rcraid"
-if lsmod | grep -q '^rcraid '; then
+if [ -d /sys/module/rcraid ]; then
     note "rcraid already loaded"
 else
     if insmod ./rcraid.ko; then

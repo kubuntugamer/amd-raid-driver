@@ -123,8 +123,9 @@ fixture on the members was written with the old rotating map.
 The layout is therefore **settled against the vendor implementation** — the
 arithmetic is AMD's own and no read, parity-lock or parity-memory path applies
 a row term — rather than inferred from one array. What is still missing is
-*corroboration on real bytes*: the array is zeroed, and the staged fixture was
-written by this driver, so it cannot discriminate. Two things stay unobserved
+*corroboration on real bytes*: the staged fixture is written by this driver
+(re-stamped under the dedicated layout and round-tripping cleanly), so it
+cannot discriminate between candidate layouts. Two things stay unobserved
 rather than unsettled: no vendor-written array has been read back, and member
 order comes from the LD element array.
 
@@ -163,8 +164,24 @@ in ascending order, packed at the same row offset on each member. Stamp
 verify `/dev/rcraid0` returns the logical data. Restore zeros afterwards (the
 array started zeroed).
 
-- [ ] Stamp + read-back matches for at least several full rows.
-- [ ] Restore the stamped region.
+- [x] Stamp + read-back matches (2026-11-08): 128 rows / 64 MiB stamped —
+      members 0/1 alternating data chunks, member 2 the row XOR — then read
+      back byte-identical through `/dev/rcraid0` (`63bf7f7d…c83673`), with the
+      ext4 filesystem mounting read-only and all file checksums matching.
+- [ ] Restore zeros afterwards — deferred; the array is scratch and the 64 MiB
+      region still holds the fixture.
+
+Two procedural traps, both hit on the array box:
+
+1. `rcbottom` pins `driver_override=rcbottom` on every member it owns, so
+   binding one back to `nvme` to stamp it raw fails with `EIO` until that
+   attribute is cleared (`echo > /sys/bus/pci/devices/<bdf>/driver_override`).
+   Restore it before reloading `rcraid`, or the members lose their binding.
+2. Do not test "is the module loaded" with `lsmod | grep -q` in a script that
+   sets `set -o pipefail`: grep exits on the first match, `lsmod` takes
+   SIGPIPE, and the pipeline reports 141 — the test is then always false.
+   Read `/sys/module/rcraid` instead. (The same bug silently disabled the
+   read-only-veto check in `validate-raid5.sh` until 2026-11-08.)
 
 ## 4. Explicitly not testable yet
 

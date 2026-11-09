@@ -105,7 +105,10 @@ if [ -n "$unexpected" ]; then
     printf '%s\n' "$unexpected" | sed 's/^/        /'
 else
     ok "no unexpected geometry veto"
-    if printf '%s\n' "$all_untrusted" | grep -q 'RAID 5/6 is assembled READ-ONLY'; then
+    # `grep -c` consumes all input; `grep -q` exits on the first match, which
+    # SIGPIPEs the writer and — under `set -o pipefail` — turns a present match
+    # into exit 141.  That silently made this check always report "not found".
+    if printf '%s\n' "$all_untrusted" | grep -c 'RAID 5/6 is assembled READ-ONLY' >/dev/null; then
         note "read-only veto present and expected: parity write path not implemented"
     fi
 fi
@@ -198,7 +201,7 @@ else
     ok "write attempt was refused (expected)"
 fi
 
-if dmesg | grep -q 'RAID 5/6 is assembled READ-ONLY'; then
+if dmesg | grep -c 'RAID 5/6 is assembled READ-ONLY' >/dev/null; then
     ok "driver logged the RAID5 read-only veto"
 else
     note "read-only veto line not found in dmesg (veto may come from enable_writes=0)"

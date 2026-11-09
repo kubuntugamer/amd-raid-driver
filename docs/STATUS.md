@@ -205,8 +205,13 @@ been implemented, it's marked.
   dedicated layout — and passes. Live check on the dev array: rebuilt module
   loads signed, assembles `optimal`, reads are stable, and the first 64 MiB
   hashes `7321098d…ed2a3` instead of the rotating-map `63bf7f7d…c83673`,
-  confirming the new map is the one in the data path. The staged fixture is
-  now stale (written with the old map) and cannot validate either layout.
+  confirming the new map is the one in the data path. The staged fixture was
+  then re-stamped under the dedicated layout — member 0/1 hold alternating
+  chunks, member 2 holds the row XOR — and the first 64 MiB read back
+  byte-identical (`63bf7f7d…c83673`), with the ext4 filesystem mounting
+  read-only and every file checksum matching. That makes the read path
+  self-consistent with the map the code implements; it still cannot
+  discriminate against a vendor-written array (issue #6).
 
 ## 2026-10-07 — X399 fixtures verified; RAID10 pair convention settled
 

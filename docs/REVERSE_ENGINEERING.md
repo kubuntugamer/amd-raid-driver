@@ -664,9 +664,10 @@ Still needing Ghidra investigation. Run via `scripts/ghidra/HuntBlockers.java`
    vendor implementation: it is read out of AMD's code, which is the code that
    writes these arrays, and both shipped builds agree. Two things are
    unobserved rather than unsettled. First, no array written by the vendor has
-   been read back through this driver — the dev array is zeroed and the staged
-   fixture was written with the rotating map, so neither can discriminate
-   (issue #6). Second, member order comes from the LD element array, so a
+   been read back through this driver — the dev array was zeroed, and the
+   staged fixture is written by this driver itself (re-stamped under the
+   dedicated layout on 2026-11-08, and it round-trips byte-identically), so
+   neither can discriminate between candidate layouts (issue #6). Second, member order comes from the LD element array, so a
    permutation there would misroute reads without contradicting any of the
    arithmetic above. Neither is evidence against the layout; both are reasons
    the claim should say "settled against the vendor code" and not
