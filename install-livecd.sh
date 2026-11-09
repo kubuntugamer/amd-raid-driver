@@ -45,23 +45,73 @@ sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends -qq b
 echo "🛠️  Step 2: Invoking Makefile tree compilation..."
 make -C "$SRC_DIR" clean all
 
-echo "🖥️  Step 3: Launching interactive Terminal GUI wizard configuration pass..."
-TUI_ENV_FILE=$(mktemp)
-export TUI_ENV_FILE
-"$SRC_DIR/scripts/phase1-tui.sh"
+echo "🔍 Step 3: Looking for an array the firmware already created..."
+# The array is normally built in the UEFI RAIDXpert2 utility, which writes the
+# RAIDCore metadata itself — the same records the driver validates and
+# rcraid-bind gates on. When those records are on the disks there is nothing to
+# create here: the member list comes from the disks, not from a menu, and
+# nothing may be stamped over the firmware's records (which would also destroy
+# levels mkmeta.py cannot produce, RAID 5/6 included). The interactive creation
+# path is offered only when no disk carries that metadata at all.
+RC_MAGIC="52414944436f7265"   # "RAIDCore" at +0x08 of the LBA 0x5000 sector
+FW_MEMBERS=""
+for disk in $(lsblk -dno NAME,TYPE | awk '$2 == "disk" && $1 ~ /^nvme/ { print $1 }'); do
+    magic="$(dd if="/dev/$disk" bs=512 skip=$((0x5000)) count=1 status=none 2>/dev/null \
+             | tail -c +9 | head -c 8 | od -An -tx1 -v | tr -d ' \n')"
+    if [ "$magic" = "$RC_MAGIC" ]; then
+        FW_MEMBERS="$FW_MEMBERS $disk"
+    fi
+done
+FW_MEMBERS="${FW_MEMBERS# }"
 
-# shellcheck source=/dev/null  # temp file created just above
-. "$TUI_ENV_FILE"
-rm -f "$TUI_ENV_FILE"
+if [ -n "$FW_MEMBERS" ]; then
+    SELECTED_DRIVES="$FW_MEMBERS"
+    RAID_LEVEL="firmware"
+    echo "✅ Existing array found — members: ${SELECTED_DRIVES}"
+    echo "   Level and geometry come from the RAIDCore metadata already on those"
+    echo "   disks; nothing is written to them. Change the array in the UEFI utility."
+else
+    echo "⚠️  No RAIDCore metadata on any disk, so there is no array to install onto."
+    echo "   Arrays are normally created in the UEFI RAIDXpert2 utility, which"
+    echo "   writes this metadata. Only continue if you mean to create RAID 0/1 on"
+    echo "   blank disks here — that writes fresh metadata over what is on them."
+    CREATE_ARRAY="${RCRAID_CREATE_ARRAY:-}"
+    if [ -z "$CREATE_ARRAY" ] && [ -t 0 ]; then
+        read -rp "Create an array on blank disks instead? [y/N] " _mk
+        case "$_mk" in
+            [yY]*) CREATE_ARRAY=1 ;;
+            *)     CREATE_ARRAY=0 ;;
+        esac
+    fi
+    if [ "$CREATE_ARRAY" != 1 ]; then
+        echo "❌ Create the array in the UEFI RAID utility, then re-run this script." >&2
+        echo "   (Non-interactive runs: RCRAID_CREATE_ARRAY=1 to create RAID 0/1 here.)" >&2
+        exit 1
+    fi
+    echo "🖥️  Step 3: Launching interactive Terminal GUI wizard configuration pass..."
+    TUI_ENV_FILE=$(mktemp)
+    export TUI_ENV_FILE
+    "$SRC_DIR/scripts/phase1-tui.sh"
+    # shellcheck source=/dev/null  # temp file created just above
+    . "$TUI_ENV_FILE"
+    rm -f "$TUI_ENV_FILE"
+fi
 
 clear
 echo "======================================================================"
 echo "⚙️  EXECUTING PHYSICAL METADATA AND CONTROLLER REGISTRATION PIPELINE"
 echo "======================================================================"
-echo "📊 Targeted Layout Specification: RAID ${RAID_LEVEL}"
-echo "💽 Targeted Disk Components    : ${SELECTED_DRIVES}"
+if [ "$RAID_LEVEL" = "firmware" ]; then
+    echo "📊 Layout                          : from the RAIDCore metadata (RAIDXpert2)"
+else
+    echo "📊 Targeted Layout Specification   : RAID ${RAID_LEVEL}"
+fi
+echo "💽 Targeted Disk Components        : ${SELECTED_DRIVES}"
 echo "----------------------------------------------------------------------"
 
+if [ "$RAID_LEVEL" = "firmware" ]; then
+    echo "📝 Step 1: Using the firmware's RAIDCore records — nothing written to the disks."
+else
 # Real metadata pass.  scripts/qemu-test/mkmeta.py is the only writer in the
 # tree that produces a block rc_nvme_read_validate_metadata() accepts: the
 # RC_MetaData sector at LBA 0x5000 (magic "RAIDCore", version 0x00030000 and
@@ -110,6 +160,7 @@ for disk in $SELECTED_DRIVES; do
         exit 1
     fi
 done
+fi
 
 echo "🔌 Step 2: Extracting PCIe hardware BDF trees and breaking generic generic driver overrides..."
 MEMBER_BDFS=""

@@ -102,6 +102,18 @@ been implemented, it's marked.
   verification, user-facing instructions); `verify-boot-safety.sh` reports a
   still-queued enrolment, and `uninstall-dkms.sh` now removes rcraid's signing
   drop-in (leaving the enrolled key, which other modules may share).
+- **The live installer no longer invents the array.** `install-livecd.sh` used
+  to list every NVMe disk in a TUI and stamp fresh RAID 0/1 metadata over the
+  ticked disks — wrong for a firmware array, which has nothing to tick and is
+  usually a level `mkmeta.py` cannot produce (the 3-disk RAID 5 would abort
+  outright). It now reads the RAIDCore magic at LBA `0x5000` first and, when
+  found, takes exactly those disks as members and writes nothing; level and
+  geometry come from the firmware's records. The TUI/creation path is reserved
+  for disks carrying no metadata at all and needs explicit confirmation
+  (`RCRAID_CREATE_ARRAY=1` in scripted runs); `phase1-tui.sh` also stops
+  inventing `nvme0n1…4` when no NVMe disk is present. Checked against the test
+  box's firmware RAID 5: detection returns exactly `nvme0n1 nvme1n1 nvme2n1`
+  and excludes the root disk `nvme3n1`.
 - **Installers repaired for the restructured tree.** Both scripts still
   described the pre-`e4695ce` layout: a root `VERSION` file (deleted), `rc_*.c`
   at the repo root (they live under `src/`) and an `@PKGVER@` placeholder that

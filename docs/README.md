@@ -200,6 +200,13 @@ The script installs build tools, compiles the module against the live
 kernel, auto-detects your array members, binds them, and loads `rcraid`.
 When it prints that **`/dev/rcraid0` is up**, it pauses and waits for you.
 
+Members are found by the RAIDCore metadata at LBA `0x5000`, so an array
+built in the UEFI RAIDXpert2 utility is used exactly as the firmware left
+it — nothing is written to those disks, and the level is whatever the
+firmware recorded. The disk-selection GUI appears only when **no** disk
+carries that metadata; it can create RAID 0/1 (all `mkmeta.py` writes)
+and overwrites the selected disks.
+
 **3. Run the OS installer — leave this terminal open.**
 Launch the distro's installer from the live desktop (*Install Kubuntu*,
 etc.) and:

@@ -115,9 +115,9 @@ This is the recommended deployment path for setting up a fresh Linux environment
    cd amd-raid-driver
    sudo ./install-livecd.sh
    ```
-3. The script will automatically pull development dependencies in RAM, compile the driver, and launch the interactive **Terminal GUI**.
-4. Use the **Arrow Keys** to navigate, **Spacebar** to check your member disks, and choose a baseline **RAID Level (0, 1, 10, 5, or 6)** — **5/6 assemble read-only, their parity write path isn't wired**; RAID 10 needs at least four disks and is awaiting hardware validation.
-5. Hit **OK**. The driver unbinds the raw paths, writes the layout data, and stands up **`/dev/rcraid0`** instantly.
+3. The script pulls development dependencies in RAM and compiles the driver, then looks for an array **RAIDXpert2 already created**: it reads the RAIDCore metadata at LBA `0x5000` and, when it is there, takes exactly those disks as members and writes nothing to them. Level and geometry come from the firmware's records — RAID 10/5/6 included.
+4. Only when no disk carries that metadata does it open the **Terminal GUI**: **Spacebar** to check member disks and RAID **0 or 1** (the only levels `mkmeta.py` can write — **5/6 assemble read-only, their parity write path isn't wired**; RAID 10 needs four disks and is awaiting hardware validation). That path *stamps fresh metadata* over the selected disks; with a firmware array the menu never appears.
+5. Either way the driver unbinds the members from `nvme`, binds them to `rcbottom`, and stands up **`/dev/rcraid0`**.
 6. Minimize the terminal and launch your desktop OS installer wizard. Select **Custom Partitioning**, map your layout over `/dev/rcraid0`, and let it copy files. **DO NOT REBOOT** when the installer finishes. Close the wizard panel and return to your open terminal window.
 
 ### Phase 2 — Target Chroot System Locking

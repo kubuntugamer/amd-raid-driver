@@ -16,8 +16,13 @@ echo "🔍 [TUI Discovery] Sweeping PCIe topology via lsblk for unassigned NVMe 
 RAW_DISKS=$(lsblk -dno NAME,SIZE | grep nvme | awk '{print $1 " [" $2 "]" " off"}')
 
 if [ -z "$RAW_DISKS" ]; then
-    echo "⚠️  [TUI Warning] Zero native NVMe controllers found. Deploying 4x local virtual device mock layers..." >&2
-    RAW_DISKS="nvme0n1 [2.0G] off nvme0n2 [2.0G] off nvme0n3 [2.0G] off nvme0n4 [2.0G] off"
+    # Inventing disk names here used to end at mkmeta.py with "not a block
+    # device node"; say what is actually wrong instead.
+    echo "❌ [TUI Abort] No NVMe disks visible." >&2
+    echo "   Check BIOS/NVMe mode (AHCI hides 1022:b000) or create the array in" >&2
+    echo "   the UEFI RAIDXpert2 utility first — this menu only creates RAID 0/1" >&2
+    echo "   metadata on blank disks." >&2
+    exit 1
 fi
 echo "📊 [TUI Discovery] Discovered targets available for array indexing:" >&2
 echo "$RAW_DISKS" | sed 's/^/    • /' >&2
@@ -35,7 +40,7 @@ if [ -z "$SELECTED_DRIVES" ]; then
     exit 1
 fi
 
-DRIVE_ARRAY=($SELECTED_DRIVES)
+read -r -a DRIVE_ARRAY <<< "$SELECTED_DRIVES"
 COUNT=${#DRIVE_ARRAY[@]}
 echo "📋 [TUI Filter] Registration pass captured $COUNT targeted components: [ $SELECTED_DRIVES ]" >&2
 

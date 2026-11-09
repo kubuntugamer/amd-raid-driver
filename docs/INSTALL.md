@@ -448,3 +448,12 @@ quick-start path 🅐. It builds and loads the driver, hands
 `/dev/rcraid0` to the distro installer, then chroots into the fresh
 install to set up DKMS, the initramfs hook, and a UEFI boot entry.
 Validated end to end on RAID0 and RAID1.
+
+The array itself normally comes from the **UEFI RAIDXpert2 utility**, and
+that is what the script expects: it reads the RAIDCore metadata at LBA
+`0x5000` and, when it finds it, uses exactly those disks as members and
+writes nothing — the level and geometry are the firmware's, RAID 5/6
+included. The interactive disk/level menu only appears when no disk
+carries that metadata; that path writes fresh RAID 0/1 records (all
+`mkmeta.py` can produce) and needs explicit confirmation
+(`RCRAID_CREATE_ARRAY=1` when running non-interactively).
