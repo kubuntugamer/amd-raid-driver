@@ -24,12 +24,17 @@ void DashboardWidget::setupUiLayout() {
     mainLayout->addWidget(headerLabel);
 
     struct AmdHardwarePayload hardware_state{};
+    uint32_t status_mask = 0;
+    bool have_status = false;
     bool hardware_active = false;
     
-    int fd = ::open("/dev/amd_ctl0", O_RDWR | O_NONBLOCK);
+    int fd = ::open("/dev/amd_ctl0", O_RDONLY | O_NONBLOCK);
     if (fd >= 0) {
         if (::ioctl(fd, AMD_IOCTL_GET_HARDWARE_INVENTORY, &hardware_state) >= 0) {
             hardware_active = true;
+        }
+        if (::ioctl(fd, AMD_IOCTL_GET_STATUS, &status_mask) >= 0) {
+            have_status = true;
         }
         ::close(fd);
     }
@@ -53,8 +58,28 @@ void DashboardWidget::setupUiLayout() {
         return frame;
     };
 
-    QString healthText = hardware_active ? "OPTIMAL" : "OFFLINE";
-    QString healthStyle = hardware_active ? "color: #107C10;" : "color: #A80000;";
+    bool status_failed = have_status &&
+                         (status_mask & RC_AMD_STATUS_FAILED);
+    bool status_degraded = have_status &&
+                           (status_mask & RC_AMD_STATUS_DEGRADED);
+    QString healthText;
+    QString healthStyle;
+    if (!hardware_active) {
+        healthText = "OFFLINE";
+        healthStyle = "color: #A80000;";
+    } else if (hardware_state.total_discovered_arrays == 0) {
+        healthText = "NO ARRAY";
+        healthStyle = "color: #A80000;";
+    } else if (status_failed) {
+        healthText = "FAILED";
+        healthStyle = "color: #A80000;";
+    } else if (status_degraded) {
+        healthText = "DEGRADED";
+        healthStyle = "color: #B8860B;";
+    } else {
+        healthText = "OPTIMAL";
+        healthStyle = "color: #107C10;";
+    }
     int controllerCount = hardware_active ? 1 : 0; 
     int logicalCount = hardware_active ? hardware_state.total_discovered_arrays : 0;
     int physicalCount = hardware_active ? hardware_state.total_discovered_drives : 0;

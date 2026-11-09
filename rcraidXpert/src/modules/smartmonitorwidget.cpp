@@ -31,10 +31,10 @@ void SmartMonitorWidget::setupUiLayout() {
     struct AmdHardwarePayload hardware_state{};
     bool hardware_active = false;
     
-    int fd = ::open("/dev/amd_ctl0", O_RDWR | O_NONBLOCK);
+    int fd = ::open("/dev/amd_ctl0", O_RDONLY | O_NONBLOCK);
     if (fd >= 0) {
         if (::ioctl(fd, AMD_IOCTL_GET_HARDWARE_INVENTORY, &hardware_state) >= 0) {
-            hardware_active = true;
+            hardware_active = hardware_state.total_discovered_arrays > 0;
         }
         ::close(fd);
     }

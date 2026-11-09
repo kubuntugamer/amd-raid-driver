@@ -6,7 +6,7 @@ This directory contains the un-mocked, pure hardware graphical configuration uti
 
 This utility communicates strictly with bare-metal hardware. For the user interface to populate categories, discover hard drives, or manage arrays, the system must satisfy the following state conditions:
 1. **Driver Loaded:** The underlying storage driver (`rcraid.ko`) must be actively loaded into kernel memory.
-2. **Device Present:** The character control bridge multiplexer file path `/dev/amd_ctl0` must exist with valid read/write block permissions.
+2. **Device Present:** The control bridge `/dev/amd_ctl0` must exist. It is registered mode 0644: inventory/status reads work as a normal user; member eviction and resync require `CAP_SYS_ADMIN` (run the management action as root).
 
 ---
 

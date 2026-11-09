@@ -38,4 +38,8 @@ add_executable(rcraidXpert
     src/modules/arraydatacontroller.h
 )
 
+target_include_directories(rcraidXpert PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+
 target_link_libraries(rcraidXpert PRIVATE Qt6::Widgets)
