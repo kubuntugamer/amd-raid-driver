@@ -553,6 +553,142 @@ analysed here — a possible target for the Ghidra pipeline once a Linux-ELF
 
 ---
 
+## rcadm `/dev/rc_api` config-packet ABI
+
+Settled by disassembling the shipped `rcadm` 9.3.3-00302 (symtab + DWARF
+intact). This section covers the userspace side of the ABI only; it does not
+claim anything about the vendor kernel driver's own validation.
+
+### Transport
+
+| Item | Value |
+|---|---|
+| Device | `/dev/rc_api`, opened `O_RDWR` + `O_NONBLOCK` |
+| Framing | `ioctl(fd, SG_IO, sg_io_hdr)` (`SG_IO` = `0x2285`), timeout `0xEA60` = 60 s |
+| Identify | `INQUIRY` EVPD page `0xD7` → `"AMD-RAID Controller"` (`SG_InquiryD7`) |
+| Data | `READ(10)` / `WRITE(10)` via `sg_read`/`sg_write`, 512-byte blocks, `sg_err_category3()` on completion (`SG_ReadWrite`, `lxdev_sglib.cpp:750`) |
+| Descriptor | `READ(10)` LBA 0, 2 blocks (1 KiB) |
+| Config packet | 64 KiB (`PacketSize` `0x4000` populated of a 64 KiB read) |
+
+`SG_ReadWrite(int fd, unsigned dir, uchar *buf, int len, long long lba)` rounds
+`len` up to 512-byte blocks and calls `sg_write` when `dir == 0`, `sg_read`
+otherwise. `SG_Scsi_IO` fills `sg_io_hdr` with interface id `'S'`, the CDB, the
+data pointer/length, 60 s timeout, and returns 0 on sense-free completion.
+
+### Header: `RC_ConfigPacketHeader` (packed, 512 B)
+
+From DWARF; every offset is confirmed against the captured packets.
+
+| Offset | Size | Field | Captured value |
+|---|---|---|---|
+| `0x00` | 8 | `Checksum` | `f66466def9884e30` |
+| `0x08` | 4 | `PreviousConfigPacketOffset` | |
+| `0x0C` | 8 | `HeaderKey` | |
+| `0x14` | 4 | `Version` | `1` |
+| `0x18` | 4 | `PacketSize` | `0x4000` |
+| `0x1C` | 8 | `ModifierSerialNumber` | |
+| `0x24` | 4 | `PhysicalDeviceOffset` | `0x200` |
+| `0x28` | 4 | `PhysicalDeviceSize` | `0x500` |
+| `0x2C` | 4 | `LogicalDeviceOffset` | `0x700` |
+| `0x30` | 4 | `LogicalDeviceSize` | `0x310` |
+| `0x34` | 8 | `GenerationNumber` | `10` |
+| `0x3C` | 4 | `WaitForAcceptConfigChange` | |
+| `0x40` | 4 | `ControllerDeviceOffset` | `0xA10` |
+| `0x44` | 4 | `ControllerDeviceSize` | `0x330` |
+| `0x48` | 4 | `SEPDeviceOffset` | `0xD40` |
+| `0x4C` | 4 | `SEPDeviceSize` | `0` |
+| `0x50` | 432 | `Reserved[108]` | |
+
+### Checksum: not validated by `rcadm`
+
+`RC_ApiGenCRC32` (`0x4F730`) has exactly five call sites, all in firmware
+update: `RC_ApiUpdateFirmwareRegion` (`0x554A0`, ×2), `RC_ApiUpdateFirmwareFrame`
+(`0x559E0`, ×2), `RC_ApiUpdateHDDFirmware` (`0x5ACB0`, ×1). Nothing on the config
+read path calls it or compares its result. The config walkers read **only**
+header `+0x34` (`GenerationNumber`) and then start at packet `+0x200`; the
+`Checksum` word at `+0x00` is never loaded (`RC_Core::RC_InitDeviceCount`
+`RC_Core.cpp:884`, `RC_Core::RC_BuildConfig` `RC_Core.cpp:741`).
+
+So the unresolved `0xf66466def9884e30` value is **not** a gate for making
+`rcadm` read a synthesized packet. A packet builder need not reproduce it.
+(The vendor kernel driver's own check, if any, is irrelevant once this driver
+replaces it.)
+
+### Walker semantics (what the parser actually honours)
+
+`RC_ApiParseCoreConfig` (`0x4D0D0`, `rcparseconf.cpp:144`) only turns the
+textual `RC_ApiGetCoreConfigString` output into `RC_Config` (`NextToken`,
+`sscanf`, `scmp`). The binary packet is walked by `RC_InitDeviceCount` /
+`RC_BuildConfig`:
+
+- **Start:** fixed `packet + 0x200`. The header's
+  `PhysicalDeviceOffset`/`LogicalDeviceOffset`/… are *not* consulted by the
+  parser (the vendor driver still emits the conventional values shown above).
+- **Bound:** the size argument. The live query path
+  (`RC_Core::RC_GetConfig`, `0x5D1F0`) passes `0x10000`, not `PacketSize`.
+- **Termination:** a zero `u32` at a record boundary, an unknown tag, or
+  running past the bound.
+- **Stride by tag:**
+
+| Tag | Meaning | Advance |
+|---|---|---|
+| `0x25BC` | PhysicalDevice | `0x100` when flag 0, `0x80` when flag 1 |
+| `0x25BD` | LogicalDevice | variable: `u32` length at record `+0x90` (`0x310` here) |
+| `0x25BE` | ControllerDevice | `0x88` |
+| `0x25BF` | SEPDevice | `0x40` |
+
+The `0x80` variant is **not** what the live packet uses: `RC_GetConfig` calls
+`RC_InitDeviceCount(packet, 0x10000, 0)` (flag 0 → `0x100`), and the captured
+packet has tags at `0x200/0x300/0x400/0x500/0x600` then `0x25BD` at `0x700`.
+Flag 1 is used only by `RC_GetPrevConfig` (previous generation) and
+`RC_ApiGetCoreConfigStringFromConfigPacket` (in-memory import).
+
+### Observed section contents (4-member RAID0 capture)
+
+- `0x200`: five `0x25BC` records at `0x100` stride. The first (`0x200`) is a
+  controller/version record (`DeviceType 0x1201`, zero capacity, version
+  string); the other four are the Sabrent members.
+- `0x700`: one `0x25BD` record, `PacketSize` `0x310`, `DeviceType 0x1BF6` at
+  `+0x0C` — the same `RC_LogicalDevice` layout as the config-ring record
+  documented above, including member count `+0x68`, `FirstCount/SecondCount
+  +0x6C/+0x70`, `PacketSize +0x90`, `ChunkSize +0xAC`, `chunk_index +0x110`,
+  and the element array at `+0x04`-relative offsets with a 64-byte element
+  stride.
+- `0xA10`: `0x25BE` controller records at `0x88` stride (six before the walk
+  hits the zero tag at `0xD40`).
+- The version string `9.3.3-00302` is **not** in the controller section: it
+  sits at absolute `0x288`, i.e. in the first `0x25BC` record at `0x200`,
+  offset `+0x88`.
+- `0xD40`: no SEP records (`SEPDeviceSize 0`).
+
+### PhysicalDevice record fields read by `RC_C_PhysicalDevice`
+
+From the constructor (`0x5E550`, `RC_C_PhysicalDevice.cpp:63`), on the flag-0
+(256-byte) record:
+
+| Record offset | Size | Used as |
+|---|---|---|
+| `+0x04` | 8 | `DeviceID` (LE) |
+| `+0x0C` / `+0x0E` | 2 / 2 | handle path/target |
+| `+0x10` | 4 | `DeviceID` continuation |
+| `+0x18` | 4 | `Devices` |
+| `+0x1C` | 8 | `Capacity` (sectors) |
+| `+0x24` | 4 | `DeviceType` |
+| `+0x2C` | 4 | `DeviceState` |
+| `+0x30` | 4 | `SpareInfo` |
+| `+0x54` | 4 | `Features` |
+| `+0x58` | 4 | `PortType` |
+| `+0x80` | 8 | firmware revision (`RKT30Q.3`) |
+| `+0x88` | 32 | model name (`Sabrent Rocket Q`) |
+| `+0xA8` | 8 | serial-number prefix (8 spaces + first 8 hex digits) |
+| `+0xB0` | 24 | serial number |
+| `+0xC8` / `+0xD0` | 8 / 8 | largest/total free space (flag 0 only) |
+
+This confirms the PD records are the full 256-byte form, not the 128-byte
+previous-generation variant.
+
+---
+
 ## Debunked theories (do not re-investigate)
 
 Each wasted significant effort in the 2024 analysis round. They are wrong; the
