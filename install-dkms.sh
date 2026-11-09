@@ -36,17 +36,95 @@ DKMS_SRC="/usr/src/${PKG_NAME}-${PKG_VERSION}"
 
 # Tooling preflight — fail fast with an actionable message rather than later
 # with a silent "no devices found" or a confusing dkms error.
-for tool in lspci dkms udevadm; do
+for tool in lspci dkms udevadm modprobe; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         case "$tool" in
-            lspci)   pkg="pciutils" ;;
-            dkms)    pkg="dkms" ;;
-            udevadm) pkg="systemd / udev" ;;
+            lspci)    pkg="pciutils" ;;
+            dkms)     pkg="dkms" ;;
+            udevadm)  pkg="systemd / udev" ;;
+            modprobe) pkg="kmod" ;;
         esac
         echo "missing required tool: $tool (install $pkg)" >&2
         exit 1
     fi
 done
+
+# ----------------------------------------------------------------------------
+# 0. Vendor-driver preflight.
+#
+# This tree installs as DKMS package `rcraid` with a module also named
+# rcraid, claiming the same 1022:b000 functions as AMD's blob-backed driver.
+# The two cannot coexist: step 3 retires every other registered version of
+# the package, which deletes the vendor module from every installed kernel
+# and its sources from /usr/src.  That is the point of the install — but it
+# is also, on a machine booting from the array, the only driver that can
+# currently mount the root filesystem, so it must never happen silently.
+#
+# Read-only probe: `dkms status` and `modinfo` change nothing.  A loaded
+# module is recognised as the vendor build by its license, which covers an
+# install that DKMS did not register (e.g. a vendor RPM laying one down).
+# ----------------------------------------------------------------------------
+
+VENDOR_VERSIONS=()
+while read -r ver; do
+    [ -n "$ver" ] || continue
+    [ "$ver" = "$PKG_VERSION" ] && continue
+    VENDOR_VERSIONS+=("$ver")
+done < <(dkms status "$PKG_NAME" 2>/dev/null \
+             | sed -n "s#^${PKG_NAME}[/,][ ]*\([^,/:]*\)[,/:].*#\1#p" | sort -u)
+
+VENDOR_LOADED=0
+if grep -q "^${PKG_NAME} " /proc/modules 2>/dev/null; then
+    case "$(modinfo -F license "$PKG_NAME" 2>/dev/null || true)" in
+        *[Pp]roprietary*) VENDOR_LOADED=1 ;;
+    esac
+fi
+
+if [ ${#VENDOR_VERSIONS[@]} -eq 0 ] && [ "$VENDOR_LOADED" -eq 0 ]; then
+    echo "==> vendor rcraid preflight: nothing to replace"
+    echo
+else
+    echo "==> vendor rcraid preflight: AMD's driver is installed"
+    for ver in "${VENDOR_VERSIONS[@]}"; do
+        echo "    DKMS package: ${PKG_NAME}/${ver}"
+    done
+    if [ "$VENDOR_LOADED" = 1 ]; then
+        echo "    loaded now:   ${PKG_NAME} (proprietary build, in use)"
+    fi
+    cat <<EOF
+
+Installing this tree replaces it: the staging step runs
+    dkms remove -m ${PKG_NAME} -v <version> --all
+for every version listed above, deleting the vendor module from every
+installed kernel and its sources from /usr/src.  If the array is serving /,
+this install is replacing the only driver that can mount it, and the loaded
+copy keeps working only until the next reboot.
+
+Rollback is to reinstall the vendor package (the Lenovo RPM, or
+DesktopECHO/rcraid-nvme's .deb/.rpm), then rebuild the initramfs.
+
+EOF
+    if [ "${RCRAID_REPLACE_VENDOR:-0}" = 1 ]; then
+        echo "    RCRAID_REPLACE_VENDOR=1 — continuing without a prompt"
+    elif [ ! -t 0 ]; then
+        cat >&2 <<EOF
+ERROR: the vendor driver would be replaced, and stdin is not a terminal,
+       so confirmation cannot be asked for.  Nothing was changed.
+
+Re-run interactively, or set RCRAID_REPLACE_VENDOR=1 to accept the
+replacement explicitly in a scripted install.
+EOF
+        exit 1
+    else
+        answer=""
+        read -rp "Type 'replace' to remove AMD's driver and continue: " answer || true
+        if [ "$answer" != "replace" ]; then
+            echo "Aborted — nothing was changed." >&2
+            exit 1
+        fi
+    fi
+    echo
+fi
 
 # Secure Boot / module signing.
 #
@@ -61,7 +139,7 @@ done
 # shim's MOK manager runs before the kernel on that boot, so the module in the
 # initramfs is trusted the first time it is loaded: enrolment and first use
 # happen in the same boot, instead of one reboot to enrol plus another to
-# install.  Step 2b below then catches a DKMS that silently failed to sign.
+# install.  Step 3b below then catches a DKMS that silently failed to sign.
 # scripts/lib/secure-boot.sh carries the details.
 . "$SRC_DIR/scripts/lib/secure-boot.sh"
 
@@ -223,7 +301,52 @@ fi
 echo
 
 # ----------------------------------------------------------------------------
-# 2. Stage sources under /usr/src/<pkg>-<ver> and run dkms install.
+# 2. Unload nvme and ahci so the new module can claim the controller.
+#
+# The kernel's nvme driver matches the RAID Bottom by class code (0x010802),
+# not only by vendor ID, so it binds every trapped member before rcraid gets
+# a chance; ahci does the same for the SATA RAID variants.  Clearing them out
+# here lets the freshly installed rcraid probe 1022:b000 itself, and shows
+# which of the two the running system can actually live without before the
+# reboot makes that the boot-time configuration.
+#
+# This is a runtime unload, not a blacklist: after the reboot both load again
+# and the udev rule still takes members away from nvme one BDF at a time, so
+# docs/INSTALL.md's "do not blacklist nvme" remains the boot-time rule.
+#
+# Non-fatal by design.  A module with a mounted filesystem behind it cannot be
+# unloaded (EBUSY), and on a box whose / is a plain NVMe or SATA disk that is
+# the correct outcome — report it and carry on, because rcraid-bind can still
+# release only the members it verifies at LBA 0x5000.
+# ----------------------------------------------------------------------------
+
+UNLOAD_FAILED=()
+
+echo "==> unloading conflicting block drivers (nvme, ahci)"
+for mod in nvme ahci; do
+    if [ ! -d "/sys/module/$mod" ]; then
+        echo "    $mod: not loaded"
+        continue
+    fi
+    if [ ! -e "/sys/module/$mod/refcnt" ]; then
+        echo "WARN: $mod is built into this kernel — it cannot be unloaded." >&2
+        echo "      If it claims 1022:b000 before rcraid, boot with" >&2
+        echo "      modprobe.blacklist=$mod and retry." >&2
+        continue
+    fi
+    if modprobe -r "$mod" 2>&1 | sed 's/^/    /'; then
+        echo "    $mod: unloaded"
+    else
+        UNLOAD_FAILED+=("$mod")
+        echo "WARN: $mod could not be unloaded (in use by a mounted filesystem" >&2
+        echo "      or an open device).  Continuing; rcraid-bind will release" >&2
+        echo "      only the array members it can verify at LBA 0x5000." >&2
+    fi
+done
+echo
+
+# ----------------------------------------------------------------------------
+# 3. Stage sources under /usr/src/<pkg>-<ver> and run dkms install.
 # ----------------------------------------------------------------------------
 
 echo "==> staging sources at $DKMS_SRC"
@@ -279,15 +402,57 @@ else
     dkms add -m "$PKG_NAME" -v "$PKG_VERSION" 2>&1 | sed 's/^/    /'
 fi
 
-echo "==> dkms build"
-dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force 2>&1 | sed 's/^/    /'
+# `dkms build` / `dkms install` default to the RUNNING kernel only.  rcraid
+# backs /, so every kernel the bootloader can pick needs its own module:
+# installing for the running one alone leaves an older entry without the
+# driver, and that boot stops at a missing root filesystem.  Do both once per
+# installed kernel, and name the kernel in any failure so it is obvious which
+# entry must not be rebooted into.
+KERNELS=()
+KERNELS_NO_HEADERS=()
+for d in /lib/modules/*; do
+    [ -d "$d" ] || continue
+    kver="${d##*/}"
+    if [ -e "$d/build" ]; then
+        KERNELS+=("$kver")
+    else
+        KERNELS_NO_HEADERS+=("$kver")
+    fi
+done
 
-echo "==> dkms install"
-dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force 2>&1 | sed 's/^/    /'
+if [ ${#KERNELS[@]} -eq 0 ]; then
+    echo "ERROR: no kernel with headers under /lib/modules — cannot build" >&2
+    echo "       rcraid.  Install linux-headers for the running kernel." >&2
+    exit 1
+fi
+
+if [ ${#KERNELS_NO_HEADERS[@]} -gt 0 ]; then
+    echo "WARN: no headers for ${KERNELS_NO_HEADERS[*]} — rcraid cannot be built" >&2
+    echo "      for those kernels, so no module is installed for them.  Install" >&2
+    echo "      their headers and re-run this script before booting them." >&2
+    echo
+fi
+
+echo "==> dkms build/install for: ${KERNELS[*]}"
+for kver in "${KERNELS[@]}"; do
+    echo "==> dkms build -k $kver"
+    if ! dkms build -m "$PKG_NAME" -v "$PKG_VERSION" -k "$kver" --force 2>&1 \
+            | sed 's/^/    /'; then
+        echo "ERROR: dkms build FAILED for $kver — do not reboot into it." >&2
+        exit 1
+    fi
+
+    echo "==> dkms install -k $kver"
+    if ! dkms install -m "$PKG_NAME" -v "$PKG_VERSION" -k "$kver" --force 2>&1 \
+            | sed 's/^/    /'; then
+        echo "ERROR: dkms install FAILED for $kver — do not reboot into it." >&2
+        exit 1
+    fi
+done
 echo
 
 # ----------------------------------------------------------------------------
-# 2b. Prove what DKMS installed is actually signed.
+# 3b. Prove what DKMS installed is actually signed.
 #
 # DKMS signs during build, but a missing/unreadable key makes it print a
 # warning and carry on with an unsigned module.  Under Secure Boot that is
@@ -337,7 +502,7 @@ if [ "$MOK_SIGNING" = 1 ] || [ "$SB_ENFORCING" = 1 ]; then
 fi
 
 # ----------------------------------------------------------------------------
-# 3. Lay down the udev rule, helper, and modprobe drop-in.
+# 4. Lay down the udev rule, helper, and modprobe drop-in.
 # ----------------------------------------------------------------------------
 
 echo "==> installing /usr/sbin/rcraid-bind"
@@ -373,8 +538,116 @@ if [ -d /etc/apt/apt.conf.d ]; then
 fi
 
 # ----------------------------------------------------------------------------
-# 4. Install initramfs hook so the array can serve /, and regenerate the
-#    initramfs for the running kernel.
+# 5. Persist AMD's documented boot-line module blacklist.
+#
+# AMD-RAIDXpert2 User Guide Rev 3.11 (June 2020), "Boot Options": add
+# `modprobe.blacklist=ahci,nvme` to the Linux boot string.  The RAID Bottom
+# presents as class 0x010802, which the kernel nvme driver matches by class,
+# and the SATA variants look like AHCI controllers — both autoload during
+# coldplug, before rcraid's probe can claim the functions.  The udev rule can
+# take a verified member back afterwards; with this, nothing has to.
+#
+# It goes on the kernel command line rather than in modprobe.d because it must
+# be in force before udev coldplug, initramfs included.  A module that step 2
+# could not unload is backing a live device, so it is never blacklisted here.
+# ----------------------------------------------------------------------------
+
+echo "==> boot-line module blacklist (modprobe.blacklist=ahci,nvme)"
+
+cmdline_blacklist="$(tr ' ' '\n' < /proc/cmdline \
+                     | sed -n 's/^modprobe\.blacklist=//p' | tr ',' '\n')"
+BLACKLIST_MISSING=()
+for mod in ahci nvme; do
+    printf '%s\n' "$cmdline_blacklist" | grep -qx "$mod" \
+        || BLACKLIST_MISSING+=("$mod")
+done
+
+if [ ${#BLACKLIST_MISSING[@]} -eq 0 ]; then
+    echo "    already active on the running kernel"
+else
+    APPLY=()
+    for mod in "${BLACKLIST_MISSING[@]}"; do
+        in_use=0
+        for failed in "${UNLOAD_FAILED[@]}"; do
+            if [ "$failed" = "$mod" ]; then
+                in_use=1
+            fi
+        done
+        if [ "$in_use" = 1 ]; then
+            echo "WARN: not blacklisting $mod — it is in use by a live device," >&2
+            echo "      and removing it from the boot line would break that mount." >&2
+        else
+            APPLY+=("$mod")
+        fi
+    done
+
+    if [ ${#APPLY[@]} -eq 0 ]; then
+        echo "    nothing safe to add"
+    elif [ ! -f /etc/default/grub ]; then
+        echo "WARN: no /etc/default/grub — add this to your boot loader entries:" >&2
+        echo "      modprobe.blacklist=$(IFS=,; echo "${APPLY[*]}")" >&2
+    else
+        GRUB_FILE=/etc/default/grub
+        # Update whichever cmdline variable already carries a blacklist;
+        # otherwise the default one.  Both quote styles are in the wild.
+        target="GRUB_CMDLINE_LINUX_DEFAULT"
+        if grep -qE '^GRUB_CMDLINE_LINUX(_DEFAULT)?=.*modprobe\.blacklist=' "$GRUB_FILE"; then
+            target="$(sed -n \
+                's/^\(GRUB_CMDLINE_LINUX\(_DEFAULT\)\?\)=.*modprobe\.blacklist=.*/\1/p' \
+                "$GRUB_FILE" | head -1)"
+        fi
+        # grep exits 1 when the variable is absent (fresh minimal grub file),
+        # and grep -v exits 1 when the value is nothing but the blacklist —
+        # either would abort the script under pipefail before the edit.
+        line="$(grep -E "^${target}=" "$GRUB_FILE" | head -1 || true)"
+        val="$(printf '%s\n' "$line" | sed -E 's/^[A-Z_]+=//' | tr -d "\"'")"
+        rest="$(printf '%s\n' "$val" | tr ' ' '\n' \
+                | sed -n '/^modprobe\.blacklist=/!p' \
+                | sed '/^$/d' | paste -sd' ' -)"
+        list="$(printf '%s\n' "$val" | tr ' ' '\n' \
+                | sed -n 's/^modprobe\.blacklist=//p' | tr ',' '\n'
+                printf '%s\n' "${APPLY[@]}")"
+        list="$(printf '%s\n' "$list" | sed '/^$/d' | sort -u | paste -sd, -)"
+        new="${rest:+$rest }modprobe.blacklist=$list"
+
+        [ -e "$GRUB_FILE.rcraid.bak" ] || cp -a "$GRUB_FILE" "$GRUB_FILE.rcraid.bak"
+        tmp="$(mktemp)"
+        awk -v t="$target" -v v="$new" '
+            $0 ~ "^" t "=" { print t "=\"" v "\""; seen = 1; next }
+            { print }
+            END { if (!seen) print t "=\"" v "\"" }
+        ' "$GRUB_FILE" > "$tmp"
+        cat "$tmp" > "$GRUB_FILE"
+        rm -f "$tmp"
+        echo "    $target=\"$new\"  (backup: $GRUB_FILE.rcraid.bak)"
+
+        if command -v update-grub >/dev/null 2>&1; then
+            if ! update-grub 2>&1 | sed 's/^/    /'; then
+                echo "ERROR: update-grub failed — the running kernel keeps its" >&2
+                echo "       cmdline, but the next boot may lack the blacklist." >&2
+                exit 1
+            fi
+        elif command -v grub2-mkconfig >/dev/null 2>&1 && [ -d /boot/grub2 ]; then
+            if ! grub2-mkconfig -o /boot/grub2/grub.cfg 2>&1 | sed 's/^/    /'; then
+                echo "ERROR: grub2-mkconfig failed — see above." >&2
+                exit 1
+            fi
+        elif command -v grub-mkconfig >/dev/null 2>&1 && [ -d /boot/grub ]; then
+            if ! grub-mkconfig -o /boot/grub/grub.cfg 2>&1 | sed 's/^/    /'; then
+                echo "ERROR: grub-mkconfig failed — see above." >&2
+                exit 1
+            fi
+        else
+            echo "WARN: no Grub configuration tool found — run your boot loader's" >&2
+            echo "      generator by hand so the new command line is picked up." >&2
+        fi
+    fi
+fi
+echo
+
+# ----------------------------------------------------------------------------
+# 6. Install initramfs hook so the array can serve /, and regenerate the
+#    initramfs for every installed kernel — not just the running one.
 #
 # We support both dracut (Fedora/RHEL/Arch/openSUSE) and initramfs-tools
 # (Debian/Ubuntu).  If neither is present, the install still succeeds but
@@ -391,14 +664,18 @@ if command -v dracut >/dev/null 2>&1; then
         "$SRC_DIR/packaging/dracut/95rcraid/module-setup.sh" \
         /usr/lib/dracut/modules.d/95rcraid/module-setup.sh
 
-    echo "==> regenerating initramfs (dracut -f)"
-    if ! dracut -f 2>&1 | sed 's/^/    /'; then
-        echo "ERROR: dracut FAILED — the initramfs does NOT contain rcraid." >&2
-        echo "       Do NOT reboot until 'dracut -f' succeeds (a full /boot" >&2
-        echo "       is the usual cause), then re-run this script or verify" >&2
-        echo "       with scripts/verify-boot-safety.sh." >&2
-        exit 1
-    fi
+    echo "==> regenerating initramfs (dracut -f --kver <kver>)"
+    for kver in "${KERNELS[@]}"; do
+        echo "    $kver"
+        if ! dracut -f --kver "$kver" 2>&1 | sed 's/^/      /'; then
+            echo "ERROR: dracut FAILED for $kver — that initramfs does NOT" >&2
+            echo "       contain rcraid.  Do NOT reboot into it until" >&2
+            echo "       'dracut -f --kver $kver' succeeds (a full /boot is" >&2
+            echo "       the usual cause), then re-run this script or verify" >&2
+            echo "       with scripts/verify-boot-safety.sh." >&2
+            exit 1
+        fi
+    done
 elif command -v update-initramfs >/dev/null 2>&1; then
     INITRAMFS_GENERATOR="initramfs-tools"
     echo "==> installing initramfs-tools hook"
@@ -407,14 +684,18 @@ elif command -v update-initramfs >/dev/null 2>&1; then
         "$SRC_DIR/packaging/initramfs-tools/hooks/rcraid" \
         /etc/initramfs-tools/hooks/rcraid
 
-    echo "==> regenerating initramfs (update-initramfs -u)"
-    if ! update-initramfs -u 2>&1 | sed 's/^/    /'; then
-        echo "ERROR: update-initramfs FAILED — the initramfs does NOT contain" >&2
-        echo "       rcraid.  Do NOT reboot until 'update-initramfs -u'" >&2
-        echo "       succeeds (a full /boot is the usual cause), then re-run" >&2
-        echo "       this script or verify with scripts/verify-boot-safety.sh." >&2
-        exit 1
-    fi
+    echo "==> regenerating initramfs (update-initramfs -u -k <kver>)"
+    for kver in "${KERNELS[@]}"; do
+        echo "    $kver"
+        if ! update-initramfs -u -k "$kver" 2>&1 | sed 's/^/      /'; then
+            echo "ERROR: update-initramfs FAILED for $kver — that initramfs" >&2
+            echo "       does NOT contain rcraid.  Do NOT reboot into it until" >&2
+            echo "       'update-initramfs -u -k $kver' succeeds (a full /boot" >&2
+            echo "       is the usual cause), then re-run this script or verify" >&2
+            echo "       with scripts/verify-boot-safety.sh." >&2
+            exit 1
+        fi
+    done
 else
     echo "==> no initramfs generator found (dracut / update-initramfs)"
     echo "    Skipping initramfs hook install.  The array will only be"
@@ -425,7 +706,7 @@ fi
 echo
 
 # ----------------------------------------------------------------------------
-# 5. Done.  Tell the user what happens next.
+# 7. Done.  Tell the user what happens next.
 # ----------------------------------------------------------------------------
 
 if grep -q '^rcraid ' /proc/modules; then
@@ -444,8 +725,10 @@ cat <<EOF
 
 What's installed:
   DKMS module    /usr/src/${PKG_NAME}-${PKG_VERSION}/
-                 /lib/modules/\$(uname -r)/updates/dkms/rcraid.ko
+                 /lib/modules/<kver>/updates/dkms/rcraid.ko, for:
+                 ${KERNELS[*]}
   Signing        ${SIGNING_SUMMARY}
+$([ ${#KERNELS_NO_HEADERS[@]} -gt 0 ] && echo "  WARNING        no driver built for: ${KERNELS_NO_HEADERS[*]}")
   Bind helper    /usr/sbin/rcraid-bind
   udev rule      /etc/udev/rules.d/50-rcraid.rules
                  (binds only devices carrying RAIDCore metadata)
