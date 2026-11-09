@@ -80,29 +80,39 @@ volume goes straight to `failed`; there is no reconstruction/rebuild path.
 
 ## 0. Trust gate
 
-- [ ] `dmesg | grep -i UNTRUSTED` contains **only** the expected
+- [x] `dmesg | grep -i UNTRUSTED` contains **only** the expected
       `RAID 5/6 is assembled READ-ONLY …` reason. Any capacity-mismatch or
-      unknown-chunk line is a bug — capture it.
+      unknown-chunk line is a bug — capture it. (2026-11-08: only the
+      read-only reason present.)
 
 ## 1. Level and geometry
 
-- [ ] `debugfs volume` reports `level: raid5` and `members: N`.
-- [ ] The parse line shows `devtype=0x1bf5`, `devices=N`, and
+- [x] `debugfs volume` reports `level: raid5` and `members: N`.
+- [x] The parse line shows `devtype=0x1bf5`, `devices=N`, and
       `capacity = UserDataSize × (N-1)`.
-- [ ] `blockdev --getsize64 /dev/rcraid0 / 512` equals that capacity.
-- [ ] The chunk resolves to a known stripe (index 1/2/3 → 64/128/256 KiB).
+- [x] `blockdev --getsize64 /dev/rcraid0 / 512` equals that capacity.
+- [x] The chunk resolves to a known stripe (index 1/2/3 → 64/128/256 KiB).
+
+All four above were checked on the 3-disk array, 2026-11-08: `level=raid5`,
+`members=3`, `devtype=0x1bf5`, `devices=3`, capacity `15,625,838,592`
+sectors, `chunk_idx=3` → 256 KiB.
 
 ## 2. Read path
 
-- [ ] `scripts/validate-raid5.sh` sampled reads pass at 0/25/50/75/100 % and
+- [x] `scripts/validate-raid5.sh` sampled reads pass at 0/25/50/75/100 % and
       are stable across a cache drop.
-- [ ] A write to `/dev/rcraid0` fails and the disk stays read-only.
-- [ ] No new `rcraid` I/O error / timeout / reset lines in dmesg.
+- [x] A write to `/dev/rcraid0` fails and the disk stays read-only.
+- [x] No new `rcraid` I/O error / timeout / reset lines in dmesg.
+
+All three were checked on 2026-11-08: 18 checks PASS. Note that the script's
+read-only-veto check could not pass before `6ced208` — `dmesg | grep -q` under
+`set -o pipefail` returns 141 from SIGPIPE, so it always reported "veto line
+not found". See the procedural note at the end of §3b.
 
 ## 3. Layout confirmation — answered from the vendor binary (issue #6)
 
 **The vendor placement is dedicated parity on the last member, not the
-rotating map this tree implements.** Read out of the DWARF-bearing
+rotating map this tree used to implement.** Read out of the DWARF-bearing
 `rcblob.x86_64` (SDK 9.3.0-00283); the derivation is in
 `docs/REVERSE_ENGINEERING.md` ("RAID 5/6 layout"):
 
@@ -115,10 +125,15 @@ rotating map this tree implements.** Read out of the DWARF-bearing
 
 `patch_parity_math.c` used to rotate (`parity_pos = (N-1) - (row % N)`), which
 disagreed with the vendor on two rows in three for `N=3`; it now implements the
-dedicated layout. The change is visible on the dev array: reloading the rebuilt
-module still assembles `optimal`, reads are stable, and the first 64 MiB hash
-changes (`7321098d…ed2a3` instead of `63bf7f7d…c83673`) because the staged
-fixture on the members was written with the old rotating map.
+dedicated layout. The change showed up on the dev array immediately: reloading
+the rebuilt module still assembled `optimal` and reads stayed stable, but the
+first 64 MiB hashed `7321098d…ed2a3` instead of the `63bf7f7d…c83673` the
+fixture had been written under, because that fixture sat on the members in the
+old rotating layout. Re-stamping it under the dedicated layout — 128 rows,
+member 0/1 alternating, member 2 the row XOR — brought the read back to
+`63bf7f7d…c83673`: the same logical bytes at a new physical placement, which is
+what §3b records. Do not read that round trip as corroboration of the vendor's
+write side; it only shows the driver's read path agrees with its own map.
 
 The layout is therefore **settled against the vendor implementation** — the
 arithmetic is AMD's own and no read, parity-lock or parity-memory path applies

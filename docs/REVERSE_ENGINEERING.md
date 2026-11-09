@@ -637,9 +637,10 @@ Still needing Ghidra investigation. Run via `scripts/ghidra/HuntBlockers.java`
      `3/2/other` as `0x200/0x100/0x80` sectors = 256/128/64 KiB.
 
    So the vendor layout is **dedicated parity on member `N-1`**, rows packed
-   at `row * chunk`. It is not the left-symmetric rotating map this port
-   implements (`parity_pos = (N-1) - (row % N)`, `patch_parity_math.c:230`),
-   which disagrees with the vendor on two rows out of three for `N=3`. The
+   at `row * chunk`. It is not the left-symmetric rotating map this port used
+   to implement (`parity_pos = (N-1) - (row % N)`), which disagreed with the
+   vendor on two rows out of three for `N=3`; that map was replaced on
+   2026-11-08, so `patch_parity_math.c` and the vendor now agree. The
    element table is not consulted for placement after all — the map is pure
    arithmetic.
 

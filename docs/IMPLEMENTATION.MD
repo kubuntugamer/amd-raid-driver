@@ -444,7 +444,7 @@ ORLM, COW, P2PDMA, io_uring, ZNS/FDP) are not on the daily-driver path at all.
 | Phase | Feature | Status (2026-11-08) | Enables |
 |---|---|---|---|
 | 0 | RAID 0 / 1 / 10 I/O + rebuild | ✅ RAID0 and RAID1 shipped and hardware-validated; RAID10 feature-complete, array-box run pending ([VALIDATION_RAID10.md](VALIDATION_RAID10.md)) | Production baseline |
-| 1 | RAID 5/6 I/O + rebuild | 🟡 Assembly + reads wired, forced read-only, writes refused; first firmware 3-disk RAID 5 metadata parsed 2026-11-08 (`0x1BF5`, N=3, `(N-1)` × user size), load/read run pending; placement unconfirmed (issue #6); no parity rebuild | Inspect and read existing parity arrays |
+| 1 | RAID 5/6 I/O + rebuild | 🟡 Assembly + reads wired, forced read-only, writes refused; first firmware 3-disk RAID 5 metadata parsed, assembled and read back 2026-11-08 (`0x1BF5`, N=3, `(N-1)` × user size); placement settled from the vendor core, corroboration pending (issue #6); no parity rebuild | Inspect and read existing parity arrays |
 | 2 | Metadata writer + TUI create | ⏳ Planned — leads the next-PR order: `mkmeta.py` writes RAID0/1 only, so the TUI's 10/5/6 choices stop at an error message | Create RAID 5/6 arrays |
 | 3 | OCE (Online Capacity Expansion) | 🗺️ Roadmap — this driver | Add drives online, restripe, grow FS |
 | 4 | ORLM (Online RAID Level Migration) | 🗺️ Roadmap — this driver | RAID 0↔5↔6↔10 online, zero host CPU |
@@ -491,16 +491,18 @@ rather than code.
    fixtures) or reduce the TUI to what the writer can produce. This is the
    gap between "the installer creates parity arrays" being true and it
    being a documented dead end.
-2. **Confirm the RAID5/6 on-disk placement** (issues #6 and #3) — the
-   read-only parity path assembles and reads, and a real 3-disk RAID 5 now
-   exists on the test box (`0x1BF5`, N=3, `(N-1)` × user size), but the
-   array was zeroed at creation. The dedicated-parity placement in
-   `src/patch_parity_math.c` is still unconfirmed against vendor-written data,
-   and the RAID6 Q generator still has to be swapped from GF(2⁸) to the
-   vendor's EVENODD (the algorithm itself is now settled — issue #3).
-   A staged fixture can prove the driver reads the documented map, but only data written through
-   RAIDXpert2/Windows can prove the firmware writes it. Everything downstream
-   is built on that assumption, so it gates trusting parity reads at all.
+2. **Corroborate the RAID5/6 on-disk placement** (issue #6) — the read-only
+   parity path assembles and reads, and a real 3-disk RAID 5 exists on the
+   test box (`0x1BF5`, N=3, `(N-1)` × user size), but the array was zeroed at
+   creation. The dedicated-parity placement in `src/patch_parity_math.c` is
+   taken from the vendor core rather than inferred, and the RAID6 Q generator
+   still has to be swapped from GF(2⁸) to the vendor's EVENODD (the algorithm
+   itself is settled — issue #3). A staged fixture can only show that the
+   driver reads the map it implements: re-stamped under the dedicated layout
+   on 2026-11-08 it round-trips byte-identically, which is self-consistency,
+   not corroboration. Only data written through RAIDXpert2/Windows can prove
+   the firmware writes that map, so until such data is read back, trusting a
+   vendor-written parity array rests on AMD's code rather than on observation.
 3. **RAID10 array-box run** — [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md)'s
    results table is empty and it is the only thing between a finished
    feature and promoting it in README/STATUS. Note the scope limit recorded

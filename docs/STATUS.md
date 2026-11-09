@@ -60,8 +60,9 @@ re-assembles as if in sync; needs config-ring writer RE), **RAID10 hardware
 validation** (the level is feature-complete; the array-box run in
 [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) is what's missing), RAID5/6
 **write** dispatch (parity volumes assemble and read today, read-only; the
-first firmware-created 3-disk RAID 5 is now on the test box and its metadata
-parses as `0x1BF5`, but the module load/read run is pending),
+first firmware-created 3-disk RAID 5 is now on the test box, its metadata
+parses as `0x1BF5`, and the module load/read run is done — the volume
+assembles `optimal`, serves reads and is forced read-only),
 hot-plug/rebuild, SMART pass-through,
 multi-volume, Secure Boot signing out of the box, array creation from Linux
 beyond RAID0/RAID1 (the live installer now stamps real RAIDCore metadata for
@@ -111,10 +112,12 @@ been implemented, it's marked.
   box: signs/loads the module, binds the members (restoring them on an
   `insmod` failure), and verifies a staged 64 MiB ext4 fixture whose rows
   carry `P = D0 XOR D1`. The fixture was written directly to the members,
-  reconstructed byte-for-byte, and `e2fsck`-checked. **Not yet run against a
-  loaded driver on this box:** Secure Boot rejected the unsigned test module
-  (`Key was rejected by service`); a local MOK key is signed and queued for
-  enrollment, which needs one reboot.
+  reconstructed byte-for-byte, and `e2fsck`-checked. **Superseded later the
+  same day:** when this was written the script had not run against a loaded
+  driver, because Secure Boot rejected the unsigned test module (`Key was
+  rejected by service`) and the MOK key still needed enrollment. That key is
+  now enrolled, the module loads, and both scripts have run against the loaded
+  driver — see the live-array and map entries below.
 - **`rc_ld_level_from()` never mapped firmware's RAID1 encoding.** Real
   firmware writes `DeviceType 0x1BF6` with `FirstCount=1 SecondCount=2` for a
   2-way mirror (see `rc_linux.h`), but the `0x1BF6` arm only mapped
@@ -205,13 +208,13 @@ been implemented, it's marked.
   dedicated layout — and passes. Live check on the dev array: rebuilt module
   loads signed, assembles `optimal`, reads are stable, and the first 64 MiB
   hashes `7321098d…ed2a3` instead of the rotating-map `63bf7f7d…c83673`,
-  confirming the new map is the one in the data path. The staged fixture was
-  then re-stamped under the dedicated layout — member 0/1 hold alternating
-  chunks, member 2 holds the row XOR — and the first 64 MiB read back
-  byte-identical (`63bf7f7d…c83673`), with the ext4 filesystem mounting
-  read-only and every file checksum matching. That makes the read path
-  self-consistent with the map the code implements; it still cannot
-  discriminate against a vendor-written array (issue #6).
+  which is the new map showing up in the data path. The fixture was then
+  re-stamped under the dedicated layout — member 0/1 hold alternating chunks,
+  member 2 the row XOR — and the first 64 MiB read back byte-identical to the
+  logical image again (`63bf7f7d…c83673`: same bytes, new placement), with the
+  ext4 filesystem mounting read-only and every file checksum matching. That
+  makes the read path self-consistent with the map the code implements; it
+  still cannot discriminate against a vendor-written array (issue #6).
 
 ## 2026-10-07 — X399 fixtures verified; RAID10 pair convention settled
 
@@ -834,9 +837,10 @@ single hung command or transient fault without intervention.
   member *and* the same row, so the second overwrites the first. The map now
   rotates parity per **row** and packs densely (`row * chunk + offset`),
   which matches the `(N-1)` / `(N-2)` × per-member capacity the LD record
-  reports. `test_parity` grew a packing check
-  (one chunk per member per row, rows contiguous, no holes) that fails on both
-  earlier versions.
+  reports — superseded later the same day by the dedicated-parity map
+  described under issue #6 above, which drops the row term entirely.
+  `test_parity` grew a packing check (one chunk per member per row, rows
+  contiguous, no holes) that fails on both earlier versions.
 - **RAID 5/6 metadata was rejected by `rc_ld_level_from`, and RAID 6 N=4 was
   misparsed as RAID 10** (issue #3) — **fixed 2026-11-08.** A parity level is
   now identified from its explicit `DeviceType` only (`0x1BF5` RAID5, `0x1BFA`
