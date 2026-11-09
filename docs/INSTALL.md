@@ -156,11 +156,16 @@ Three things to know:
 - It detects the array by **subsystem vendor** (the same logic the
   installers use — the vendor with ≥ 2 devices behind `1022:b000`) and
   unbinds **only** devices matching that vendor. The same vendor is
-  passed to `insmod` as `safe_subsys_vendor=`, so the driver itself
-  refuses any non-member device too.
+  passed to `insmod` as `safe_subsys_vendor=`. Treat that as a coarse
+  filter only: when every drive comes from one OEM the value matches the
+  OS disk as well and discriminates nothing (issue #8).
 - Independently of the vendor filter, it resolves which PCI device(s)
   back the running root filesystem and **refuses to unbind them under
   any circumstances** — whatever brand your OS drive is.
+- The packaged udev rule does not rely on the vendor at all: it fires on
+  the namespace and `rcraid-bind` only proceeds when the RAIDCore
+  metadata at LBA `0x5000` is present, which a non-member disk does not
+  have.
 - It does no writes against the RAID volume: its checks are read-only,
   and it loads the driver without `enable_writes=1`, so the volume
   itself is read-only for the whole run.
@@ -211,36 +216,46 @@ unattended-upgrades never installs a kernel behind your back.
 
 ### Secure Boot: `insmod` fails with `Key was rejected by service`
 
-Secure Boot is enabled. `rcraid.ko` is unsigned, so the lockdown kernel
-refuses to load it (`dmesg` shows `Loading of unsigned module is
-rejected`). Both installers (`install-livecd.sh` and `install-dkms.sh`)
-check for this up front and abort with instructions before building
-anything. Watch out for BIOS resets (CMOS clear, firmware update,
-"load optimized defaults"): they silently re-enable Secure Boot.
+Secure Boot is enabled and the module is unsigned, so the lockdown kernel
+refuses it (`dmesg` shows `Loading of unsigned module is rejected`).
+This usually appears right after a BIOS reset (CMOS clear, firmware
+update, "load optimized defaults") — all of which silently re-enable
+Secure Boot.
 
-**Fix: disable Secure Boot in BIOS setup — and keep it off.** DKMS
-rebuilds the module unsigned on every kernel update, so re-enabling
-Secure Boot later stops the array from coming up at boot; if the OS
-lives on the array, the machine won't boot at all.
+**Fix: sign the module with an enrolled Machine Owner Key**, or turn
+Secure Boot off.
 
-If you must run with Secure Boot on, sign the module with your own
-Machine Owner Key and bypass the installer check with
-`RCRAID_ALLOW_SECURE_BOOT=1`:
+`install-dkms.sh` handles the signing path. It looks for a key pair in
+`/var/lib/shim-signed/mok/` (Debian/Ubuntu's shim key) or
+`/var/lib/dkms/`, confirms the certificate is actually enrolled in MOK
+(matching on the SHA-1, since several keys can share a subject), writes
+`/etc/dkms/framework.conf.d/rcraid-signing.conf` so DKMS signs every
+build — including the automatic rebuilds on kernel updates — and then
+verifies the signature of what it installed. With Secure Boot enforcing
+and no enrolled key it aborts up front instead of leaving an unbootable
+machine. Override the search with `RCRAID_MOK_KEY=` / `RCRAID_MOK_CERT=`.
+
+To create a key from scratch (one-time; costs one reboot):
 
 ```bash
-# One-time: create and enrol a signing key.
 openssl req -new -x509 -newkey rsa:2048 -nodes -days 36500 \
     -subj "/CN=rcraid module signing/" \
     -keyout MOK.priv -outform DER -out MOK.der
 sudo mokutil --import MOK.der   # set a one-time password; on the next
                                 # reboot the MOK manager prompts you to
                                 # enrol the key with that password
+```
 
-# After every build (including every DKMS rebuild), sign the module the
-# kernel actually loads — DKMS installs it under updates/dkms, not the
-# build directory you happen to be standing in:
-MODULE="/lib/modules/$(uname -r)/updates/dkms/rcraid.ko"
+Keep `MOK.priv` and `MOK.der` somewhere permanent: an enrolled
+certificate whose private key is gone cannot sign anything, and the
+enrolment cannot be reused. Put them in `/var/lib/shim-signed/mok/` to
+have `install-dkms.sh` find them automatically.
 
+A plain `make` build (outside DKMS) is not signed for you, so that path
+still needs one step per build:
+
+```bash
+MODULE="./rcraid.ko"
 # Debian/Ubuntu header layout:
 sudo "/usr/src/linux-headers-$(uname -r)/scripts/sign-file" \
     sha256 MOK.priv MOK.der "$MODULE"
@@ -248,15 +263,17 @@ sudo "/usr/src/linux-headers-$(uname -r)/scripts/sign-file" \
 sudo "/usr/src/kernels/$(uname -r)/scripts/sign-file" \
     sha256 MOK.priv MOK.der "$MODULE"
 
-# If the OS boots from the array, the initramfs carries its own copy of
-# the module — regenerate it so the copy loaded at boot is the signed one:
-sudo update-initramfs -u    # Debian/Ubuntu
-sudo dracut -f              # Fedora/RHEL
+modinfo -F signer "$MODULE"    # must name your key
 ```
 
-Automatic signing of DKMS rebuilds (the dkms `sign_tool` hook) is not
-wired up yet, so each kernel update needs a manual re-sign — which is
-why disabling Secure Boot remains the supported path.
+If the OS boots from the array, the initramfs carries its own copy of
+the module — regenerate it so the copy loaded at boot is the signed one
+(`sudo update-initramfs -u`, or `sudo dracut -f`).
+
+Because the DKMS tree is separate from the build directory, the module
+the kernel actually loads for an installed driver is
+`/lib/modules/$(uname -r)/updates/dkms/rcraid.ko` — signing `./rcraid.ko`
+only affects a hand-loaded module.
 
 ### Driver builds but `lspci` shows the device with no driver bound
 

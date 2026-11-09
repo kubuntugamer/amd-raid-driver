@@ -14,6 +14,12 @@
 # one byte, 1 = enforcing.  No efivarfs entry at all means a BIOS/CSM boot,
 # where Secure Boot doesn't exist.
 #
+# The 5 bytes must be read from offset 0: efivarfs does not support seeking,
+# so `od -j4` (and `dd skip=4`) fail with "Illegal seek" / "cannot skip past
+# end of combined input" on every real efivar, which would make every probe
+# take the fail-closed path below and report Secure Boot as enforcing even on
+# machines that have it switched off.
+#
 # A variable that exists but can't be read (firmware EIO quirks happen on
 # real boards) — or reads back empty/truncated, which od reports as SUCCESS
 # with no output — FAILS CLOSED: assume enforcing, warn, and let the user
@@ -24,17 +30,19 @@
 # RCRAID_EFIVARS_DIR overrides the efivarfs path (for tests only).
 
 secure_boot_enforcing() {
-    local var byte
+    local var byte raw
     for var in "${RCRAID_EFIVARS_DIR:-/sys/firmware/efi/efivars}"/SecureBoot-*; do
         [ -e "$var" ] || break
-        # Deliberately NOT `od | tr`: a pipeline reports the last command's
-        # exit status, so tr would mask an od read failure unless pipefail
-        # happened to be inherited from the sourcing script.
-        if ! byte=$(od -An -tu1 -j4 -N1 "$var" 2>/dev/null); then
+        # Read attributes + data in one go and take the 5th field; see the
+        # seek note above.  The read is kept out of a pipeline so its exit
+        # status survives: `od | awk` would report awk's status and turn a
+        # failed read into an empty value instead of the unreadable warning.
+        if ! raw=$(od -An -tu1 -N5 "$var" 2>/dev/null); then
             echo "WARN: SecureBoot EFI variable exists but can't be read — assuming" >&2
             echo "      Secure Boot is ENFORCING (override: RCRAID_ALLOW_SECURE_BOOT=1)" >&2
             return 0
         fi
+        byte=$(printf '%s\n' "$raw" | awk '{print $5}')
         byte="${byte//[[:space:]]/}"
         if [ -z "$byte" ]; then
             echo "WARN: SecureBoot EFI variable exists but is empty/truncated — assuming" >&2

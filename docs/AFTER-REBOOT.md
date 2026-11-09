@@ -87,18 +87,47 @@ sudo dmesg | grep -i rcraid           # should be silent
 Linux cannot see the array until `rcraid` is loaded; the volumes only appear
 after the module parses the firmware metadata.
 
-Confirm the signing key survived the array creation. It was enrolled before
-this reboot (`CN=minerva Secure Boot Module Signature key`); a BIOS reset can
-clear MOK, so re-check rather than assume:
+### 3a. MOK first — it costs a reboot, so settle it before step 4
+
+An unsigned `rcraid.ko` is not loadable with Secure Boot enforcing, and
+enrolment only completes inside the MOK manager on the **next** boot. So this
+is the first thing to resolve after the reboot, not something to discover when
+`insmod` fails. A BIOS reset or CMOS clear silently wipes MOK, so re-check
+rather than assume:
 
 ```bash
-mokutil --sb-state
-mokutil --list-enrolled | grep -i minerva     # expect a SHA1 line + subject
+mokutil --sb-state                            # "SecureBoot enabled"/"disabled"
+mokutil --list-new | grep -iE "subject|minerva" # queued, not yet enrolled
+mokutil --list-enrolled | grep -i minerva      # expect a SHA1 line + subject
 ```
 
-If it is absent, the driver cannot load with Secure Boot on:
-`sudo mokutil --import /var/lib/shim-signed/mok/MOK.der`, set a one-time
-password, reboot and complete the MOK manager prompt, then resume at step 4.
+Pick the branch that matches:
+
+- **Queued** (`--list-new` has entries): reboot now, *Enroll MOK* → *Continue* →
+  the one-time password, then reboot again and resume at §3. The pending entry
+  was imported earlier; nothing needs to be regenerated.
+- **Enrolled, and `/var/lib/shim-signed/mok/MOK.priv` matches it** (the installed
+  OS, where the key is `CN=minerva Secure Boot Module Signature key`): no
+  action — sign with those two paths in step 4.
+- **Neither**: create a key and enrol it. Store it where it survives the reboot
+  — a live session's `/tmp` or overlay does not, and an enrolled certificate
+  whose private key is gone cannot sign anything, which strands the module for
+  good:
+
+  ```bash
+  KEYDIR=/mnt/usb/mok          # any path on persistent storage
+  mkdir -p "$KEYDIR" && cd "$KEYDIR"
+  openssl req -new -x509 -newkey rsa:2048 -nodes -days 36500 \
+      -subj "/CN=rcraid module signing $(date +%Y-%m-%d)/" \
+      -keyout MOK.priv -outform DER -out MOK.der
+  sudo mokutil --import MOK.der    # set a one-time password
+  ```
+
+  Reboot, *Enroll MOK* → *Continue* → password, reboot again. Then sign in
+  step 4 with `"$KEYDIR"/MOK.priv` and `"$KEYDIR"/MOK.der`.
+
+Check the result before moving on — `modinfo -F signer ./rcraid.ko` should name
+the key, and `dmesg | grep -i "key was rejected"` must stay empty after load.
 
 ## 4. Build, sign, load
 
@@ -110,6 +139,15 @@ sudo "/usr/src/linux-headers-$(uname -r)/scripts/sign-file" sha256 \
     /var/lib/shim-signed/mok/MOK.priv /var/lib/shim-signed/mok/MOK.der \
     rcraid.ko
 
+Use the paths belonging to whichever key §3a ended up with — signing with a
+cert that is not enrolled leaves the module unloadable with the same
+`Key was rejected by service`. Verify before loading:
+
+```bash
+modinfo -F signer ./rcraid.ko      # must name the enrolled key
+```
+
+```bash
 sudo insmod ./rcraid.ko
 lsblk
 sudo dmesg | tail -40
@@ -247,6 +285,12 @@ block device appears. `/dev/nvme2n1p2` never exists, so `pivot_root` fails.
 Recovery is a live USB or a GRUB `modprobe.blacklist=rcraid` edit.
 
 Binding by hand (step 4) is the same operation, scoped to three BDFs, run after
-the OS is already up. The fix that makes the initramfs path safe is a
-serial/BDF allowlist in the rule and in `rcraid-bind`, not a config tweak —
-track it in `docs/IMPLEMENTATION.MD`.
+the OS is already up.
+
+The fix that makes the initramfs path safe is now in `rcraid-bind` (issue #8):
+the udev rule fires on the namespace rather than the PCI function, and the
+helper reads the RAIDCore metadata at LBA `0x5000` — present on members,
+absent on every other `1022:b000` disk, including this box's OS drive — before
+touching `driver_override` or `nvme`. It also refuses a namespace that is
+mounted. Re-check `mokutil`/signing first, but this removes the reason to keep
+the initramfs hook uninstalled.

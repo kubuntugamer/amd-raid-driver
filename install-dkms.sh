@@ -37,30 +37,113 @@ for tool in lspci dkms udevadm; do
     fi
 done
 
-# Secure Boot preflight — rcraid.ko is unsigned, so an enforcing kernel
-# refuses to load it ("Key was rejected by service").  Without this check the
-# install itself would look successful and the failure would only surface at
-# the next boot, with the array absent.  Detection is shared with
-# install-livecd.sh and fails closed on an unreadable variable.
+# Secure Boot / module signing preflight.
+#
+# An enforcing kernel refuses an unsigned module ("Key was rejected by
+# service"), and the failure surfaces only at the next boot, with the array
+# absent.  DKMS signs every module it builds (/usr/sbin/dkms prepare_signing)
+# once it knows which key to use, so the work here is:
+#   1. find a key pair that is BOTH on disk and enrolled in MOK,
+#   2. point DKMS at it, including for every future kernel update,
+#   3. verify after the build that the installed module really is signed.
+# Step 3 is what keeps kernel updates bootable: a rebuild that silently lost
+# the key must fail here, not on an unbootable machine.
 . "$SRC_DIR/scripts/lib/secure-boot.sh"
 
-if [ "${RCRAID_ALLOW_SECURE_BOOT:-0}" != 1 ] && secure_boot_enforcing; then
-    cat >&2 <<'EOF'
-ERROR: Secure Boot is enabled.
+# Not `func && VAR=1`: under `set -e` a false return would abort the script.
+SB_ENFORCING=0
+if secure_boot_enforcing; then
+    SB_ENFORCING=1
+fi
 
-rcraid.ko is unsigned, so the kernel will refuse to load it (insmod:
+# Resolve the key pair.  Order: explicit override, then the shim key that
+# update-secureboot-policy creates on Debian/Ubuntu, then DKMS's own default.
+MOK_KEY="${RCRAID_MOK_KEY:-}"
+MOK_CERT="${RCRAID_MOK_CERT:-}"
+if [ -z "$MOK_KEY" ] || [ -z "$MOK_CERT" ]; then
+    for pair in "/var/lib/shim-signed/mok/MOK.priv:/var/lib/shim-signed/mok/MOK.der" \
+                "/var/lib/dkms/mok.key:/var/lib/dkms/mok.pub"; do
+        cand_key="${pair%%:*}"
+        cand_cert="${pair#*:}"
+        if [ -f "$cand_key" ] && [ -f "$cand_cert" ]; then
+            MOK_KEY="$cand_key"
+            MOK_CERT="$cand_cert"
+            break
+        fi
+    done
+fi
+
+# Is this certificate trusted by the firmware?  Match on the SHA-1 hash, not
+# the subject: subjects are free text and stale keys sharing a CN are common.
+mok_enrolled() {
+    local fp
+    fp=$(openssl x509 -inform DER -in "$1" -noout -fingerprint -sha1 2>/dev/null \
+        | sed 's/.*=//' | tr -d ':' | tr 'A-Z' 'a-z')
+    [ -n "$fp" ] || return 1
+    mokutil --list-enrolled 2>/dev/null | tr -d ':' | tr -d ' \n' \
+        | tr 'A-Z' 'a-z' | grep -q "$fp"
+}
+
+SIGNING=0
+if [ -n "$MOK_KEY" ] && [ -n "$MOK_CERT" ] \
+   && [ -f "$MOK_KEY" ] && [ -f "$MOK_CERT" ]; then
+    if command -v mokutil >/dev/null 2>&1 && mok_enrolled "$MOK_CERT"; then
+        SIGNING=1
+    else
+        echo "WARN: found a signing key at $MOK_CERT but it is not enrolled in MOK." >&2
+        echo "      Modules signed with it will still be rejected under Secure Boot." >&2
+        echo "      Enrol it: sudo mokutil --import $MOK_CERT   (set a one-time" >&2
+        echo "      password, reboot, complete the MOK manager prompt)." >&2
+    fi
+fi
+
+if [ "$SB_ENFORCING" = 1 ] && [ "$SIGNING" = 0 ] \
+   && [ "${RCRAID_ALLOW_SECURE_BOOT:-0}" != 1 ]; then
+    cat >&2 <<'EOF'
+ERROR: Secure Boot is enabled and no enrolled signing key was found.
+
+rcraid.ko would be unsigned, so the kernel refuses to load it (insmod:
 "Key was rejected by service"; dmesg: "Loading of unsigned module is
 rejected").  Installing now would look successful but leave the array
 absent after the next reboot.
 
-Disable Secure Boot in BIOS setup and re-run this script — and keep it
-off: DKMS rebuilds on every kernel update are just as unsigned.
+Either disable Secure Boot in BIOS setup, or create and enrol a Machine
+Owner Key first (DKMS signs with it automatically from then on):
 
-If you sign the module and enrol a MOK yourself, re-run with
-RCRAID_ALLOW_SECURE_BOOT=1.  See INSTALL.md ("Secure Boot") for the
-signing procedure and its DKMS caveat.
+  sudo openssl req -new -x509 -newkey rsa:2048 -nodes -days 36500 \
+      -subj "/CN=rcraid module signing/" \
+      -keyout MOK.priv -outform DER -out MOK.der
+  sudo mokutil --import MOK.der
+  # set a one-time password, reboot, complete the MOK manager prompt
+
+Keep MOK.priv somewhere permanent — a key whose private half is lost cannot
+sign anything, and the enrolled certificate cannot be reused.  Then re-run
+this script; it verifies the signature of what DKMS installed.
+
+Override with RCRAID_ALLOW_SECURE_BOOT=1 if you have signed the module by
+hand (see INSTALL.md, "Secure Boot").
 EOF
     exit 1
+fi
+
+# Tell DKMS which key to sign with, so kernel-update rebuilds inherit it.
+if [ "$SIGNING" = 1 ]; then
+    if grep -q 'framework.conf.d' /usr/sbin/dkms 2>/dev/null; then
+        install -d /etc/dkms/framework.conf.d
+        cat > /etc/dkms/framework.conf.d/rcraid-signing.conf <<EOF
+# Written by rcraid install-dkms.sh.  DKMS sources this when signing, so every
+# rebuild — including automatic ones on kernel updates — is signed with the
+# key the firmware trusts.
+mok_signing_key="$MOK_KEY"
+mok_certificate="$MOK_CERT"
+EOF
+        chmod 0644 /etc/dkms/framework.conf.d/rcraid-signing.conf
+        echo "==> DKMS signing configured ($MOK_KEY)"
+    else
+        echo "WARN: this DKMS does not read /etc/dkms/framework.conf.d; signing" >&2
+        echo "      relies on the distribution default key." >&2
+    fi
+    echo
 fi
 
 echo "==> rcraid install-dkms.sh  (driver ${DRIVER_VERSION}, dkms package ${PKG_NAME}-${PKG_VERSION})"
@@ -70,9 +153,13 @@ echo
 # 1. Detect array subsystem_vendor.
 #
 # The AMD chipset reports every downstream NVMe as PCI 1022:b000, including
-# the OS drive.  Subsystem vendor is the only reliable way to tell members
-# apart.  Heuristic: pick the vendor that has >= 2 devices.  If there's a
-# tie, list them and let the user pick.
+# the OS drive.  Subsystem vendor used to be the only way to tell members
+# apart, but on a single-vendor box (every drive from the same OEM) it is
+# identical for all of them and separates nothing — issue #8.  The value is
+# still rendered into the modprobe drop-in as a coarse filter, while the
+# binding decision that actually matters is made on the RAIDCore metadata in
+# rcraid-bind.  Heuristic here: pick the vendor that has >= 2 devices.  If
+# there's a tie, list them and let the user pick.
 # ----------------------------------------------------------------------------
 
 declare -A vendor_count
@@ -132,6 +219,36 @@ else
     done
     SUBSYSTEM_VENDOR="${candidates[$((choice - 1))]}"
 fi
+
+# Warn when the filter cannot discriminate: on these boxes safe_subsys_vendor
+# matches the drive carrying / just as well as the members, so relying on it
+# would be relying on nothing.
+ROOT_BDF=""
+ROOT_SRC="$(findmnt -no SOURCE / 2>/dev/null || true)"
+if [ -n "$ROOT_SRC" ] && [ -b "$ROOT_SRC" ]; then
+    while read -r kname ktype; do
+        [ "$ktype" = disk ] || continue
+        [ -n "$kname" ] || continue
+        link=$(readlink -f "/sys/block/$kname/device" 2>/dev/null) || continue
+        case "$link" in
+            */nvme/*)
+                ROOT_BDF="${link%/nvme/*}"
+                ROOT_BDF="${ROOT_BDF##*/}"
+                break
+                ;;
+        esac
+    done < <(lsblk -nrso KNAME,TYPE "$ROOT_SRC" 2>/dev/null)
+fi
+
+if [ -n "$ROOT_BDF" ] && [ -r "/sys/bus/pci/devices/$ROOT_BDF/subsystem_vendor" ] \
+   && [ "$(cat "/sys/bus/pci/devices/$ROOT_BDF/subsystem_vendor")" = "$SUBSYSTEM_VENDOR" ]; then
+    echo
+    echo "NOTE: the drive backing / ($ROOT_BDF) reports the same subsystem_vendor"
+    echo "      ($SUBSYSTEM_VENDOR) as the array, so safe_subsys_vendor cannot tell"
+    echo "      them apart.  That is normal on a single-vendor box: the udev rule"
+    echo "      and rcraid-bind gate on RAIDCore metadata at LBA 0x5000 instead and"
+    echo "      leave this drive bound to nvme."
+fi
 echo
 
 # ----------------------------------------------------------------------------
@@ -187,6 +304,56 @@ dkms build -m "$PKG_NAME" -v "$PKG_VERSION" --force 2>&1 | sed 's/^/    /'
 echo "==> dkms install"
 dkms install -m "$PKG_NAME" -v "$PKG_VERSION" --force 2>&1 | sed 's/^/    /'
 echo
+
+# ----------------------------------------------------------------------------
+# 2b. Prove what DKMS installed is actually signed.
+#
+# DKMS signs during build, but a missing/unreadable key makes it print a
+# warning and carry on with an unsigned module.  Under Secure Boot that is
+# only visible at the next boot, as a missing array — so check here instead.
+# ----------------------------------------------------------------------------
+
+if [ "$SIGNING" = 1 ] || [ "$SB_ENFORCING" = 1 ]; then
+    echo "==> verifying module signatures"
+    UNSIGNED=0
+    for ko in /lib/modules/*/updates/dkms/${PKG_NAME}.ko*; do
+        [ -e "$ko" ] || continue
+        # <ko> is .../<kver>/updates/dkms/<name>.ko[.zst] — climb three levels.
+        KVER="$(basename "$(dirname "$(dirname "$(dirname "$ko")")")")"
+        SIGNER="$(modinfo -F signer "$ko" 2>/dev/null || true)"
+        if [ -n "$SIGNER" ]; then
+            echo "    $KVER: signed by $SIGNER"
+        else
+            echo "    $KVER: UNSIGNED ($ko)" >&2
+            UNSIGNED=1
+        fi
+    done
+
+    if [ "$UNSIGNED" = 1 ]; then
+        # RCRAID_ALLOW_SECURE_BOOT=1 means "I sign these myself": warn rather
+        # than undo the install the user explicitly asked for.
+        if [ "$SB_ENFORCING" = 1 ] && [ "${RCRAID_ALLOW_SECURE_BOOT:-0}" != 1 ]; then
+            echo >&2
+            echo "ERROR: at least one installed ${PKG_NAME} module is unsigned while" >&2
+            echo "       Secure Boot is enforcing — the kernel will reject it and the" >&2
+            echo "       array will be missing at the next boot." >&2
+            echo "       Re-sign by hand (INSTALL.md, \"Secure Boot\") then re-run" >&2
+            echo "       scripts/verify-boot-safety.sh.  Do not reboot yet." >&2
+            exit 1
+        fi
+        echo "WARN: unsigned module(s) installed." >&2
+        if [ "$SB_ENFORCING" = 1 ]; then
+            echo "      Secure Boot is enforcing and RCRAID_ALLOW_SECURE_BOOT=1 was" >&2
+            echo "      given, so signing is left to you: sign each module listed" >&2
+            echo "      above before rebooting (INSTALL.md, \"Secure Boot\"), then" >&2
+            echo "      run scripts/verify-boot-safety.sh." >&2
+        else
+            echo "      Harmless while Secure Boot is off, fatal the moment it is" >&2
+            echo "      switched back on." >&2
+        fi
+    fi
+    echo
+fi
 
 # ----------------------------------------------------------------------------
 # 3. Lay down the udev rule, helper, and modprobe drop-in.
@@ -295,9 +462,10 @@ cat <<EOF
 What's installed:
   DKMS module    /usr/src/${PKG_NAME}-${PKG_VERSION}/
                  /lib/modules/\$(uname -r)/updates/dkms/rcraid.ko
+  Signing        $([ "$SIGNING" = 1 ] && echo "DKMS signs with ${MOK_KEY} on every rebuild" || echo 'none — module is unsigned (Secure Boot must stay off)')
   Bind helper    /usr/sbin/rcraid-bind
   udev rule      /etc/udev/rules.d/50-rcraid.rules
-                 (filters on subsystem_vendor=$SUBSYSTEM_VENDOR)
+                 (binds only devices carrying RAIDCore metadata)
   modprobe conf  /etc/modprobe.d/rcraid.conf
                  (enable_writes=1, safe_subsys_vendor=$SUBSYSTEM_VENDOR)
   initramfs      ${INITRAMFS_GENERATOR:-<none — boot-from-RAID disabled>}

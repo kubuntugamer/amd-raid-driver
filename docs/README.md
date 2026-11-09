@@ -141,15 +141,19 @@ Two things protect your data and your OS install. Understand both:
    writes.
 
 2. **Your OS drive can masquerade as an array member.** The AMD chipset
-   shadows every NVMe as PCI `1022:b000`, including your boot SSD. The
-   driver refuses to touch a disk whose `subsystem_vendor` doesn't match
-   the array (the `safe_subsys_vendor` parameter), and the install
-   scripts set this for you — but if you bind drives by hand, **never
-   unbind your OS drive.** Identify members by their `Subsystem:` line
-   (Crucial vs. Samsung vs. WD, etc.).
+   shadows every NVMe as PCI `1022:b000`, including your boot SSD.
+   `rcraid-bind` therefore reads the RAIDCore metadata at LBA `0x5000`
+   first and only hands the device over if it is a real member — firmware
+   writes that header on members and nowhere else, so the check holds even
+   when every drive is the same OEM and reports the same
+   `subsystem_vendor` (issue #8). The helper also refuses any device whose
+   namespace is currently mounted. If you bind drives by hand, **never
+   unbind your OS drive**, and identify members by serial rather than by
+   slot or model string.
 
-Also note: the module is **unsigned**, so **Secure Boot must be off**
-(or you sign the module yourself and enrol the key — see `INSTALL.md`).
+Also note: the module is built **unsigned**. `install-dkms.sh` signs it
+through DKMS when an enrolled MOK key is available, and verifies the
+result; without such a key, **Secure Boot must be off** (see `INSTALL.md`).
 Both installers check this up front and tell you exactly what to do.
 
 ---
@@ -160,7 +164,7 @@ Both installers check this up front and tell you exactly what to do.
 
 - BIOS in RAID mode, array already created in RAIDXpert (see `INSTALL.md`
   for the one-time BIOS setup).
-- Secure Boot disabled.
+- Secure Boot disabled, or an enrolled MOK key for DKMS to sign with.
 - Kernel **≥ 6.15** (on Ubuntu 24.04 that means the HWE stack, 6.17+ —
   the 6.8 GA kernel is too old).
 - `sudo apt install build-essential linux-headers-$(uname -r)`
@@ -309,7 +313,9 @@ Full setup, troubleshooting, and the Secure-Boot / signing details are in
   claimed**; the AHCI path is unimplemented, so those devices stay bound to
   `ahci` (see #7).
 - **No array management** — create/modify the array in BIOS/RAIDXpert.
-- **No Secure Boot signing** out of the box.
+- **Signing is installer-driven** — `install-dkms.sh` signs via DKMS when an
+  enrolled MOK key exists (including on kernel-update rebuilds); a plain
+  `make` build stays unsigned.
 - **No retry of transient NVMe errors** — a failed command surfaces as an
   I/O error (`BLK_STS_IOERR`) even when the drive reports it as retryable
   (DNR=0); it isn't re-dispatched. Controller-level failures still trigger
