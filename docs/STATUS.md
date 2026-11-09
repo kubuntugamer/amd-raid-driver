@@ -121,6 +121,21 @@ been implemented, it's marked.
   than a silent read-only disk. The fake `mknod` “sandbox” device node that
   used to paper over a missing `/dev/rcraid0` is gone; that now fails with the
   dmesg/lspci commands to run.
+- **Phase 2 of the live installer now leaves the same footprint as
+  `install-dkms.sh`.** It was missing the apt kernel-hold
+  (`52-rcraid-kernel-hold`), so on a machine booting from the array an
+  unattended kernel update could rebuild the module with nobody watching, and
+  it did not stamp `.rcraid_rev`, so a target-built module reported its source
+  as `unknown`. Both are installed now, before `update-initramfs` runs.
+  Checked the hook against a real initramfs-tools 0.151 build (Ubuntu 25.10+ /
+  Kubuntu 26.10, the distro this installer targets): the regenerated image
+  carries `usr/lib/modules/<kver>/updates/dkms/rcraid.ko.zst`, the udev rule
+  (both `/etc/udev` and `/usr/lib/udev`), `modprobe.d/rcraid.conf`,
+  `/usr/sbin/rcraid-bind` and its `dd`/`od` helpers. The hook needs no change
+  for that release — `manual_add_modules` now queues and `apply_add_modules`
+  copies, and mkinitramfs calls the latter after the hooks. Note for anyone
+  auditing this by hand: `/boot/initrd.img-*` is mode 0600, so `lsinitramfs`
+  must run as root — `verify-boot-safety.sh` already does.
 - **Installers repaired for the restructured tree.** Both scripts still
   described the pre-`e4695ce` layout: a root `VERSION` file (deleted), `rc_*.c`
   at the repo root (they live under `src/`) and an `@PKGVER@` placeholder that

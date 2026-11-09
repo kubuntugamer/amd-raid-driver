@@ -311,6 +311,11 @@ done
 if [ -f "$SRC_DIR/docs/VERSION" ]; then
     cp "$SRC_DIR/docs/VERSION" "$TGT_SRC/VERSION"
 fi
+# Same build-revision stamp install-dkms.sh writes, so a module built here can
+# be matched back to the source it came from (the target tree has no .git).
+if _rev=$(git -C "$SRC_DIR" describe --always --dirty 2>/dev/null); then
+    echo "$_rev" > "$TGT_SRC/.rcraid_rev"
+fi
 sed -i "s/@PKGVER@/${TGT_VER}/g" "$TGT_SRC/dkms.conf"
 
 # Ask now, while there is someone to ask: Secure Boot is off at this point (see
@@ -400,6 +405,10 @@ sed "s/@SUBSYSTEM_VENDOR@/$SUBSYS/g" \
     /tmp/pkg/packaging/modprobe.d/rcraid.conf.in > /etc/modprobe.d/rcraid.conf
 install -m 0755 /tmp/pkg/packaging/initramfs-tools/hooks/rcraid \
     /etc/initramfs-tools/hooks/rcraid
+# Hold kernel packages out of unattended-upgrades: a kernel update that
+# silently broke the DKMS build is an unbootable system when / lives here.
+install -m 0644 /tmp/pkg/packaging/apt.conf.d/52-rcraid-kernel-hold \
+    /etc/apt/apt.conf.d/52-rcraid-kernel-hold
 update-initramfs -u -k all
 
 # Prove the installed copies are signed: when DKMS cannot read its key it warns

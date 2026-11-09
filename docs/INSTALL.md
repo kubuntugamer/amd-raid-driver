@@ -208,7 +208,9 @@ initramfs. It supports both initramfs-tools (Debian/Ubuntu,
 the exact fix command for any kernel that fails, and exits non-zero if
 any installed kernel would not boot. It also warns when a MOK enrolment is
 still queued: the next boot will stop at the MOK prompt, and until it is
-answered Secure Boot does not trust the signed module. Note the DKMS installer also drops
+answered Secure Boot does not trust the signed module. Both the DKMS and the
+live-USB installer also drop `/etc/apt/apt.conf.d/52-rcraid-kernel-hold`, so
+unattended-upgrades cannot install a kernel whose rebuild nobody watched. Note the DKMS installer also drops
 `/etc/apt/apt.conf.d/52-rcraid-kernel-hold` on apt systems so
 unattended-upgrades never installs a kernel behind your back.
 
