@@ -117,7 +117,7 @@ This is the recommended deployment path for setting up a fresh Linux environment
    ```
 3. The script pulls development dependencies in RAM and compiles the driver, then looks for an array **RAIDXpert2 already created**: it reads the RAIDCore metadata at LBA `0x5000` and, when it is there, takes exactly those disks as members and writes nothing to them. Level and geometry come from the firmware's records — RAID 10/5/6 included.
 4. Only when no disk carries that metadata does it open the **Terminal GUI**: **Spacebar** to check member disks and RAID **0 or 1** (the only levels `mkmeta.py` can write — **5/6 assemble read-only, their parity write path isn't wired**; RAID 10 needs four disks and is awaiting hardware validation). That path *stamps fresh metadata* over the selected disks; with a firmware array the menu never appears.
-5. Either way the driver unbinds the members from `nvme`, binds them to `rcbottom`, and stands up **`/dev/rcraid0`**.
+5. Either way the driver unbinds the members from `nvme`, binds them to `rcbottom`, and stands up **`/dev/rcraid0`** — then states whether that volume is **writable for the level it read** from the records. RAID 0/1 install fine; **RAID 5/6 come up read-only** (no parity write path yet, issue #6) and the script stops there instead of handing a read-only disk to the installer.
 6. Minimize the terminal and launch your desktop OS installer wizard. Select **Custom Partitioning**, map your layout over `/dev/rcraid0`, and let it copy files. **DO NOT REBOOT** when the installer finishes. Close the wizard panel and return to your open terminal window.
 
 ### Phase 2 — Target Chroot System Locking

@@ -205,23 +205,47 @@ for i in {1..20}; do
     sleep 0.5
 done
 
-# Hypervisor Sandbox Fallback Rule
 if [ ! -b /dev/rcraid0 ]; then
-    echo "    ℹ️  [Sandbox Note] Virtual hardware missing AMD controller ASIC silicon registers."
-    echo "      └─ Stand-up node descriptors manually over registered major device class allocation maps..."
-    rc_major=$(awk '$2=="rcraid" {print $1; exit}' /proc/devices)
-    if [ -n "$rc_major" ]; then
-        echo "      └─ Mapping Major Class ID $rc_major onto target filesystem block path..."
-        sudo mknod -m 660 /dev/rcraid0 b "$rc_major" 0 2>/dev/null || true
-    fi
+    echo "❌ Critical Failure: /dev/rcraid0 did not appear." >&2
+    echo "   No member was accepted, or the firmware has no array. Check:" >&2
+    echo "     dmesg | grep -i 'rcraid\|rc_volume'" >&2
+    echo "     lspci -d 1022:b000 -k      # members should show rcbottom" >&2
+    exit 1
 fi
-
-[ -b /dev/rcraid0 ] || { echo "❌ Critical Failure: /dev/rcraid0 failed to spin up." >&2; exit 1; }
 
 echo "----------------------------------------------------------------------"
 echo "✅ SUCCESS! Unified block storage device array target node is active."
 lsblk /dev/rcraid0
+
+# Say plainly what the driver decided about writes. An OS install needs a
+# writable volume, and whether this one is writable depends on the level and
+# geometry the driver read out of the firmware's records — not on the level
+# anyone meant to create.
+RO_STATE="$(cat /sys/block/rcraid0/ro 2>/dev/null || echo unknown)"
+VOL_LEVEL="$(dmesg 2>/dev/null | grep -o '(level=[A-Za-z0-9]*)' | tail -1 | tr -d '()')"
+VOL_LEVEL="${VOL_LEVEL#level=}"
+[ -n "$VOL_LEVEL" ] || VOL_LEVEL="unknown"
+
+if [ "$RO_STATE" = "0" ]; then
+    echo "✅ Volume is WRITABLE (level ${VOL_LEVEL}) — the OS installer can use it."
+else
+    echo "❌ Volume is READ-ONLY (level ${VOL_LEVEL}, ro=${RO_STATE}) — an OS install"
+    echo "   cannot proceed on it."
+    case "$VOL_LEVEL" in
+        RAID5|RAID6)
+            echo "   This driver has no parity write path (issue #6), so RAID 5/6 volumes"
+            echo "   are forced read-only. Recreate the array as RAID 0 or RAID 1 in the"
+            echo "   UEFI RAIDXpert2 utility, then re-run this script."
+            ;;
+        *)
+            echo "   The driver refused writes for this level/geometry; dmesg says why:"
+            dmesg 2>/dev/null | grep -i "READ-ONLY\|UNTRUSTED" | tail -3 | sed 's/^/     /'
+            ;;
+    esac
+    exit 1
+fi
 echo "======================================================================"
+
 echo "➡️  Open your graphical Kubuntu installer desktop app now."
 echo "➡️  Target /dev/rcraid0 under manual partitioning, map root, and let files copy."
 echo "======================================================================"

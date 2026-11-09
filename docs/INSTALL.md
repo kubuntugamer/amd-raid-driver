@@ -457,3 +457,10 @@ included. The interactive disk/level menu only appears when no disk
 carries that metadata; that path writes fresh RAID 0/1 records (all
 `mkmeta.py` can produce) and needs explicit confirmation
 (`RCRAID_CREATE_ARRAY=1` when running non-interactively).
+
+Before handing `rcraid0` over, it checks `/sys/block/rcraid0/ro` and says
+whether the volume is writable for the level it read. A read-only volume
+is a hard stop: RAID 5/6 have no parity write path yet (issue #6), and an
+untrusted geometry forces read-only too — the reason is printed from
+dmesg. Recreate the array as RAID 0 or RAID 1 in the UEFI utility and
+re-run.

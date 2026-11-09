@@ -207,6 +207,11 @@ firmware recorded. The disk-selection GUI appears only when **no** disk
 carries that metadata; it can create RAID 0/1 (all `mkmeta.py` writes)
 and overwrites the selected disks.
 
+Once the volume is up the script states whether it is **writable for the
+level it found**. Read-only is a hard stop — no OS installer can write to
+it — and happens for RAID 5/6 (no parity write path yet, issue #6) or
+when the driver refused to trust the geometry.
+
 **3. Run the OS installer — leave this terminal open.**
 Launch the distro's installer from the live desktop (*Install Kubuntu*,
 etc.) and:

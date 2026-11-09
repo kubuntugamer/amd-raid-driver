@@ -114,6 +114,13 @@ been implemented, it's marked.
   inventing `nvme0n1…4` when no NVMe disk is present. Checked against the test
   box's firmware RAID 5: detection returns exactly `nvme0n1 nvme1n1 nvme2n1`
   and excludes the root disk `nvme3n1`.
+  The installer also **states whether the volume is writable**, and refuses to
+  hand it to the distro installer when it is not: `/sys/block/rcraid0/ro` is
+  the authority, the level is taken from the driver's `(level=…)` assembly log,
+  and RAID 5/6 come back with the parity-write explanation (issue #6) rather
+  than a silent read-only disk. The fake `mknod` “sandbox” device node that
+  used to paper over a missing `/dev/rcraid0` is gone; that now fails with the
+  dmesg/lspci commands to run.
 - **Installers repaired for the restructured tree.** Both scripts still
   described the pre-`e4695ce` layout: a root `VERSION` file (deleted), `rc_*.c`
   at the repo root (they live under `src/`) and an `@PKGVER@` placeholder that
