@@ -285,7 +285,15 @@ for sysfs in dev proc sys run; do mount --rbind /$sysfs "$TARGET_MNT/$sysfs" && 
 ESP_DEV=""
 for part in /dev/rcraid0p*; do
     [ -b "$part" ] || continue
-    if [ "$(blkid -o value -s PARTTYPE "$part" 2>/dev/null || true)" = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" ]; then
+    # Probe the GPT entry directly.  Partitions on the array's own gendisk
+    # never get ID_PART_ENTRY_TYPE in the udev database, so `blkid -s PARTTYPE`
+    # (and `lsblk -o PARTTYPE`) print nothing for a perfectly valid ESP; they
+    # do work for ordinary disks such as the live USB, which is what makes
+    # this easy to miss.  `blkid -p` re-reads the parent's GPT itself and
+    # reports the type in udev-style output, which is lowercase — lowercase
+    # the other side to match.
+    part_type=$(blkid -p -o udev "$part" 2>/dev/null | awk -F= '$1 == "ID_PART_ENTRY_TYPE" { print $2; exit }' || true)
+    if [ "${part_type,,}" = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" ]; then
         ESP_DEV="$part"
         mkdir -p "$TARGET_MNT/boot/efi"
         mount "$ESP_DEV" "$TARGET_MNT/boot/efi" 2>/dev/null || true; break
