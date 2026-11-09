@@ -18,11 +18,14 @@ download from AMD):
 Tooling: **Ghidra 12.1** headless (scripts in `scripts/ghidra/`) plus PyGhidra
 for targeted decompiles. Raw extracts live under `docs/ghidra_output/`
 (`rcbottom_9.3.2/`, `rcbottom_9.3.3/`, `rcraid_9.3.2/`). The Linux driver's
-version string comes from the single-line `VERSION` file at the repo root
-(injected by the Makefile) and names the AMD Windows release whose behavior
-the port matches — currently `9.3.3.00291`. The geometry ground truth was
-established on 9.3.2-00255 and re-verified on 9.3.3-00291 (see "Version
-delta" below).
+version string comes from the single-line `docs/VERSION` file (the installers
+stage it as `VERSION` for the Makefile to inject into the banner and `modinfo`)
+and names the AMD Windows release whose behavior the port matches — currently
+`9.3.3.00291`. The DKMS *package* version is a separate knob: `PACKAGE_VERSION`
+in `dkms.conf` (`1.0.0-custom`), read by both installers so the tree they stage
+under `/usr/src/rcraid-<version>` always matches the version they hand to
+`dkms`. The geometry ground truth was established on 9.3.2-00255 and
+re-verified on 9.3.3-00291 (see "Version delta" below).
 
 ---
 
@@ -59,9 +62,12 @@ When AMD ships a new Windows RAID driver (e.g. a future 9.3.4):
    parser and the NVMe queue-init path.
 3. Update this section with the findings; port any data-path change the diff
    surfaces.
-4. Bump the single-line `VERSION` file at the repo root to the new release
-   (e.g. `9.3.4.00xxx`) — the Makefile injects it into the module banner and
-   `modinfo`; no code change is needed for the version itself.
+4. Bump the single-line `docs/VERSION` file to the new release (e.g.
+   `9.3.4.00xxx`) — the Makefile injects it into the module banner and
+   `modinfo`, and the installers carry it into the DKMS tree; no code change is
+   needed for the version itself. `PACKAGE_VERSION` in `dkms.conf` is separate:
+   change it only when the *package* version should move, since it names the
+   `/usr/src/rcraid-<version>` directory the installers stage into.
 
 ---
 

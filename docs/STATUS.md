@@ -102,6 +102,19 @@ been implemented, it's marked.
   verification, user-facing instructions); `verify-boot-safety.sh` reports a
   still-queued enrolment, and `uninstall-dkms.sh` now removes rcraid's signing
   drop-in (leaving the enrolled key, which other modules may share).
+- **Installers repaired for the restructured tree.** Both scripts still
+  described the pre-`e4695ce` layout: a root `VERSION` file (deleted), `rc_*.c`
+  at the repo root (they live under `src/`) and an `@PKGVER@` placeholder that
+  `dkms.conf` no longer carries. `install-dkms.sh` died on its second command,
+  so none of the signing work above could be reached. The package version now
+  comes from `dkms.conf`'s `PACKAGE_VERSION` — the same value passed to
+  `dkms add/build/install`, so the staged tree and the dkms tree cannot
+  disagree — `docs/VERSION` is staged as `VERSION` for the banner/`modinfo`
+  stamp, and staging mirrors the repo layout (build files at the root, sources
+  under `src/`, userspace `test_*.c` excluded). Verified by running the
+  installer on the box — staged build in kbuild's `M=` form, DKMS signing with
+  the already-enrolled shim key, per-kernel signature verification, initramfs
+  regeneration — then uninstalling and confirming every artefact was gone.
 
 ## 2026-11-08 — First firmware RAID 5 metadata; RAID1 classification fix; installer stamps real metadata
 
