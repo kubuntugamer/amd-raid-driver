@@ -37,3 +37,6 @@ __pycache__/
 
 # Local hardware-run fixtures, metadata backups, and agent build tree
 .freebuff/
+
+# Local workstation session state
+sessid
