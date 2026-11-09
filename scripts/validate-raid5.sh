@@ -276,7 +276,7 @@ cat <<'EOF'
   - Parity PLACEMENT (issue #6): write a known pattern + checksum through the
     vendor path (RAIDXpert2/Windows driver, or a pre-existing filesystem),
     boot Linux, and read it back through $DEV.  Only that confirms the
-    left-symmetric row-rotating map against real firmware.
+    vendor's dedicated-parity map against real firmware.
   - Parity write path, member rebuild, and degraded reads are NOT implemented:
     fail_member on a RAID5 member takes the volume to 'failed'; there is no
     reconstruction path to recover it.  Do not run the RAID10 rebuild steps.

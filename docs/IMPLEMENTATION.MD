@@ -191,9 +191,11 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
       `1022:B000`** — [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) is the
       gate before the README/STATUS rows may say "stable".
 
-- [ ] **RAID5 / RAID6** — **read-only, 2026-11-08.** GF(2^8) parity math and
-      the row-rotating layout map are done (`src/patch_parity_math.c`, the one
-      place to change once a vendor array confirms the placement); the level is
+- [ ] **RAID5 / RAID6** — **read-only, 2026-11-08.** Parity math and the
+      dedicated-parity layout map are done (`src/patch_parity_math.c`, the one
+      place to change once a vendor array confirms the placement) — except the
+      RAID 6 Q, which the vendor computes as EVENODD (prime 17), so the GF(2^8)
+      Q generator here is a placeholder that no caller uses; the level is
       identified from the LD `DeviceType` (`0x1BF5` / `0x1BFA`, confirmed on a
       BIOS-created 3-disk RAID 5), a parity volume
       assembles at `(N-1)` / `(N-2)` × per-member user size, and reads go
@@ -492,10 +494,11 @@ rather than code.
 2. **Confirm the RAID5/6 on-disk placement** (issues #6 and #3) — the
    read-only parity path assembles and reads, and a real 3-disk RAID 5 now
    exists on the test box (`0x1BF5`, N=3, `(N-1)` × user size), but the
-   array was zeroed at creation. The row-rotating placement in
-   `src/patch_parity_math.c` and the RAID6 Q algorithm (GF(2⁸) vs EVENODD)
-   are still unconfirmed against vendor-written data. A staged fixture can
-   prove the driver reads the documented map, but only data written through
+   array was zeroed at creation. The dedicated-parity placement in
+   `src/patch_parity_math.c` is still unconfirmed against vendor-written data,
+   and the RAID6 Q generator still has to be swapped from GF(2⁸) to the
+   vendor's EVENODD (the algorithm itself is now settled — issue #3).
+   A staged fixture can prove the driver reads the documented map, but only data written through
    RAIDXpert2/Windows can prove the firmware writes it. Everything downstream
    is built on that assumption, so it gates trusting parity reads at all.
 3. **RAID10 array-box run** — [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md)'s

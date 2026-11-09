@@ -8,8 +8,12 @@
  * Galois Field GF(2^8) arithmetic for RAID 6 Q parity.
  * Primitive polynomial: x^8 + x^4 + x^3 + x^2 + 1  (0x11D)
  * Generator element:    α = 0x02
- * This is the standard Reed-Solomon field used by Linux md RAID-6,
- * Windows Storage Spaces, and the AMD vendor blob (per decompile).
+ * This is the standard Reed-Solomon field used by Linux md RAID-6 and by
+ * Windows Storage Spaces.  It is NOT what AMD's firmware uses: the vendor
+ * core computes RAID 6 Q as EVENODD/RDP diagonal parity — a prime-17 integer
+ * modulus with XOR only and no field arithmetic at all
+ * (rc_raid6_evenodd.cpp; docs/REVERSE_ENGINEERING.md item 8).  Q computed
+ * here does not match vendor-written parity.
  *
  * Q parity formula (Reed-Solomon):
  *   Q = Σ (di × α^i)  for i = 0..k-1  where k = data drives
@@ -108,7 +112,10 @@ EXPORT_SYMBOL_GPL(rc_amd_generate_raid5_parity);
  *     P[j] = d0[j] ⊕ d1[j] ⊕ ... ⊕ d(k-1)[j]
  *     Q[j] = gf_mul(d0[j], α^0) ⊕ gf_mul(d1[j], α^1) ⊕ ... ⊕ gf_mul(d(k-1)[j], α^(k-1))
  *
- * This matches the vendor blob's algorithm (uVar12 = 2 for RAID 5/6 parity count).
+ * WARNING: only P above matches the vendor.  The Q here is Reed-Solomon and
+ * the vendor's Q is EVENODD (p = 17, XOR + integer modulus), so these bytes
+ * would not be a valid on-disk parity chunk for a vendor-created array.
+ * Nothing calls this yet — see the status note at the top of the file.
  * ========================================================================= */
 void rc_amd_generate_raid6_parity(uint8_t **data_buffers, uint8_t *p_buffer,
                                    uint8_t *q_buffer, size_t block_len, int num_drives)
@@ -255,8 +262,11 @@ EXPORT_SYMBOL_GPL(rc_amd_map_distributed_raid5);
  * The blob proves the DATA range (RC_RAID6DriveMap: %% (Devices - 2)) and
  * shows the last member accessed explicitly as a parity drive; which of the
  * two trailing members holds P versus Q is assumed here in ascending order.
- * RAID 6 stays unverified end to end (issue #3 also covers whether Q is
- * EVENODD rather than GF(2^8) Reed-Solomon).
+ * The Q *algorithm* is settled (issue #3): the vendor uses EVENODD/RDP
+ * diagonal parity with prime 17, not the GF(2^8) Reed-Solomon Q this file
+ * still generates — see rc_amd_generate_raid6_parity().  Placement is
+ * unaffected, since a healthy array never reads parity; RAID 6 remains
+ * read-only either way.
  *
  * Returns: physical sector on target_member
  */

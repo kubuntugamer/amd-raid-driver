@@ -840,10 +840,16 @@ single hung command or transient fault without intervention.
   were swapped in the first cut of this fix and corrected on 2026-11-08 after a
   BIOS-created 3-disk RAID 5 record read `devtype=0x1BF5, devices=3,
   capacity=2 × per-member user size`; the vendor dispatch derives the parity
-  count as `(devtype == 0x1BFA) + 1`, which agrees. Still open: RAID 6
-  Q in the vendor blob appears to be EVENODD (prime 17), not the GF(2⁸)
-  Reed-Solomon Q in `patch_parity_math.c` — not confirmed against a test
-  vector.
+  count as `(devtype == 0x1BFA) + 1`, which agrees. The other half of #3 —
+  the RAID 6 Q **algorithm** — is settled too: the vendor's whole dual-parity
+  path is `rc_raid6_evenodd.cpp`, and its Q is EVENODD/RDP diagonal parity
+  with a prime-17 integer modulus and **no field arithmetic** (no multiply,
+  no exp/log tables anywhere in the binary). So the GF(2⁸) Reed-Solomon Q in
+  `patch_parity_math.c` is not vendor-compatible. It is also unreachable —
+  RAID 6 is read-only, healthy reads never touch parity, and the generator
+  has no callers — so no wrong bytes are produced today; replacing it
+  belongs to the write path. Placement is unchanged by any of this
+  (`docs/REVERSE_ENGINEERING.md` item 8).
 - **QEMU RAID test depends on PATH order for static busybox** (issue #5).
 - **rcraid ioctl control node has no `capable()`/`ns_capable()` check**
   (issue #4).

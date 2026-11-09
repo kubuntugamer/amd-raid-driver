@@ -610,7 +610,7 @@ Still needing Ghidra investigation. Run via `scripts/ghidra/HuntBlockers.java`
    (a 0x1c-byte struct `0x1c,4,2,2,2,2,1`) may set adapter parameters we don't
    replicate. Worth a look if NVMe init produces a controller fatal status.
 
-### RAID 5/6 layout — parity is dedicated, on the last member (settled 2026-11-08)
+### RAID 5/6 layout — dedicated parity, EVENODD Q (settled 2026-11-08)
 
 7. **Vendor parity placement: fixed slot, no rotation.** Derived from the
    DWARF-bearing `rcblob.x86_64` (SDK 9.3.0-00283), so every listing below
@@ -666,9 +666,74 @@ Still needing Ghidra investigation. Run via `scripts/ghidra/HuntBlockers.java`
    alone — `FirstCount × SecondCount = Devices` holds on every real record and
    cannot express `(N-1) × 1` or `(N-2) × 2`, so the counts never identify a
    parity array (issue #3).
-8. **RAID 6 Q algorithm.** The decompiled Q routine indicates EVENODD (prime 17).
-   The repo's Q is GF(2⁸) Reed-Solomon. Not yet checked against an EVENODD test
-   vector (issue #3).
+8. **RAID 6 Q is EVENODD, not GF(2⁸) Reed-Solomon — settled 2026-11-08.** The
+   whole dual-parity path lives in one translation unit, and AMD named it
+   `rc_raid6_evenodd.cpp`. There is no Galois arithmetic in it: no multiply, no
+   log/exp table, no carry reduction. Every RAID 6 routine is XOR plus an
+   integer modulus by 17.
+
+   - `RC_RAID6_ComputeSingleQ` (`rc_raid6_evenodd.cpp:157`, `.text:0x8f70`) is
+     the core. For Q word `col` it XORs one 32-byte word from each data
+     member, taking word `RC_RAID6_AbsoluteModulus(col - row, 17)` of member
+     `row` and **skipping that member entirely when the result is 16**
+     (`cmp $0xf / ja`). The `mov $0x11,%esi` before the call is the prime.
+   - `RC_RAID6_AbsoluteModulus` (`:124`) is `idiv %esi` with a sign fixup — a
+     real integer modulus, not a field operation.
+   - `RC_RAID6_ComputeQ` (`:182`) zeroes 512 bytes of Q, builds the `S`
+     correction term with `RC_RAID6_ComputeS` (`:144`), then runs
+     `ComputeSingleQ` for 16 words, each seeded with `S`. Because the encoder
+     skips one diagonal per column, that diagonal has to be carried
+     separately, and `S` is it.
+   - `RC_RAID6_ComputeS` XORs the **last** 32-byte word of members
+     `1 .. n-1`, stepping back one word per member (`0x3c, 0x38, 0x34 …` in
+     `r9d`). Starting at the last word and walking one word per member means
+     it is written for **at most 16 data members** — a 17th would step to a
+     negative offset.
+   - `RC_RAID6_EvenOddEncode` (`:198`) is `RC_RAID6_Compute_XOR` (`:98`, plain
+     P) followed by `RC_RAID6_ComputeQ`. `RC_RAID6_GenerateNewQForColZero`
+     (`:619`) XORs 512 bytes of two buffers into Q.
+   - `RC_RAID6_ComputeQSyndromes` (`:480`) repeats the same construction over
+     all 17 diagonal columns for recovery: modulus 17, XOR only,
+     `cmp $0x11` on the outer index.
+   - The rest of the family says the same thing: `EvenOddDecode` (`:547`),
+     `EvenOddDataDataFailed`, `EvenOddDataParityFailed`,
+     `PartialWrite_EvenOddEncode` (`:714`), `ComputeQPrime` (`:666`),
+     `ComputeOldS`, `GenerateNewS`.
+
+   This is live code, not a leftover translation unit:
+   `RC_STH_MidInitialize` (`rc_sth_init.cpp:815`) installs
+   `RC_STH_MemRAID6Code` into the soft-RAID handler table, and that function
+   (`rc_sth_memory.cpp:532`, `.text:0x3e80`) dispatches to `EvenOddDecode`,
+   `PartialWrite_EvenOddEncode` or `EvenOddEncode` depending on the Ioc's
+   degraded / partial-write flags. It also wraps a running index at
+   `cmp $0x11` — 17 again. `RC_MemRAID6EncodeList` / `DecodeList` on top of it
+   only package an external call, so there is no second, table-driven
+   implementation behind it.
+
+   Independent check: scanning the whole binary for a GF(2⁸) exp or log table
+   under each of the three usual polynomials (`0x11D`, `0x11B`, `0x187`) finds
+   none. A table-driven Reed-Solomon Q would have to ship one.
+
+   Geometry this implies: the unit is **512 bytes per member**, split into
+   sixteen 32-byte words, with seventeen diagonal positions of which one is
+   skipped and carried in `S`. That is the word-oriented EVENODD variant known
+   as RDP (`p = 17`, `p-1 = 16` rows) under AMD's own `evenodd` naming.
+   **None of it changes the read map** — placement is still
+   `dedicated parity on member N-1`, and a healthy array never reads parity.
+   It matters for reconstruction, for a parity verify pass, and for any write
+   path.
+
+   Consequence for this port: `rc_amd_generate_raid6_parity()` is GF(2⁸)
+   Reed-Solomon and is therefore **not** the vendor's Q. It currently has no
+   callers — RAID 6 is read-only and healthy reads never touch parity — so no
+   wrong bytes are produced today, but it has to be replaced before a write
+   path or a Q-based rebuild exists. Issue #3's second half is this answer;
+   the code change is tracked by the open write path.
+
+   Cross-check against `rcraid.sys` 9.3.3-00291 was **inconclusive**: the
+   Windows image is symbol-stripped, and searching for the modulus-17 constant
+   found nothing conclusive. The claim rests on the DWARF blob, which is the
+   shared core both builds come from.
 
 ### Resolved
 

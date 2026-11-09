@@ -27,9 +27,11 @@ settles the DeviceType encoding: `0x1BF5` is **RAID 5**, `0x1BFA` is
 `(DeviceType == 0x1BFA) + 1`. The driver's constants were swapped before
 2026-11-08 and are now corrected.
 
-What is still **not** confirmed is the layout of the parity itself
-(left-symmetric, row-rotating, dense packing, 256 KiB chunks) against data
-written by the vendor firmware/driver. A freshly created array is zeroed, so
+The layout itself is now read out of the vendor core — dedicated parity on
+the last member, dense packing, 256 KiB chunks (`docs/REVERSE_ENGINEERING.md`
+item 7) — and the RAID 6 Q encoding is settled as EVENODD with prime 17
+(item 8). What is still **not** confirmed is that layout against data written
+by the vendor firmware/driver. A freshly created array is zeroed, so
 XOR checks on it are vacuous — all-zero data and all-zero parity agree with
 every candidate layout.
 
