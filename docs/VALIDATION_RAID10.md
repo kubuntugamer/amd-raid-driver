@@ -72,7 +72,11 @@ cross-dump of an X399 SATA RAID10 (all four members read at the same
 `UserDataOffset`; element 0 ≡ element 1, element 2 ≡ element 3, pairs
 differ) confirms the driver's **adjacent** assumption (`{2c, 2c+1}`) on
 real hardware — see [REVERSE_ENGINEERING.md](REVERSE_ENGINEERING.md)
-"External corroboration: X399".
+"External corroboration: X399". Note what is reproducible: the fixtures
+are metadata-only (LBA `0x5000`–`0x6000`, and they stop short of
+`UserDataOffset`), so the metadata checks can be re-run from the repo,
+while the pair-identity compare cannot — it rests on the reported `dd`
+output.
 
 **Scope of that confirmation: 2×2 only.** The corroborated set is
 `FirstCount=2, SecondCount=2`. `rc_ld_level_from()` admits any

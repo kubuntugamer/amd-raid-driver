@@ -477,7 +477,12 @@ Caveats: the cross-dump covers a 2×2 set only (no 4-way `0x41BF7` or
 8-way `0x81BF8` topology has been cross-dumped), and "element index"
 means the order of records *inside the committed LD* — nothing yet proves
 that order equals physical port order (for a 2-way set a permutation of
-elements is equivalent, so the pairing conclusion holds either way).
+elements is equivalent, so the pairing conclusion holds either way). The
+comparison itself cannot be re-run from the published fixtures: those
+dumps cover LBA `0x5000`–`0x6000` only and stop 1,044,480 sectors short of
+`UserDataOffset`, so the data-identity half rests on the reported `dd`
+output rather than on a file in the tree. The metadata half above is
+reproducible from the fixtures.
 
 **Fixtures independently verified against this port's parser (2026-10-07).**
 The four 2 MiB raw metadata dumps (LBA `0x5000`) are published as
