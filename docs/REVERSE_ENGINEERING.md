@@ -656,11 +656,11 @@ Still needing Ghidra investigation. Run via `scripts/ghidra/HuntBlockers.java`
    design is shared, but the map arithmetic is only readable in the DWARF
    blob.
 
-   Consequence: parity volumes stay **read-only** until `patch_parity_math.c`
-   is switched to dedicated parity, and no read on a data-bearing vendor array
-   can be trusted before that. Hardware confirmation is still outstanding —
-   the dev array is zeroed, and the staged fixture was written with the
-   rotating map, so it cannot discriminate (issue #6).
+   Consequence: `patch_parity_math.c` now implements this layout (2026-11-08),
+   replacing the row-rotating map, and parity volumes remain **read-only**.
+   Hardware confirmation is still outstanding — the dev array is zeroed, and
+   the staged fixture was written with the rotating map, so it cannot
+   discriminate (issue #6).
 
    Earlier reasoning worth keeping: a parity level is selected by `DeviceType`
    alone — `FirstCount × SecondCount = Devices` holds on every real record and

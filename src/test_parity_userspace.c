@@ -129,7 +129,7 @@ uint64_t rc_amd_map_distributed_raid5(uint64_t sector_lba, uint32_t chunk_sector
     uint64_t stripe_num, row;
     uint32_t stripe_off;
     int data_drives = num_drives - 1;
-    int parity_pos, j, m;
+    int parity_pos, j;
 
     if (num_drives < 3 || !chunk_sectors) {
         *target_member = 0;
@@ -140,21 +140,13 @@ uint64_t rc_amd_map_distributed_raid5(uint64_t sector_lba, uint32_t chunk_sector
     stripe_num  = sector_lba / chunk_sectors;
     stripe_off  = (uint32_t)(sector_lba - stripe_num * chunk_sectors);
 
-    /* Parity rotates per ROW; the stripe number picks the data chunk
-     * within its row. */
     row = stripe_num / (uint64_t)data_drives;
     j   = (int)(stripe_num - row * (uint64_t)data_drives);
 
-    parity_pos = (num_drives - 1) - (int)(row % (uint64_t)num_drives);
+    /* Dedicated parity on the last member (vendor, issue #6). */
+    parity_pos = num_drives - 1;
     *parity_member = parity_pos;
-
-    for (m = 0; m < num_drives; m++) {
-        if (m == parity_pos)
-            continue;
-        if (j-- == 0)
-            break;
-    }
-    *target_member = m;
+    *target_member = j;
 
     return row * chunk_sectors + stripe_off;
 }
@@ -166,7 +158,7 @@ uint64_t rc_amd_map_distributed_raid6(uint64_t sector_lba, uint32_t chunk_sector
     uint64_t stripe_num, row;
     uint32_t stripe_off;
     int data_drives = num_drives - 2;
-    int q_pos, p_pos, j, m;
+    int q_pos, p_pos, j;
 
     if (num_drives < 4 || !chunk_sectors) {
         *target_member = 0;
@@ -181,21 +173,13 @@ uint64_t rc_amd_map_distributed_raid6(uint64_t sector_lba, uint32_t chunk_sector
     row = stripe_num / (uint64_t)data_drives;
     j   = (int)(stripe_num - row * (uint64_t)data_drives);
 
-    q_pos = (num_drives - 1) - (int)(row % (uint64_t)num_drives);
-    p_pos = q_pos - 1;
-    if (p_pos < 0)
-        p_pos += num_drives;
+    /* Dedicated parities on the last two members: P on N-2, Q on N-1. */
+    p_pos = num_drives - 2;
+    q_pos = num_drives - 1;
 
     *q_member = q_pos;
     *p_member = p_pos;
-
-    for (m = 0; m < num_drives; m++) {
-        if (m == p_pos || m == q_pos)
-            continue;
-        if (j-- == 0)
-            break;
-    }
-    *target_member = m;
+    *target_member = j;
 
     return row * chunk_sectors + stripe_off;
 }
@@ -408,16 +392,20 @@ static void test_mapping_functions(void)
             assert(phys < UINT64_MAX);
         }
         
-        /* Verify parity rotation: each stripe should have different parity */
+        /* Vendor layout: parity is dedicated to the last member, data fills
+         * 0..n-2 and never collides with it. */
         int parity_counts[8] = {0};
         for (int stripe = 0; stripe < n * 100; stripe++) {
             int t, p;
             uint64_t s = (uint64_t)stripe * chunk_sectors;
             rc_amd_map_distributed_raid5(s, chunk_sectors, &t, &p, n);
+            assert(p == n - 1);
+            assert(t >= 0 && t <= n - 2);
             parity_counts[p]++;
         }
-        for (int i = 0; i < n; i++)
-            assert(parity_counts[i] > 0);  /* Each drive should be parity at least once */
+        for (int i = 0; i < n - 1; i++)
+            assert(parity_counts[i] == 0);
+        assert(parity_counts[n - 1] == n * 100);
     }
     
     /* Test RAID 6 mapping for various N */
@@ -434,19 +422,22 @@ static void test_mapping_functions(void)
             assert(p_mem != q_mem);
         }
         
-        /* Verify both parities rotate */
+        /* Vendor layout: P and Q are dedicated to the last two members. */
         int p_counts[8] = {0}, q_counts[8] = {0};
         for (int stripe = 0; stripe < n * 100; stripe++) {
             int t, p, q;
             uint64_t s = (uint64_t)stripe * chunk_sectors;
             rc_amd_map_distributed_raid6(s, chunk_sectors, &t, &p, &q, n);
+            assert(p == n - 2);
+            assert(q == n - 1);
+            assert(t >= 0 && t <= n - 3);
             p_counts[p]++;
             q_counts[q]++;
         }
-        for (int i = 0; i < n; i++) {
-            assert(p_counts[i] > 0);
-            assert(q_counts[i] > 0);
-        }
+        assert(p_counts[n - 2] == n * 100);
+        assert(q_counts[n - 1] == n * 100);
+        for (int i = 0; i < n - 2; i++)
+            assert(p_counts[i] == 0 && q_counts[i] == 0);
     }
     
     printf("  Mapping functions: PASS\n");
@@ -628,11 +619,16 @@ static int check_packing(int n, int is_raid6)
             own[t]++;
     }
 
-    /* Each member holds one chunk per row in one of the data roles, so
-     * every member must see exactly data_cols x 100 of the rows. */
-    for (int m = 0; m < n && ok; m++)
-        if (own[m] != data_cols * 100)
+    /* Dedicated parity (vendor layout, issue #6): every row hands one data
+     * chunk to each of the data_cols leading members, and the trailing
+     * member(s) hold parity only.  With rotating parity every member would
+     * instead see data_cols x 100 chunks. */
+    for (int m = 0; m < n && ok; m++) {
+        int expected = (m < data_cols) ? rows : 0;
+
+        if (own[m] != expected)
             ok = 0;
+    }
 
     if (!ok)
         printf("  RAID%d n=%d: packing is not dense/one-per-row\n",

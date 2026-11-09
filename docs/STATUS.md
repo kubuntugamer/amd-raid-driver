@@ -85,12 +85,13 @@ been implemented, it's marked.
   `0x1BF5` to RAID 6 and requires ≥ 4 members. The vendor dispatch settles the
   encoding — parity count = `(DeviceType == 0x1BFA) + 1` — so the two
   constants were swapped; `rc_linux.h` now has RAID5=`0x1BF5`,
-  RAID6=`0x1BFA`. Level *placement* is now settled from the vendor blob:
-  dedicated parity on member `N-1`, no rotation — which the row-rotating map
-  in `patch_parity_math.c` does not match, so reads on a vendor-written array
-  are not yet trustworthy (issue #6, `docs/REVERSE_ENGINEERING.md`). New
+  RAID6=`0x1BFA`. Level *placement* is settled from the vendor blob:
+  dedicated parity on member `N-1`, no rotation, and `patch_parity_math.c`
+  now implements that layout (it used to rotate; issue #6,
+  `docs/REVERSE_ENGINEERING.md`). Reads are still not trustworthy on a
+  vendor-written array until one exists to compare against. New
   `docs/VALIDATION_RAID5.md` records the observed geometry and the
-  vendor-written-data check that would still confirm the read path.
+  vendor-written-data check that would settle the read path.
 - **A non-member disk with valid RAIDCore metadata no longer takes the
   legacy fallback.** The array box has a fourth `1022:B000` drive whose
   metadata is valid but whose DeviceId appears in no LD record (a spare, or a
@@ -193,6 +194,18 @@ been implemented, it's marked.
   `{2,3}`, … — so a 6-member 3×2 assembles on the adjacent-pair convention
   that only 2×2 hardware corroborates. Documented as a boundary in
   [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) step 1.
+- **RAID 5/6 map switched to the vendor's dedicated parity (issue #6).**
+  `rc_amd_map_distributed_raid5()` now returns `parity = N-1` and
+  `target = stripe % (N-1)` with no row term; RAID 6 puts P/Q on `N-2`/`N-1`
+  and data on `0..N-3`. Layout comes from the DWARF-bearing vendor core
+  (`RC_RAID5DriveMap`: `(lba >> chunk_pow) % (Devices - 1)`), not from
+  inference. `test_parity_userspace` was updated in the same commit — its
+  bijection and packing checks asserted the old rotation and now encode the
+  dedicated layout — and passes. Live check on the dev array: rebuilt module
+  loads signed, assembles `optimal`, reads are stable, and the first 64 MiB
+  hashes `7321098d…ed2a3` instead of the rotating-map `63bf7f7d…c83673`,
+  confirming the new map is the one in the data path. The staged fixture is
+  now stale (written with the old map) and cannot validate either layout.
 
 ## 2026-10-07 — X399 fixtures verified; RAID10 pair convention settled
 

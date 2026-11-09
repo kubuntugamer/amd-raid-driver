@@ -171,14 +171,20 @@ static __attribute__((constructor)) void rc_parity_init(void)
  * N-1 x 1 nor N-2 x 2 equals N — so a count-encoded 0x1BF6 record is a
  * RAID0/RAID10 volume, never a parity array (issue #3).
  *   Chunk size ladder identical to RAID 0/10: chunk_index 1/2/3 → 64/128/256 KiB
- *   Layout: Left-symmetric rotating parity, dense per-member packing (the
- *   same shape as Linux md RAID-5/6).  NOT yet confirmed against a
- *   vendor-created array — issue #6 — which is why the driver assembles
- *   these volumes read-only.
+ *   Layout: DEDICATED parity on the last member, dense per-member packing —
+ *   read out of the vendor core (issue #6): RC_RAID5DriveMap returns
+ *   (lba >> chunk_pow) %% (Devices - 1), so data never lands on member N-1,
+ *   and the RAID 5 flush path counts Devices-1 data children with no stripe
+ *   or row term.  This REPLACES the earlier left-symmetric rotation, which no
+ *   vendor code performs.
+ *
+ *   Still unconfirmed on hardware: the read map has not been checked against
+ *   an array written by the vendor, which is why the driver assembles these
+ *   volumes read-only.
  *
  * Everything the driver knows about the parity layout lives in the two map
- * functions below; that is the single place to change once a dump confirms
- * the real placement.
+ * functions below; that is the single place to change if a vendor-written
+ * array ever disagrees.
  * ========================================================================= */
 
 /**
@@ -189,20 +195,15 @@ static __attribute__((constructor)) void rc_parity_init(void)
  * @parity_member:   out: parity drive index for this stripe
  * @num_drives:      total drives in array (N)
  *
- * Left-symmetric algorithm (same shape as Linux md RAID-5):
- *   - A ROW is one chunk on every member: data_drives data chunks plus
- *     the parity chunk.  The logical stripe number selects the data chunk
- *     within its row.
- *   - Parity rotates backward per ROW: parity = (N-1) - (row % N)
+ * Vendor algorithm (issue #6):
+ *   - A ROW is one chunk on every member: data_drives data chunks plus the
+ *     parity chunk, which is ALWAYS the last member (N-1).  No rotation.
+ *   - The logical stripe number selects the data chunk within its row: the
+ *     data members are 0..N-2 in ascending order.
  *   - The chunk sits at row @row on its member, data or parity, so each
  *     member's user-data region covers the whole row space and the volume
  *     capacity is (N-1) x per-member user size — the capacity the LD
  *     record reports.
- *
- * Rotating parity per CHUNK instead of per row does not survive dense
- * packing: with N=3, stripes 2 and 3 both resolve to member 1, and both
- * are in row 1 (row = stripe / data_drives), so the second would overwrite
- * the first.
  *
  * Returns: physical sector on target_member
  */
@@ -212,7 +213,7 @@ u64 rc_amd_map_distributed_raid5(u64 sector_lba, u32 chunk_sectors,
     u64 stripe_num, row;
     u32 stripe_off;
     int data_drives = num_drives - 1;
-    int parity_pos, j, m;
+    int j;
 
     if (unlikely(num_drives < 3 || !chunk_sectors)) {
         *target_member = 0;
@@ -226,18 +227,9 @@ u64 rc_amd_map_distributed_raid5(u64 sector_lba, u32 chunk_sectors,
     row = div_u64(stripe_num, (u64)data_drives);
     j   = (int)(stripe_num - row * (u64)data_drives);
 
-    /* Parity rotates backward one member per row (left-symmetric) */
-    parity_pos = (num_drives - 1) - (int)(row % (u64)num_drives);
-    *parity_member = parity_pos;
-
-    /* The j-th member that is not the parity member, ascending */
-    for (m = 0; m < num_drives; m++) {
-        if (m == parity_pos)
-            continue;
-        if (j-- == 0)
-            break;
-    }
-    *target_member = m;
+    /* Parity is dedicated to the last member (vendor: no rotation). */
+    *parity_member = num_drives - 1;
+    *target_member = j;
 
     /* Dense packing: the chunk sits at @row on its member */
     return row * chunk_sectors + stripe_off;
@@ -253,12 +245,18 @@ EXPORT_SYMBOL_GPL(rc_amd_map_distributed_raid5);
  * @q_member:        out: Q parity drive index for this stripe
  * @num_drives:      total drives in array (N)
  *
- * RAID 6 dual parity rotation (left-symmetric, same row model as RAID 5):
- *   - Two parity members per row: Q at (N-1) - (row % N), P one member
- *     below it (wraps mod N)
- *   - The logical stripe selects the j-th member that is neither P nor Q
+ * Vendor algorithm (issue #6), same row model as RAID 5:
+ *   - Data occupies members 0..N-3; the two parity chunks are dedicated to
+ *     the last two members: P on N-2, Q on N-1.  No rotation.
+ *   - The logical stripe number selects the data chunk within its row.
  *   - The chunk sits at row @row on its member, so volume capacity is
- *     (N-2) x per-member user size
+ *     (N-2) x per-member user size.
+ *
+ * The blob proves the DATA range (RC_RAID6DriveMap: %% (Devices - 2)) and
+ * shows the last member accessed explicitly as a parity drive; which of the
+ * two trailing members holds P versus Q is assumed here in ascending order.
+ * RAID 6 stays unverified end to end (issue #3 also covers whether Q is
+ * EVENODD rather than GF(2^8) Reed-Solomon).
  *
  * Returns: physical sector on target_member
  */
@@ -269,7 +267,7 @@ u64 rc_amd_map_distributed_raid6(u64 sector_lba, u32 chunk_sectors,
     u64 stripe_num, row;
     u32 stripe_off;
     int data_drives = num_drives - 2;
-    int q_pos, p_pos, j, m;
+    int j;
 
     if (unlikely(num_drives < 4 || !chunk_sectors)) {
         *target_member = 0;
@@ -284,23 +282,10 @@ u64 rc_amd_map_distributed_raid6(u64 sector_lba, u32 chunk_sectors,
     row = div_u64(stripe_num, (u64)data_drives);
     j   = (int)(stripe_num - row * (u64)data_drives);
 
-    /* Q parity rotates backward; P sits one member below it */
-    q_pos = (num_drives - 1) - (int)(row % (u64)num_drives);
-    p_pos = q_pos - 1;
-    if (p_pos < 0)
-        p_pos += num_drives;
-
-    *q_member = q_pos;
-    *p_member = p_pos;
-
-    /* The j-th member that is neither P nor Q, ascending */
-    for (m = 0; m < num_drives; m++) {
-        if (m == p_pos || m == q_pos)
-            continue;
-        if (j-- == 0)
-            break;
-    }
-    *target_member = m;
+    /* Parities are dedicated to the last two members (vendor: no rotation). */
+    *p_member = num_drives - 2;
+    *q_member = num_drives - 1;
+    *target_member = j;
 
     /* Dense packing: the chunk sits at @row on its member */
     return row * chunk_sectors + stripe_off;

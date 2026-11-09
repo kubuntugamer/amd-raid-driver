@@ -104,19 +104,23 @@ rotating map this tree implements.** Read out of the DWARF-bearing
 `rcblob.x86_64` (SDK 9.3.0-00283); the derivation is in
 `docs/REVERSE_ENGINEERING.md` ("RAID 5/6 layout"):
 
-| | vendor blob | this driver |
+| | vendor blob | this driver (since 2026-11-08) |
 |---|---|---|
 | RAID 5 data member | `(lba >> chunk_pow) % (N-1)` → members `0..N-2` | same |
-| RAID 5 parity member | **`N-1`, every row** | `(N-1) - (row % N)` — rotates |
-| RAID 6 | data `0..N-3`, P/Q on `N-2`/`N-1` | Q rotates, P adjacent |
+| RAID 5 parity member | **`N-1`, every row** | `N-1`, every row |
+| RAID 6 | data `0..N-3`, P/Q on `N-2`/`N-1` | same (P/Q order assumed) |
 | row stride | `(N - parity_count) × chunk`, packed per row | same |
 
-So for the 3-disk array on the dev box, row 1 has its parity on member 2 per
-the vendor, but on member 1 per this driver — two rows in three disagree.
-`patch_parity_math.c` must be changed to dedicated parity before reads on a
-vendor-written array can be trusted. Nothing below has been re-run against a
-real payload; the array is zeroed and the staged fixture was written with the
-rotating map, so it cannot discriminate.
+`patch_parity_math.c` used to rotate (`parity_pos = (N-1) - (row % N)`), which
+disagreed with the vendor on two rows in three for `N=3`; it now implements the
+dedicated layout. The change is visible on the dev array: reloading the rebuilt
+module still assembles `optimal`, reads are stable, and the first 64 MiB hash
+changes (`7321098d…ed2a3` instead of `63bf7f7d…c83673`) because the staged
+fixture on the members was written with the old rotating map.
+
+What is still missing is a read of **vendor-written** data: the array is
+zeroed, and the staged fixture cannot discriminate. Until that exists, treat
+the map as vendor-derived but not hardware-proven.
 
 What is still worth doing on hardware, once such data exists, is to confirm
 the *read* map end to end:
@@ -171,7 +175,7 @@ array started zeroed).
 | 0 | Trust gate | | |
 | 1 | Level / geometry / capacity | | 0x1BF5, N=3, `(N-1)` × user size |
 | 2 | Read path + read-only enforcement | | |
-| 3 | Parity placement | resolved (RE) | issue #6: dedicated parity on member `N-1`; read map not yet changed |
+| 3 | Parity placement | resolved (RE) + map changed | issue #6: dedicated parity on member `N-1`, driver follows it since 2026-11-08; no vendor-written read yet |
 | 4 | Boot / install | | blocked on writes |
 
 ## Promote
