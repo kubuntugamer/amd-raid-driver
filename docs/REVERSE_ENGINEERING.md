@@ -745,7 +745,7 @@ Still needing Ghidra investigation. Run via `scripts/ghidra/HuntBlockers.java`
    callers — RAID 6 is read-only and healthy reads never touch parity — so no
    wrong bytes are produced today, but it has to be replaced before a write
    path or a Q-based rebuild exists. Issue #3's second half is this answer;
-   the code change is tracked by the open write path.
+   the code change is tracked in issue #10.
 
    Cross-check against `rcraid.sys` 9.3.3-00291 (`V:\RC-933\RC_933_00291`):
    the Windows image is symbol-stripped, but the code is there and it is the
