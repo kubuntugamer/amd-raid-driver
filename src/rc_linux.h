@@ -59,6 +59,7 @@ static inline int scsi_add_host(struct Scsi_Host *host, struct device *dev) { re
 #include <linux/spinlock.h>
 
 #include "rc_pci_ids.h"
+#include "rc_api.h"
 
 // Driver Information.
 // The version tracks the AMD Windows release whose behavior this port
@@ -300,6 +301,22 @@ struct rc_nvme_state {
     // Namespace 1 (per Identify NS); populated only after identify_namespace.
     u32            ns1_lba_bytes;     // LBA size in bytes (e.g. 512 or 4096)
     u64            ns1_nsze;          // total LBAs in the namespace
+
+    // Identify Controller identity, kept for the /dev/rc_api config
+    // packet: rcadm renders the model/serial/firmware out of the
+    // PhysicalDevice records.  Raw and space-padded, exactly as the
+    // controller returned them.
+    u16            id_vid;
+    u16            id_ssvid;
+    u8             id_model[40];      // Identify Controller MN
+    u8             id_serial[20];     // Identify Controller SN
+    u8             id_firmware[8];    // Identify Controller FR
+
+    // Verbatim copy of the active RC_LogicalDevice record, captured by
+    // rc_volume_parse_logical_device.  /dev/rc_api re-emits it so rcadm
+    // sees the firmware's own Id and element table.
+    u32            ld_raw_len;
+    u8             ld_raw[RC_API_LD_MAX];
 
     // I/O queue count granted by the controller in response to
     // Set Features Number of Queues at init.  In step 3a we create

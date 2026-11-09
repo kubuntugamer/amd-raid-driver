@@ -100,6 +100,21 @@ static int __init rc_init(void)
         return err;
     }
     
+    /* /dev/rc_api: the vendor rcadm CLI's SG_IO config-packet surface.
+     * Read-only view of the assembled volume; see src/rc_api.c. */
+    err = rc_api_init();
+    if (err) {
+        rc_printk(RC_ERROR, "rc_init: failed to initialize /dev/rc_api (%d)\n",
+                  err);
+        rc_amd_exit_ioctl_bridge();
+        rc_config_cleanup();
+        rc_bottom_cleanup();
+        rc_debugfs_cleanup();
+        unregister_blkdev(rc_major, "rcraid");
+        rc_amd_exit_async_subsystem();
+        return err;
+    }
+
     rc_state.initialized = 1;
     rc_printk(RC_NOTE, "rc_init: AMD RAID Driver initialized successfully\n");
     rc_printk(RC_NOTE, "rc_init: Found %d adapters\n", rc_state.num_adapters);
@@ -112,8 +127,9 @@ static void __exit rc_exit(void)
 {
     rc_printk(RC_NOTE, "rc_exit: AMD RAID Driver cleanup\n");
 
-    /* Remove the control node first so no new ioctl can touch a volume
+    /* Remove the control nodes first so no new ioctl can touch a volume
      * that is about to be dismantled. */
+    rc_api_cleanup();
     rc_amd_exit_ioctl_bridge();
 
     // Tear down the assembled RAID volume + gendisk before unbinding members.

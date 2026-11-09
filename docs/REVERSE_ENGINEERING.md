@@ -661,6 +661,84 @@ Flag 1 is used only by `RC_GetPrevConfig` (previous generation) and
   offset `+0x88`.
 - `0xD40`: no SEP records (`SEPDeviceSize 0`).
 
+### Transport windows (settled 2026-11-09 from the CDB captures)
+
+The device is a small mailbox, not a flat LBA space.  Every observed
+non-INQUIRY access is `READ(10)`/`WRITE(10)` in 512-byte blocks:
+
+| LBA | Access | Data | Meaning |
+|---|---|---|---|
+| `0x000` | `READ(10)`, 2 blocks (1 KiB) | `u32` next window, then `packet[4..1024]` | window handshake before each query |
+| `0x0C0` | `WRITE(10)` 16 blocks, then `READ(10)` 128 blocks | 8 KiB request → 64 KiB reply | config window |
+| `0x0D0` | same | byte-identical to the `0x0C0` reply | second window |
+| `0x0E0` | same | byte-identical to the `0x0C0` reply | third window |
+
+All three replies are identical (`pkt4/8/12.bin` compare equal), so the
+LBA selects a request *channel*, not a distinct payload.  The 1 KiB read
+at LBA 0 is a handshake, not an opaque blob: its first `u32` is the
+window `rcadm` must use next (`0xC0`, then `0xD0`, then `0xE0`) and the
+bytes behind it are the packet from its own offset 4.  A zero window
+makes `rcadm` stop immediately with "no controllers, arrays, or disks
+supplied".  The 8 KiB
+request all three received is the same structure with the window LBA
+echoed (`+0x00` command `1`, `+0x04` window LBA, `+0x18` `2`, `+0x1C`
+`1`, `+0x20` `0x1000`; rest zero).  `rcadm --show` therefore does:
+INQUIRY, descriptor read, then per window: write request → read 64 KiB.
+
+### INQUIRY: bare string, no EVPD page header
+
+EVPD page `0xD7` (`12 01 D7 00 14 00`) is answered with the 20 bytes
+`"AMD-RAID Controller\0"` — no page-code/length prefix, unlike a
+standard EVPD response.
+
+The captured successful reply also carries `sg_io_hdr.status = 0x1`
+(`masked_status = 0`).  That is the vendor driver's own convention, not
+Linux sg's: `rcadm` treats `status == 0` as a failed command and stops
+right after INQUIRY without reading the descriptor, so a shim must set
+`status = 1` on success.
+
+### PhysicalDevice record types (captured)
+
+| `DeviceType` | Record | Notes |
+|---|---|---|
+| `0x1201` | controller/version record at `0x200` | capacity 0; version string in the **model** slot (`+0x88`) |
+| `0x1200` | NVMe member | `Capacity +0x1C` equals namespace NSZE; `Devices +0x18` is 0 |
+| state `0x3000` | online | seen on the controller record and on every member |
+
+Firmware `+0x80`, model `+0x88`, serial `+0xB0` are the Identify
+Controller FR/MN/SN strings, space-padded.
+
+### ControllerDevice records (`0x25BE`, `0x88` stride)
+
+Six records in the capture, matching rcadm's controller list.  Partial
+layout, read off the capture and correlated with rcadm's own columns:
+
+| Offset | Field |
+|---|---|
+| `+0x00` | tag `0x25BE` |
+| `+0x04` | 64-bit SAS address (`0x00001022b0000000`, shown verbatim) |
+| `+0x34` | type string (`"NVMe"` / `"AMD-RAID"`) |
+| `+0x39` | port-type string (`"ATAPIPort"`) |
+| `+0x60` | PCI vendor id (`0x1022`) |
+| `+0x6C` | device id packed with vendor (`0xb0001022`) |
+| `+0x74` | subsystem vendor/device (`0x50121987` = `1987:5012`) |
+
+The remainder (bus/slot/function, license, firmware) is not decoded, so
+the shim emits an empty controller section rather than guessing.
+
+### Implementation status (`src/rc_api.c`, 2026-11-09)
+
+`src/rc_api.c` serves the ABI above: INQUIRY page `0xD7`, the 1 KiB
+window handshake (rotating `0xC0`/`0xD0`/`0xE0`, packet behind it), and
+a 64 KiB
+packet built from the live member registry plus the verbatim
+`RC_LogicalDevice` record parsed off disk.  Emitted sections: header,
+`PD` (controller/version record + one per member), `LD` (byte copy, so
+the Id and element table are the firmware's).  `CTRL`/`SEP` are empty.
+Only mailbox command 1 (window prepare) is accepted on write; anything
+else is refused with `CHECK CONDITION`/ILLEGAL REQUEST, because this
+driver never writes firmware metadata.
+
 ### PhysicalDevice record fields read by `RC_C_PhysicalDevice`
 
 From the constructor (`0x5E550`, `RC_C_PhysicalDevice.cpp:63`), on the flag-0
@@ -679,6 +757,12 @@ From the constructor (`0x5E550`, `RC_C_PhysicalDevice.cpp:63`), on the flag-0
 | `+0x54` | 4 | `Features` |
 | `+0x58` | 4 | `PortType` |
 | `+0x80` | 8 | firmware revision (`RKT30Q.3`) |
+
+The u32 at `+0x0C` doubles as the disk number: `0xFFFF` on the
+controller record and `0x10000 | slot` on members (records 1-4 carry
+`0x10000`-`0x10003`).  rcadm's *Disk* column follows it — emitting 0
+there made all four members print as "Disk 0" even though their
+DeviceIDs, models and serials were distinct.
 | `+0x88` | 32 | model name (`Sabrent Rocket Q`) |
 | `+0xA8` | 8 | serial-number prefix (8 spaces + first 8 hex digits) |
 | `+0xB0` | 24 | serial number |

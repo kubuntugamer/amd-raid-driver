@@ -1310,6 +1310,15 @@ static int rc_nvme_identify_controller(struct rc_adapter *adapter)
 		rc_nvme_ascii_field(b + RC_NVME_ID_CTRL_FR, 8,  fr);
 
 		nvme->mdts = mdts;
+		/* Keep the identity for the /dev/rc_api config packet. */
+		nvme->id_vid = vid;
+		nvme->id_ssvid = ssvid;
+		memcpy(nvme->id_model, b + RC_NVME_ID_CTRL_MN,
+		       sizeof(nvme->id_model));
+		memcpy(nvme->id_serial, b + RC_NVME_ID_CTRL_SN,
+		       sizeof(nvme->id_serial));
+		memcpy(nvme->id_firmware, b + RC_NVME_ID_CTRL_FR,
+		       sizeof(nvme->id_firmware));
 		nvme->max_transfer_bytes = mdts ?
 			(1u << mdts) * (1u << (12 + mpsmin)) : 0;
 		nvme->vwc_present = (vwc & 1) ? 1 : 0;
@@ -2309,6 +2318,7 @@ static void rc_volume_parse_logical_device(struct rc_adapter *adapter)
 	nvme->ld_valid = false;
 	nvme->ld_my_position = -1;
 	nvme->ld_record_seen = false;
+	nvme->ld_raw_len = 0;
 
 	if (!nvme->md_config_ring_lba || !nvme->md_config_commit_lba) {
 		rc_printk(RC_WARN,
@@ -2470,6 +2480,20 @@ static void rc_volume_parse_logical_device(struct rc_adapter *adapter)
 			if (devices < 2)
 				continue;
 
+			/* Keep the record verbatim for /dev/rc_api: rcadm
+			 * correlates members through the element table, so
+			 * re-emitting firmware's own bytes is more faithful
+			 * than rebuilding the record from these fields. */
+			{
+				u32 rec_len = elem_off + devices * RC_LE_BYTES;
+
+				if (rec_len > avail - i)
+					rec_len = avail - i;
+				if (rec_len > RC_API_LD_MAX)
+					rec_len = RC_API_LD_MAX;
+				memcpy(nvme->ld_raw, ld, rec_len);
+				nvme->ld_raw_len = rec_len;
+			}
 			nvme->ld_device_type      = devtype;
 			nvme->ld_first_count      = first_count;
 			nvme->ld_second_count     = second_count;
@@ -6528,6 +6552,59 @@ int rc_volume_get_inventory(struct AmdHardwarePayload *out)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(rc_volume_get_inventory);
+
+/* Snapshot the assembled volume for the /dev/rc_api packet builder.
+ * Everything is copied out under rc_volume_lock; the builder never holds
+ * a pointer into driver state.  Degraded assembly leaves NULL slots, so
+ * absent members are simply not reported. */
+int rc_api_snapshot_get(struct rc_api_snapshot *out)
+{
+	u32 i;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+
+	mutex_lock(&rc_volume_lock);
+	out->level = rc_volume_raid_level;
+	out->stripe_sectors = rc_volume_stripe_sectors;
+	if (rc_volume_disk)
+		out->capacity_sectors = get_capacity(rc_volume_disk);
+	out->nr_members = min_t(u32, (u32)rc_volume_member_count,
+				RC_API_PD_MAX);
+
+	for (i = 0; i < out->nr_members; i++) {
+		struct rc_adapter *a = rc_volume_members[i];
+		struct rc_api_member *m = &out->member[i];
+		struct rc_nvme_state *nvme;
+
+		if (!a)
+			continue;
+		nvme = &a->ctx.nvme;
+		m->device_id = nvme->md_device_id;
+		m->capacity_sectors = nvme->ns1_nsze;
+		m->ld_position = nvme->ld_my_position < 0 ? 0 :
+			(u32)nvme->ld_my_position;
+		m->online = READ_ONCE(rc_volume_member_state[i]) ==
+			RC_MEMBER_LIVE;
+		m->vid = nvme->id_vid;
+		m->ssvid = nvme->id_ssvid;
+		memcpy(m->firmware, nvme->id_firmware, sizeof(m->firmware));
+		memcpy(m->model, nvme->id_model, sizeof(m->model));
+		memcpy(m->serial, nvme->id_serial,
+		       sizeof(nvme->id_serial));
+
+		if (!out->have_ld && nvme->ld_valid && nvme->ld_raw_len) {
+			out->have_ld = 1;
+			out->ld_len = min_t(u32, nvme->ld_raw_len,
+					    RC_API_LD_MAX);
+			memcpy(out->ld_raw, nvme->ld_raw, out->ld_len);
+		}
+	}
+	mutex_unlock(&rc_volume_lock);
+
+	return 0;
+}
 
 /* Fail a live member by volume slot.  Shared by sysfs and the amd_ctl0
  * bridge so both paths have identical bounds checks and locking. */
