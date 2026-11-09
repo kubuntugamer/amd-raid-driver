@@ -5,6 +5,34 @@ SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 [ "$(id -u)" -eq 0 ] || { echo "Run as root: sudo $0" >&2; exit 1; }
 
+# Run the whole install in a private mount namespace.
+#
+# Mount events propagate, and the live session's root is a shared peer, so
+# every mount made below — the target root, then the chroot's /dev, /proc,
+# /sys and /run with their children — is copied into each systemd service
+# namespace.  Those copies are invisible from here, so `umount -R` cannot
+# reach them and the target filesystem stays open: the block device never
+# closes, rcraid keeps refcount 1, `rmmod` fails until the next reboot, and
+# every later attempt to mount the target reports "already mounted or mount
+# point busy".  The install "succeeds" and leaves the session unable to let go
+# of the array.
+#
+# Re-exec instead of setting propagation flags piecemeal: making the target
+# mount private after creating it still leaks the target mount itself, because
+# that one propagated at creation.  (Measured on Ubuntu 26.10: 3 leaked mounts
+# with the old code, 1 with `--make-rslave` applied after the bind, 0 inside
+# this namespace.)  Whatever is still mounted when this process tree exits is
+# discarded with the namespace.
+if [ "${RCRAID_PRIVATE_MNT_NS:-0}" != 1 ]; then
+    if command -v unshare >/dev/null 2>&1; then
+        export RCRAID_PRIVATE_MNT_NS=1
+        exec unshare --mount --propagation private -- /bin/bash "$0" "$@"
+    fi
+    echo "WARN: unshare(1) not found — mounts may leak into systemd namespaces." >&2
+    echo "      The install itself still works, but rcraid may not unload from" >&2
+    echo "      this session afterwards (until it reboots)." >&2
+fi
+
 . "$SRC_DIR/scripts/lib/secure-boot.sh"
 
 # Secure Boot has to be off for the live session, and that is a property of
@@ -473,6 +501,12 @@ if [ -n "$ESP_DEV" ] && [ -d "$TARGET_MNT/boot/efi/EFI" ]; then
 fi
 
 umount -R "$TARGET_MNT" 2>/dev/null || true
+# The private mount namespace discards anything still mounted when this
+# process exits, but a tree that survived its own teardown is exactly the
+# state that used to leave rcraid un-unloadable, so say it out loud.
+if mountpoint -q "$TARGET_MNT"; then
+    echo "⚠️  $TARGET_MNT is still mounted; it will be discarded with the private mount namespace." >&2
+fi
 
 mok_enrollment_instructions
 if [ "$MOK_SIGNING" = 1 ] && [ "$MOK_ENROLL_PENDING" = 1 ]; then
