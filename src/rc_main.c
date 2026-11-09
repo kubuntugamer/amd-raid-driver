@@ -84,6 +84,21 @@ static int __init rc_init(void)
         rc_amd_exit_async_subsystem();
         return err;
     }
+
+    /* Register the live control plane.  This creates /dev/amd_ctl0 and
+     * routes its commands at the assembled volume, not the idle mirror
+     * engine. */
+    err = rc_amd_init_ioctl_bridge();
+    if (err) {
+        rc_printk(RC_ERROR, "rc_init: failed to initialize /dev/amd_ctl0 (%d)\n",
+                  err);
+        rc_config_cleanup();
+        rc_bottom_cleanup();
+        rc_debugfs_cleanup();
+        unregister_blkdev(rc_major, "rcraid");
+        rc_amd_exit_async_subsystem();
+        return err;
+    }
     
     rc_state.initialized = 1;
     rc_printk(RC_NOTE, "rc_init: AMD RAID Driver initialized successfully\n");
@@ -96,6 +111,10 @@ static int __init rc_init(void)
 static void __exit rc_exit(void)
 {
     rc_printk(RC_NOTE, "rc_exit: AMD RAID Driver cleanup\n");
+
+    /* Remove the control node first so no new ioctl can touch a volume
+     * that is about to be dismantled. */
+    rc_amd_exit_ioctl_bridge();
 
     // Tear down the assembled RAID volume + gendisk before unbinding members.
     rc_volume_teardown();

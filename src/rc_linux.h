@@ -329,6 +329,12 @@ struct rc_nvme_state {
     // this member's config ring (LBA md_config_ring_lba + scan).  Populated
     // after rc_volume_parse_logical_device runs.
     bool           ld_valid;
+    bool           ld_record_seen;      // committed config contained at least
+                                        // one plausible LD record (even if it
+                                        // does not name this device).  A disk
+                                        // with metadata but no LD naming it is
+                                        // not an array member — it must never
+                                        // take the legacy BDF fallback.
     u32            ld_device_type;      // RC_LogicalDevice.DeviceType (raw on-disk value)
     u32            ld_first_count;      // RC_LogicalDevice.FirstCount (stripe width)
     u32            ld_second_count;     // RC_LogicalDevice.SecondCount (mirror count)
@@ -725,9 +731,13 @@ struct rc_raidcore_md {
  * read as RAID5/6.  Only an explicit parity DeviceType selects one, which
  * is also what keeps a four-member (2,2) record on RAID10 — the encoding
  * confirmed on hardware — unless the DeviceType itself says RAID6
- * (issue #3).  Both parity DeviceType values are INFERRED from the vendor
- * dispatch table, and the on-disk parity placement is unverified
- * (issue #6): the driver assembles these volumes READ-ONLY. */
+ * (issue #3).  RAID5 (0x1BF5) is now CONFIRMED on hardware: a RAIDXpert2
+ * BIOS-created 3-disk RAID 5 (capacity = 2 x per-member user size) writes
+ * it, and the vendor dispatch code computes the parity count as
+ * (DeviceType == 0x1BFA) + 1 — so 0x1BFA, not 0x1BF5, is the dual-parity
+ * encoding.  An earlier revision had the two swapped from the dispatch-table
+ * inference.  The on-disk parity PLACEMENT is still unverified (issue #6):
+ * the driver assembles these volumes READ-ONLY. */
 #define RC_LDT_RAID0			0x1BF6u
 #define RC_LDT_RAID1			0x1BF7u
 #define RC_LDT_SINGLE			0x1BF9u	/* per-disk raw/JBOD LD published
@@ -739,11 +749,13 @@ struct rc_raidcore_md {
 						 * check and assemble a bogus
 						 * 1-member volume (the parser
 						 * skips all devices<2 records) */
-#define RC_LDT_RAID5			0x1BFAu	/* inferred from the writer's
-						 * dispatch table — never seen
-						 * in a firmware dump */
-#define RC_LDT_RAID6			0x1BF5u	/* likewise inferred; see the
-						 * RAID5/6 note above */
+#define RC_LDT_RAID5			0x1BF5u	/* CONFIRMED 2026-11-08: seen on a
+						 * BIOS-created 3-disk RAID 5
+						 * (capacity = 2 x user size).
+						 * One parity member. */
+#define RC_LDT_RAID6			0x1BFAu	/* two parity members; the vendor
+						 * dispatch derives parity count
+						 * as (devtype == 0x1BFA) + 1 */
 #define RC_LDT_RAID10			0x1BFBu
 
 /* Config-commit block — one sector at RC_MetaData.config_commit_lba

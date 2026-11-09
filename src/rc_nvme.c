@@ -35,6 +35,7 @@
  ****************************************************************************/
 
 #include "rc_linux.h"
+#include "amd_raid_uapi.h"
 #include <linux/unaligned.h>
 #include <linux/blkdev.h>
 #include <linux/blk-mq.h>
@@ -2200,9 +2201,12 @@ static u32 rc_ld_level_from(u32 devtype, u32 first, u32 second, u32 devices)
 	 *    encoding confirmed on hardware.  These arms deliberately ignore
 	 *    the counts, so an explicit RAID6 DeviceType can never fall
 	 *    through to the RAID10 classification above (issue #3).  If
-	 *    0x1BF5 turns out to be a NESTED parity level (RAID50/60), this
+	 *    0x1BFA turns out to be a NESTED parity level (RAID50/60), this
 	 *    arm is the one to change: nested parity is neither this map nor
-	 *    a plain RAID6 map.
+	 *    a plain RAID6 map.  (0x1BF5/0x1BFA are confirmed by the vendor
+	 *    dispatch: parity count = (devtype == 0x1BFA) + 1, and a
+	 *    BIOS-created 3-disk RAID 5 writes 0x1BF5 — the two constants
+	 *    were swapped here before 2026-11-08.)
 	 *
 	 *    (An earlier iteration carried 0x1BF7/0x1BF8 branches here; both
 	 *    were miswired — 0x1BF7 IS RAID1 and 0x1BF8 has no define — and
@@ -2304,6 +2308,7 @@ static void rc_volume_parse_logical_device(struct rc_adapter *adapter)
 
 	nvme->ld_valid = false;
 	nvme->ld_my_position = -1;
+	nvme->ld_record_seen = false;
 
 	if (!nvme->md_config_ring_lba || !nvme->md_config_commit_lba) {
 		rc_printk(RC_WARN,
@@ -2403,6 +2408,13 @@ static void rc_volume_parse_logical_device(struct rc_adapter *adapter)
 			if ((u64)i + elem_off +
 			    (u64)devices * RC_LE_BYTES > avail)
 				continue;
+
+			/* The committed generation names at least one LD.  If
+			 * none of them contains this disk's DeviceID, this disk
+			 * is not a member of the active array (a spare, or stale
+			 * metadata) — see the fallback guard in
+			 * register_member. */
+			nvme->ld_record_seen = true;
 
 			/* AMD also publishes one single-device "raw disk"
 			 * LD per physical member.  Only the LD whose
@@ -2958,6 +2970,22 @@ static void rc_volume_register_member(struct rc_adapter *adapter)
 				"RAID 5/6 is assembled READ-ONLY: the parity write path is not implemented and the on-disk parity placement is unconfirmed (issue #6)";
 		}
 	} else {
+		/* A committed config generation with an LD record that does
+		 * not name this disk means this disk is not a member of the
+		 * active array — a spare, or a drive whose old metadata
+		 * survived a re-create.  Refuse it BEFORE the first-member
+		 * seeding below: otherwise a stray disk that probes first
+		 * would seed expected=2 / RAID0 and the real members would
+		 * then be rejected as a mismatch.  The legacy fallback is for
+		 * metadata old enough that no LD record was written at all,
+		 * where there is nothing better to go on. */
+		if (nvme->ld_record_seen) {
+			rc_printk(RC_WARN,
+				  "rc_volume_register_member: %s has valid RAIDCore metadata but no LD record names this device — not a member of the active array, refusing legacy fallback\n",
+				  pci_name(adapter->pdev));
+			goto out;
+		}
+
 		expected = RC_VOLUME_EXPECTED_MEMBERS;
 		chunk_sectors = nvme->md_stripe_sectors;
 		rc_printk(RC_WARN,
@@ -6387,6 +6415,188 @@ static ssize_t resync_progress_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(resync_progress);
 
+/* UAPI raid-level spelling.  The kernel's RC_LDT_* values are on-disk
+ * DeviceType tags, not the numbers userspace expects. */
+static u32 rc_volume_uapi_raid_level(void)
+{
+	switch (rc_volume_raid_level) {
+	case RC_LDT_RAID0:  return 0;
+	case RC_LDT_RAID1:  return 1;
+	case RC_LDT_RAID10: return 10;
+	case RC_LDT_RAID5:  return 5;
+	case RC_LDT_RAID6:  return 6;
+	default:            return 0xff;
+	}
+}
+
+/* Live status for AMD_IOCTL_GET_STATUS.  Bit 0 only says the control
+ * plane is up; FAILED/DEGRADED come from the assembled volume. */
+int rc_volume_get_status(u32 *mask)
+{
+	u32 m = RC_AMD_STATUS_LIVE;
+	bool failed_member = false;
+	bool can_serve;
+	int i;
+
+	if (!mask)
+		return -EINVAL;
+
+	mutex_lock(&rc_volume_lock);
+	can_serve = rc_volume_disk && rc_volume_can_serve();
+	if (!can_serve)
+		m |= RC_AMD_STATUS_FAILED;
+	for (i = 0; i < rc_volume_member_count && i < RC_VOLUME_MAX_MEMBERS;
+	     i++) {
+		if (READ_ONCE(rc_volume_member_state[i]) == RC_MEMBER_FAILED) {
+			failed_member = true;
+			break;
+		}
+	}
+	if (failed_member)
+		m |= RC_AMD_STATUS_FAULTS;
+	if (failed_member && can_serve)
+		m |= RC_AMD_STATUS_DEGRADED;
+	if (rc_volume_resync_slot >= 0)
+		m |= RC_AMD_STATUS_RESYNCING;
+	mutex_unlock(&rc_volume_lock);
+
+	*mask = m;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(rc_volume_get_status);
+
+/* Fill the rcraidXpert inventory payload from the live adapter/volume
+ * registries.  Both locks are held for the snapshot; the lock order is
+ * state -> volume, and no path takes them in the opposite order. */
+int rc_volume_get_inventory(struct AmdHardwarePayload *out)
+{
+	int slot_to_drive[RC_VOLUME_MAX_MEMBERS];
+	int i, n = 0;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+	for (i = 0; i < RC_VOLUME_MAX_MEMBERS; i++)
+		slot_to_drive[i] = -1;
+
+	/*
+	 * Hold both registries while the snapshot is taken.  The lock order is
+	 * state -> volume; detach takes state only, and the volume paths take
+	 * volume only, so there is no reverse nesting.
+	 */
+	mutex_lock(&rc_state.lock);
+	mutex_lock(&rc_volume_lock);
+	for (i = 0; i < RC_MAX_ADAPTERS && n < 64; i++) {
+		struct rc_adapter *a = rc_state.adapters[i];
+		struct AmdDriveTelemetry *d;
+		int slot;
+
+		if (!a)
+			continue;
+		d = &out->drives[n];
+		d->port_id = a->pdev->bus->number;
+		d->slot_id = (__u8)PCI_SLOT(a->pdev->devfn);
+		d->disk_index = n;
+		d->total_sectors = a->ctx.nvme.ns1_nsze;
+		slot = READ_ONCE(a->ctx.nvme.volume_slot);
+		d->is_assigned = slot >= 0;
+		if (slot >= 0 && slot < RC_VOLUME_MAX_MEMBERS)
+			slot_to_drive[slot] = n;
+		n++;
+	}
+	out->total_discovered_drives = n;
+
+	if (rc_volume_disk) {
+		struct AmdArrayTelemetry *arr = &out->arrays[0];
+
+		arr->array_id = 0;
+		arr->raid_level = rc_volume_uapi_raid_level();
+		arr->stripe_sectors = rc_volume_stripe_sectors;
+		arr->total_capacity_bytes =
+			(u64)get_capacity(rc_volume_disk) * 512u;
+		arr->member_disk_count = rc_volume_member_count;
+		for (i = 0; i < rc_volume_member_count && i < 32; i++)
+			arr->member_indices[i] = slot_to_drive[i] >= 0 ?
+				(__u8)slot_to_drive[i] : 0xff;
+		strscpy(arr->name, rc_volume_disk->disk_name,
+			sizeof(arr->name));
+		out->total_discovered_arrays = 1;
+	}
+	mutex_unlock(&rc_volume_lock);
+	mutex_unlock(&rc_state.lock);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(rc_volume_get_inventory);
+
+/* Fail a live member by volume slot.  Shared by sysfs and the amd_ctl0
+ * bridge so both paths have identical bounds checks and locking. */
+int rc_volume_fail_member_slot(int slot)
+{
+	int ret = 0;
+
+	if (slot < 0 || slot >= RC_VOLUME_MAX_MEMBERS)
+		return -EINVAL;
+
+	mutex_lock(&rc_volume_lock);
+	/* member_count is lock-protected state — bounds-check it here. */
+	if (!rc_volume_disk) {
+		ret = -ENODEV;
+	} else if (slot >= rc_volume_member_count) {
+		ret = -EINVAL;
+	} else if (!rc_volume_members[slot]) {
+		ret = -ENODEV;
+	} else {
+		rc_printk(RC_WARN,
+			  "rc_volume: member %d (%s) FAILED by operator\n",
+			  slot, pci_name(rc_volume_members[slot]->pdev));
+		/* mark_failed itself is lock-free (ISR-safe), so holding
+		 * rc_volume_lock keeps validate+fail atomic against a
+		 * concurrent remove/re-add reusing this slot. */
+		rc_volume_member_mark_failed(slot);
+	}
+	mutex_unlock(&rc_volume_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(rc_volume_fail_member_slot);
+
+/* Nudge the live resync scheduler.  The scheduler picks one parked
+ * NEEDS_RESYNC member; RAID 5/6 and RAID 0 have no rebuild path here. */
+int rc_volume_request_resync(void)
+{
+	int ret = 0;
+	int i;
+	bool parked = false;
+
+	mutex_lock(&rc_volume_lock);
+	if (!rc_volume_disk) {
+		ret = -ENODEV;
+	} else if (rc_volume_raid_level != RC_LDT_RAID1 &&
+		   rc_volume_raid_level != RC_LDT_RAID10) {
+		ret = -EOPNOTSUPP;
+	} else if (get_disk_ro(rc_volume_disk)) {
+		ret = -EROFS;
+	} else {
+		for (i = 0;
+		     i < rc_volume_member_count && i < RC_VOLUME_MAX_MEMBERS;
+		     i++) {
+			if (rc_volume_members[i] &&
+			    READ_ONCE(rc_volume_member_state[i]) ==
+				RC_MEMBER_NEEDS_RESYNC) {
+				parked = true;
+				break;
+			}
+		}
+		if (!parked)
+			ret = -ENOENT;
+		else
+			schedule_work(&rc_volume_rebuild_work);
+	}
+	mutex_unlock(&rc_volume_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(rc_volume_request_resync);
+
 /* Operator/testing control: fail a member by slot number.  Same code path
  * as an ISR-detected death — the volume degrades (RAID1) or fails
  * (RAID0), and a subsequent manual reset of the member parks it
@@ -6400,29 +6610,8 @@ static ssize_t fail_member_store(struct device *dev,
 	ret = kstrtoint(buf, 0, &slot);
 	if (ret)
 		return ret;
-	if (slot < 0 || slot >= RC_VOLUME_MAX_MEMBERS)
-		return -EINVAL;
-
-	mutex_lock(&rc_volume_lock);
-	/* member_count is lock-protected state — bounds-check it here. */
-	if (slot >= rc_volume_member_count) {
-		mutex_unlock(&rc_volume_lock);
-		return -EINVAL;
-	}
-	if (!rc_volume_members[slot]) {
-		mutex_unlock(&rc_volume_lock);
-		return -ENODEV;
-	}
-	rc_printk(RC_WARN,
-		  "rc_volume: member %d (%s) FAILED by operator via sysfs\n",
-		  slot, pci_name(rc_volume_members[slot]->pdev));
-	/* Fail under the lock: mark_failed itself is lock-free (ISR-safe),
-	 * so holding rc_volume_lock is allowed — and it keeps validate+fail
-	 * atomic against a concurrent remove + re-add reusing this slot for
-	 * a different adapter (failing the wrong, freshly re-added member). */
-	rc_volume_member_mark_failed(slot);
-	mutex_unlock(&rc_volume_lock);
-	return count;
+	ret = rc_volume_fail_member_slot(slot);
+	return ret ? ret : count;
 }
 static DEVICE_ATTR_WO(fail_member);
 

@@ -127,6 +127,15 @@ u64 rc_amd_map_nested_raid10(u64 sector_lba, u32 chunk_sectors, int *target_memb
 
 void rc_amd_route_io_nested_raid10(u64 *lba, int *mbr, u32 chunk_sectors, int num_drives);
 blk_status_t rc_amd_handle_transient_retry(struct bio *bio, int retry_count, int max_retries, int device_status);
+
+/* Live-volume control surface exposed by /dev/amd_ctl0.  These read and
+ * mutate rc_nvme.c's assembled-volume state, not the async mirror engine. */
+struct AmdHardwarePayload;
+int rc_volume_get_status(u32 *mask);
+int rc_volume_get_inventory(struct AmdHardwarePayload *out);
+int rc_volume_fail_member_slot(int slot);
+int rc_volume_request_resync(void);
+
 int rc_amd_init_ioctl_bridge(void);
 void rc_amd_exit_ioctl_bridge(void);
 

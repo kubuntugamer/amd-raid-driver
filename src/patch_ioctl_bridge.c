@@ -8,154 +8,169 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
+#include <linux/miscdevice.h>
 #include <linux/capability.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
+#include "amd_raid_uapi.h"
 #include "patch_prototypes.h"
 
-#define AMD_RAID_MAGIC 'R'
-#define AMD_IOCTL_GET_STATUS   _IOR(AMD_RAID_MAGIC, 1, uint32_t)
-#define AMD_IOCTL_START_RESYNC _IOW(AMD_RAID_MAGIC, 2, uint32_t)
-#define AMD_IOCTL_FAIL_MEMBER  _IOW(AMD_RAID_MAGIC, 3, uint32_t)
-
-static int amd_ctl_major_number;
 #define DEVICE_NODE_NAME "amd_ctl0"
 
+static bool amd_ctl_registered;
+
 /**
- * Core Core IOCTL Execution Router Matrix
- * Routes user-space management requests to the engine.
+ * Core IOCTL execution router.
  *
- * This node can evict a member from a live array and start a resync, so it is
- * a privileged interface: every command is gated on CAP_SYS_ADMIN.  The check
- * lives here rather than in an open handler so that it also covers commands
- * added later, and it is namespace-unaware (capable(), not ns_capable()) on
- * purpose — these actions reshape state shared by the whole system, not a
- * per-namespace resource.
+ * Status and inventory are read-only diagnostics and may be used without
+ * privileges.  Commands that can reshape the array -- failing a member or
+ * starting a rebuild -- are gated on CAP_SYS_ADMIN.  This is deliberately
+ * namespace-unaware: these actions change state shared by the whole system.
  */
-static long amd_raid_ioctl_multiplexer(struct file *file, unsigned int cmd, unsigned long arg)
+static long amd_raid_ioctl_multiplexer(struct file *file, unsigned int cmd,
+				       unsigned long arg)
 {
-    uint32_t target_drive_index;
-    uint32_t resync_start_sector;
-    uint32_t resync_end_sector;
-    struct rc_resync_progress progress;
-    long ret;
+	switch (cmd) {
+	case AMD_IOCTL_GET_HARDWARE_INVENTORY: {
+		struct AmdHardwarePayload *payload;
+		int ret;
 
-    if (!capable(CAP_SYS_ADMIN)) {
-        pr_warn_ratelimited("rcraid_ctl: rejected ioctl 0x%x from unprivileged process %s (pid %d)\n",
-                            cmd, current->comm, current->pid);
-        return -EPERM;
-    }
+		payload = kzalloc(sizeof(*payload), GFP_KERNEL);
+		if (!payload)
+			return -ENOMEM;
 
-    switch (cmd) {
-    case AMD_IOCTL_GET_STATUS:
-        /*
-         * Live engine mask rather than a hardcoded "healthy" constant:
-         * bit 0 is RC_AMD_STATUS_LIVE, so an unmodified reader still
-         * sees 0x01 on a healthy array while degradation, an in-flight
-         * rebuild, resource pressure and media faults become visible.
-         */
-        {
-            uint32_t status_mask = rc_amd_get_status();
+		ret = rc_volume_get_inventory(payload);
+		if (!ret &&
+		    copy_to_user((void __user *)arg, payload, sizeof(*payload)))
+			ret = -EFAULT;
+		kfree(payload);
 
-            if (copy_to_user((void __user *)arg, &status_mask, sizeof(status_mask))) {
-                return -EFAULT;
-            }
-            pr_info("rcraid_ctl: dispatched status mask 0x%08x (%d inflight mirror bio(s), %d failed member(s))\\n",
-                    status_mask, rc_amd_inflight_contexts(),
-                    rc_amd_failed_member_count());
-        }
-        break;
+		if (ret)
+			pr_err("rcraid_ctl: inventory request failed: %d\n", ret);
+		return ret;
+	}
 
-    case AMD_IOCTL_START_RESYNC:
-        /*
-         * Argument is { start_sector, end_sector }.  The request is handed
-         * to kamd_resync and this returns immediately: the rebuild owns
-         * its own thread, so an ioctl caller never waits on the array and
-         * never blocks the mirror completion pump.
-         */
-        if (copy_from_user(&resync_start_sector, (void __user *)arg,
-                           sizeof(resync_start_sector))) {
-            return -EFAULT;
-        }
-        if (copy_from_user(&resync_end_sector,
-                           (void __user *)arg + sizeof(resync_start_sector),
-                           sizeof(resync_end_sector))) {
-            return -EFAULT;
-        }
+	case AMD_IOCTL_GET_STATUS: {
+		u32 status_mask;
+		int ret;
 
-        pr_warn("rcraid_ctl: user-space requested resync of sectors %u..%u\\n",
-                resync_start_sector, resync_end_sector);
-        ret = rc_amd_resync_request(resync_start_sector, resync_end_sector,
-                                    256 /* 128 KiB chunks, matches the
-                                         * volume layer's resync stride */,
-                                    -1 /* survivor chosen by the media layer */,
-                                    -1 /* routed per chunk */);
-        if (ret) {
-            pr_err("rcraid_ctl: resync request rejected: %ld\\n", ret);
-            return ret;
-        }
-        break;
+		ret = rc_volume_get_status(&status_mask);
+		if (ret)
+			return ret;
+		if (copy_to_user((void __user *)arg, &status_mask,
+				 sizeof(status_mask)))
+			return -EFAULT;
 
-    case AMD_IOCTL_FAIL_MEMBER:
-        if (copy_from_user(&target_drive_index, (void __user *)arg, sizeof(target_drive_index))) {
-            return -EFAULT;
-        }
-        pr_alert("rcraid_ctl: user-space command forcing eviction of member index %u\\n",
-                 target_drive_index);
+		pr_info("rcraid_ctl: live status mask 0x%08x\n", status_mask);
+		return 0;
+	}
 
-        /* Latches the slot failed: rebuild routing avoids it and the
-         * status mask reports the array degraded. */
-        ret = rc_amd_fail_member(target_drive_index);
-        if (ret) {
-            pr_err("rcraid_ctl: member index %u out of range\\n", target_drive_index);
-            return ret;
-        }
+	case AMD_IOCTL_START_RESYNC: {
+		struct amd_resync_range range;
+		int ret;
 
-        /* A rebuild aimed at that slot is meaningless now — stop it
-         * rather than let it fail one chunk at a time. */
-        rc_amd_get_resync_progress(&progress);
-        if (progress.state == RC_RESYNC_RUNNING &&
-            progress.target_member == (int)target_drive_index) {
-            pr_warn("rcraid_ctl: cancelling rebuild writing to evicted member %u\\n",
-                    target_drive_index);
-            rc_amd_resync_cancel();
-        }
-        break;
+		if (!capable(CAP_SYS_ADMIN)) {
+			pr_warn_ratelimited("rcraid_ctl: rejected resync from unprivileged process %s (pid %d)\n",
+					    current->comm, current->pid);
+			return -EPERM;
+		}
+		if (copy_from_user(&range, (void __user *)arg, sizeof(range)))
+			return -EFAULT;
 
-    default:
-        return -EINVAL;
-    }
+		/*
+		 * The live rebuild scheduler rebuilds a parked member from its
+		 * survivor; the request's sector range is informational.  RAID
+		 * 5/6 and RAID 0 have no live rebuild path and are refused by
+		 * rc_volume_request_resync().
+		 */
+		ret = rc_volume_request_resync();
+		if (ret) {
+			pr_err("rcraid_ctl: live resync request rejected: %d\n",
+			       ret);
+			return ret;
+		}
+		pr_info("rcraid_ctl: live resync queued (range %u..%u ignored; scheduler picks a parked member)\n",
+			range.start_sector, range.end_sector);
+		return 0;
+	}
 
-    return 0;
+	case AMD_IOCTL_FAIL_MEMBER: {
+		u32 target_drive_index;
+		int ret;
+
+		if (!capable(CAP_SYS_ADMIN)) {
+			pr_warn_ratelimited("rcraid_ctl: rejected member eviction from unprivileged process %s (pid %d)\n",
+					    current->comm, current->pid);
+			return -EPERM;
+		}
+		if (copy_from_user(&target_drive_index, (void __user *)arg,
+				   sizeof(target_drive_index)))
+			return -EFAULT;
+
+		pr_alert("rcraid_ctl: user-space command forcing eviction of member index %u\n",
+			 target_drive_index);
+		ret = rc_volume_fail_member_slot((int)target_drive_index);
+		if (ret)
+			pr_err("rcraid_ctl: member index %u rejected: %d\n",
+			       target_drive_index, ret);
+		return ret;
+	}
+
+	case AMD_IOCTL_COMMIT_NEW_ARRAY:
+	case AMD_IOCTL_DESTROY_ARRAY:
+		if (!capable(CAP_SYS_ADMIN)) {
+			pr_warn_ratelimited("rcraid_ctl: rejected configuration change from unprivileged process %s (pid %d)\n",
+					    current->comm, current->pid);
+			return -EPERM;
+		}
+		/*
+		 * Array creation/destruction rewrites firmware-owned metadata.
+		 * The driver does not implement that path yet; fail loudly
+		 * instead of pretending the request was applied.
+		 */
+		pr_warn_ratelimited("rcraid_ctl: array configuration ioctl 0x%x is not implemented\n",
+				    cmd);
+		return -EOPNOTSUPP;
+
+	default:
+		return -EINVAL;
+	}
 }
 
-/* Bind file system dispatch matrix operation targets */
 static const struct file_operations amd_ctl_fops = {
-    .owner = THIS_MODULE,
-    .unlocked_ioctl = amd_raid_ioctl_multiplexer,
-    .compat_ioctl = amd_raid_ioctl_multiplexer,
+	.owner = THIS_MODULE,
+	.unlocked_ioctl = amd_raid_ioctl_multiplexer,
+	.compat_ioctl = amd_raid_ioctl_multiplexer,
 };
 
-/**
- * Module Initialization Integration Entries
- */
+static struct miscdevice amd_ctl_misc = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = DEVICE_NODE_NAME,
+	.fops = &amd_ctl_fops,
+	.mode = 0644,
+};
+
 int rc_amd_init_ioctl_bridge(void)
 {
-    amd_ctl_major_number = register_chrdev(0, DEVICE_NODE_NAME, &amd_ctl_fops);
-    if (amd_ctl_major_number < 0) {
-        pr_err("rcraid_ctl: Failed to allocate character major character device registration matrix.\\n");
-        return amd_ctl_major_number;
-    }
-    pr_info("rcraid_ctl: HighPoint-style control interface registered. Assigned Major ID: %d\\n", amd_ctl_major_number);
-    return 0;
+	int ret;
+
+	ret = misc_register(&amd_ctl_misc);
+	if (ret) {
+		pr_err("rcraid_ctl: failed to register /dev/%s: %d\n",
+		       DEVICE_NODE_NAME, ret);
+		return ret;
+	}
+	amd_ctl_registered = true;
+	pr_info("rcraid_ctl: /dev/%s registered (minor %d)\n",
+		DEVICE_NODE_NAME, amd_ctl_misc.minor);
+	return 0;
 }
 
-/**
- * Module Cleanup Elimination Entries
- */
 void rc_amd_exit_ioctl_bridge(void)
 {
-    if (amd_ctl_major_number >= 0) {
-        unregister_chrdev(amd_ctl_major_number, DEVICE_NODE_NAME);
-    }
+	if (!amd_ctl_registered)
+		return;
+	misc_deregister(&amd_ctl_misc);
+	amd_ctl_registered = false;
+	pr_info("rcraid_ctl: /dev/%s unregistered\n", DEVICE_NODE_NAME);
 }

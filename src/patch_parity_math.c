@@ -163,8 +163,9 @@ static __attribute__((constructor)) void rc_parity_init(void)
  * Calculates Left-Asymmetric Distributed Parity offsets across member slots.
  *
  * On-disk encoding: the LEVEL comes from the LogicalDevice DeviceType only
- * (RAID 5 = 0x1BFA, RAID 6 = 0x1BF5, both inferred from the vendor dispatch
- * table).  An earlier revision of this comment claimed FirstCount =
+ * (RAID 5 = 0x1BF5, RAID 6 = 0x1BFA; confirmed by the vendor dispatch,
+ * which derives parity count as (devtype == 0x1BFA) + 1, and by a BIOS-created
+ * 3-disk RAID 5 record).  An earlier revision of this comment claimed FirstCount =
  * N-1 / N-2 and SecondCount = 1 / 2 encoded the level; that cannot be right
  * — FirstCount x SecondCount = Devices on every real record, and neither
  * N-1 x 1 nor N-2 x 2 equals N — so a count-encoded 0x1BF6 record is a
