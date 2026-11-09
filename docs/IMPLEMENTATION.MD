@@ -194,7 +194,8 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
 - [ ] **RAID5 / RAID6** — **read-only, 2026-11-08.** GF(2^8) parity math and
       the row-rotating layout map are done (`src/patch_parity_math.c`, the one
       place to change once a vendor array confirms the placement); the level is
-      identified from the LD `DeviceType` (`0x1BFA` / `0x1BF5`), a parity volume
+      identified from the LD `DeviceType` (`0x1BF5` / `0x1BFA`, confirmed on a
+      BIOS-created 3-disk RAID 5), a parity volume
       assembles at `(N-1)` / `(N-2)` × per-member user size, and reads go
       through the shared map with the queue capped at one stripe per request.
       Writes and discards are refused and the volume is forced read-only.
@@ -291,20 +292,23 @@ rebuild) being the definition of the category. The items below are what
 
 ### Management & monitoring plane
 
-- [ ] **Register the control bridge (`/dev/amd_ctl0`)** —
-      `rc_amd_init_ioctl_bridge()` has **no caller**, so the misc device is
-      never created and every `AMD_IOCTL_*` command in
-      `src/patch_ioctl_bridge.c` is unreachable in a shipped build. Two
-      consequences: the `capable(CAP_SYS_ADMIN)` gate added for issue #4 is
-      latent rather than protective (it was verified with a throwaway build
-      that wires the call up), and `rcraidctl` below has no transport. It is
-      not a one-line fix: `register_chrdev()` allocates a major but creates
-      no node *and reallocates it on every load* (505 → 504 across an
-      unload/reload was observed), so the device has to come from
-      `class_create()` / `device_create()` — or an installed udev rule that
-      mknods the current major — before any caller can open it.
-      *Touch points:* `rc_init()` in `rc_main.c`, `rc_amd_init_ioctl_bridge()`,
-      and `rc_amd_exit_ioctl_bridge()` unwinding on the failure paths.
+- [x] **Register the control bridge (`/dev/amd_ctl0`)** —
+      `rc_init()` calls `rc_amd_init_ioctl_bridge()`, which registers a
+      `misc` device at `/dev/amd_ctl0`; `rc_exit()` removes it before volume
+      teardown. `register_chrdev()` was replaced because it allocated a major
+      but created no node and reallocated the major on every load.
+      Read-only `GET_STATUS` / `GET_HARDWARE_INVENTORY` are unprivileged;
+      `FAIL_MEMBER`, `START_RESYNC`, `COMMIT_NEW_ARRAY`, and `DESTROY_ARRAY`
+      require `CAP_SYS_ADMIN`. The bridge routes to the assembled volume
+      (`rc_volume_*`), not the idle async engine. Array create/destroy still
+      return `-EOPNOTSUPP` because the metadata writer does not exist.
+      *Touch points:* `rc_init()`/`rc_exit()` in `rc_main.c`,
+      `src/patch_ioctl_bridge.c`, and `src/amd_raid_uapi.h`.
+
+- [ ] **`rcraidctl` / live control CLI** — the transport now exists, but no
+      CLI consumes it. Next step is a small tool over
+      `AMD_IOCTL_GET_STATUS`, `AMD_IOCTL_GET_HARDWARE_INVENTORY`, and
+      `AMD_IOCTL_FAIL_MEMBER`, with `START_RESYNC` limited to RAID 1/10.
 
 - [x] **Array state observability — sysfs half** — status queryable by a
       tool, not dmesg: volume state (online/dead/resetting), per-member
@@ -438,7 +442,7 @@ ORLM, COW, P2PDMA, io_uring, ZNS/FDP) are not on the daily-driver path at all.
 | Phase | Feature | Status (2026-11-08) | Enables |
 |---|---|---|---|
 | 0 | RAID 0 / 1 / 10 I/O + rebuild | ✅ RAID0 and RAID1 shipped and hardware-validated; RAID10 feature-complete, array-box run pending ([VALIDATION_RAID10.md](VALIDATION_RAID10.md)) | Production baseline |
-| 1 | RAID 5/6 I/O + rebuild | 🟡 Assembly + reads wired, forced read-only, writes refused; placement unconfirmed (issue #6); no parity rebuild | Inspect and read existing parity arrays |
+| 1 | RAID 5/6 I/O + rebuild | 🟡 Assembly + reads wired, forced read-only, writes refused; first firmware 3-disk RAID 5 metadata parsed 2026-11-08 (`0x1BF5`, N=3, `(N-1)` × user size), load/read run pending; placement unconfirmed (issue #6); no parity rebuild | Inspect and read existing parity arrays |
 | 2 | Metadata writer + TUI create | ⏳ Planned — leads the next-PR order: `mkmeta.py` writes RAID0/1 only, so the TUI's 10/5/6 choices stop at an error message | Create RAID 5/6 arrays |
 | 3 | OCE (Online Capacity Expansion) | 🗺️ Roadmap — this driver | Add drives online, restripe, grow FS |
 | 4 | ORLM (Online RAID Level Migration) | 🗺️ Roadmap — this driver | RAID 0↔5↔6↔10 online, zero host CPU |
@@ -486,9 +490,13 @@ rather than code.
    gap between "the installer creates parity arrays" being true and it
    being a documented dead end.
 2. **Confirm the RAID5/6 on-disk placement** (issues #6 and #3) — the
-   read-only parity path assembles and reads, but the row-rotating placement
-   in `src/patch_parity_math.c` and the RAID6 Q algorithm (GF(2⁸) vs
-   EVENODD) are unconfirmed against any vendor array. Everything downstream
+   read-only parity path assembles and reads, and a real 3-disk RAID 5 now
+   exists on the test box (`0x1BF5`, N=3, `(N-1)` × user size), but the
+   array was zeroed at creation. The row-rotating placement in
+   `src/patch_parity_math.c` and the RAID6 Q algorithm (GF(2⁸) vs EVENODD)
+   are still unconfirmed against vendor-written data. A staged fixture can
+   prove the driver reads the documented map, but only data written through
+   RAIDXpert2/Windows can prove the firmware writes it. Everything downstream
    is built on that assumption, so it gates trusting parity reads at all.
 3. **RAID10 array-box run** — [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md)'s
    results table is empty and it is the only thing between a finished
@@ -499,10 +507,9 @@ rather than code.
 4. **SMART pass-through** — per-member health visibility (SMART log
    LID=0x02, temperature, wear). Small, isolated, no data-path risk, and
    currently the largest user-visible gap after array creation.
-5. **Register the control bridge → uevents → `rcraidctl`** — in that order:
-   the ioctl transport does not exist today (see the management item above),
-   so a CLI has nothing to talk to, and uevents are the cheap half of
-   monitoring once state transitions are already tracked.
+5. **Control bridge → uevents → `rcraidctl`** — the ioctl transport is now
+   registered and live; the remaining work is a CLI and uevents. uevents are
+   the cheap half of monitoring once state transitions are already tracked.
 6. **Multi-volume support** (the BIOS can carry multiple arrays; the
    committed-generation parser already sees every LD record — the volume
    layer is what's single-instance), the **writes-enabled-by-default latch**,

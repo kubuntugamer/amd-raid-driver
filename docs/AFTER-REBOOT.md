@@ -3,11 +3,23 @@
 State as of **2026-11-08**, `main` = `a2d9e2b` + this file. Read this top to
 bottom before touching anything in the UEFI.
 
+> **Status update 2026-11-08 (later): steps 1–2 are done.** The RAIDXpert2
+> 3-disk RAID 5 exists and its metadata parses from the members (`0x1BF5`,
+> `Devices=3`, `Capacity = 2 × UserDataSize`, `ChunkIndex=3` → 256 KiB).
+> Do **not** re-create the array. The next action is the load/read run; on the
+> current live-USB session use `scripts/raid5-live-test.sh` (or the manual
+> bind/load steps in §4 for the installed OS). That run is blocked only on the
+> one-time MOK enrollment for the live session's local signing key — the
+> installed OS's `minerva` key is not present in this session. See issue #1
+> for the recorded geometry and `docs/VALIDATION_RAID5.md` for the layout
+> check that is still open (issue #6).
+
 **Why:** the firmware array can only be created in the RAIDXpert2 UEFI
-utility. That is the only reason — the module signing key
+utility. That is the only reason — on the installed OS the module signing key
 (`CN=minerva Secure Boot Module Signature key`) is **already enrolled** in MOK
-and its fingerprint matches `/var/lib/shim-signed/mok/MOK.der`, so signing
-`rcraid.ko` works without a second reboot.
+and its fingerprint matches `/var/lib/shim-signed/mok/MOK.der` there, so
+signing `rcraid.ko` works without a second reboot **on that system**. The
+live-USB session uses a separate local key; see the status note above.
 
 **The rule for this run: the driver stays out of the initramfs.** Do not run
 `install-dkms.sh`, `install-livecd.sh`, or `update-initramfs` before the array
@@ -189,10 +201,11 @@ Order from `docs/IMPLEMENTATION.MD` ("Suggested next-PR order"):
    `raid5`/`raid10` in `LEVELS` but `main()` exits with "metadata is untested"
    for both, so those choices dead-end. 3×2 RAID 10 adjacency is still
    unconfirmed (`docs/VALIDATION_RAID10.md`, step 1) — prefer 2×2 until checked.
-2. **Register `/dev/amd_ctl0`** — `rc_amd_init_ioctl_bridge()` still has no
-   caller, so the `CAP_SYS_ADMIN` gate is latent and `rcraidctl` has no
-   transport. Needs `class_create()`/`device_create()`, not just
-   `register_chrdev()`, which reallocates its major each load.
+2. **Verify `/dev/amd_ctl0`** — the bridge is now registered as a `misc`
+   device and routed at the live volume. After the module loads, check the
+   node exists, `GET_STATUS`/`GET_HARDWARE_INVENTORY` work as a normal user,
+   and `FAIL_MEMBER` returns `-EPERM` without root. `START_RESYNC` is still
+   RAID 1/10 only; RAID 5 correctly returns `-EOPNOTSUPP`.
 3. **H-5** — trace where `ctrl_mode` is set relative to `spin_lock_init()` and
    IRQ registration in `rc_hw_init()`, then annotate `docs/AUDIT.MD` as fixed
    or open. It is the only High still marked "not re-checked".

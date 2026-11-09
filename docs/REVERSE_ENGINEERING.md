@@ -314,11 +314,11 @@ explicitly; every other value (including `1` and `0`→`1`) falls to 64 KiB.
 
 | DeviceType | RAID level | Linux `#define` |
 |---|---|---|
-| `0x1BF5` | RAID6 (per the writer's dispatch table — inferred) | `RC_LDT_RAID6` |
+| `0x1BF5` | RAID5 (confirmed 2026-11-08 on a BIOS-created 3-disk array) | `RC_LDT_RAID5` ✅ |
 | `0x1BF6` | RAID0 | `RC_LDT_RAID0` ✅ |
 | `0x1BF7` | RAID1 | `RC_LDT_RAID1` (never yet seen on disk) |
 | `0x1BF9` | (per-member "raw disk" variant) | `RC_LDT_SINGLE` |
-| `0x1BFA` | RAID5 | `RC_LDT_RAID5` ✅ |
+| `0x1BFA` | RAID6 (parity count = `(devtype == 0x1BFA) + 1`) | `RC_LDT_RAID6` |
 | `0x1BFB` | RAID10 | `RC_LDT_RAID10` |
 
 **Hardware correction (2026-07-10, TRX50 metadata dumps during RAID1
@@ -336,12 +336,21 @@ the Windows in-memory DeviceType is presumably recomputed from the counts.
 The Linux driver derives the RAID0/RAID10/RAID1 level from the counts
 (`rc_ld_level_from`) and refuses combinations it has no mapping for. Parity
 levels are the one exception — the counts cannot express them at all, so
-`0x1BFA` / `0x1BF5` select RAID5 / RAID6 directly and a count-encoded
+`0x1BF5` / `0x1BFA` select RAID5 / RAID6 directly and a count-encoded
 `0x1BF6` record is never read as a parity array (issue #3). This encoding was
 independently corroborated on X399 SATA RAID10 (`FirstCount=2,
 SecondCount=2, devices=4`) — see
 [External corroboration](#external-corroboration-x399-zenith-extreme-sata-raid10)
 below.
+
+**Hardware correction (2026-11-08): the two parity DeviceTypes were
+swapped in the table above.** A RAIDXpert2 BIOS-created 3-disk RAID 5
+(`devices=3, FirstCount=1, SecondCount=3, Capacity=2 × per-member user
+size`) writes `DeviceType=0x1BF5`. The vendor dispatch confirms the
+direction: `FUN_140055760` and `FUN_140052404` compute
+`parity_count = (devtype == 0x1BFA) + 1`, so `0x1BFA` is the two-parity
+(RAID6) encoding and `0x1BF5` is single-parity (RAID5). The on-disk parity
+*placement* is still unconfirmed (issue #6).
 
 AMD also writes one single-device "raw disk" LD per physical member
 (`devtype=0x1BF9, devices=1, capacity=NSZE`); the parser skips those by

@@ -59,7 +59,9 @@ Not yet: **persistent degraded state** (in-memory only — a reload
 re-assembles as if in sync; needs config-ring writer RE), **RAID10 hardware
 validation** (the level is feature-complete; the array-box run in
 [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) is what's missing), RAID5/6
-**write** dispatch (parity volumes assemble and read today, read-only),
+**write** dispatch (parity volumes assemble and read today, read-only; the
+first firmware-created 3-disk RAID 5 is now on the test box and its metadata
+parses as `0x1BF5`, but the module load/read run is pending),
 hot-plug/rebuild, SMART pass-through,
 multi-volume, Secure Boot signing out of the box, array creation from Linux
 beyond RAID0/RAID1 (the live installer now stamps real RAIDCore metadata for
@@ -72,8 +74,42 @@ The sections below are the dated implementation log — how each piece was built
 kept for forensics. Where an early "Not started" / "Next steps" note has since
 been implemented, it's marked.
 
-## 2026-11-08 — RAID1 classification fix; installer stamps real metadata
+## 2026-11-08 — First firmware RAID 5 metadata; RAID1 classification fix; installer stamps real metadata
 
+- **Real 3-disk RAID 5 record parsed; `0x1BF5` is RAID 5, not RAID 6.** A
+  RAIDXpert2 BIOS-created 3× Sabrent Rocket Q array reports
+  `DeviceType=0x1BF5, Devices=3, FirstCount=1, SecondCount=3,
+  Capacity=15,625,838,592`, `UserDataSize=7,812,919,296` per member
+  (`= Capacity/2`, i.e. `(N-1)`), `UserDataOffset=0x105000`, and
+  `ChunkIndex=3` (256 KiB). The driver rejected it outright because it mapped
+  `0x1BF5` to RAID 6 and requires ≥ 4 members. The vendor dispatch settles the
+  encoding — parity count = `(DeviceType == 0x1BFA) + 1` — so the two
+  constants were swapped; `rc_linux.h` now has RAID5=`0x1BF5`,
+  RAID6=`0x1BFA`. Level *placement* (left-symmetric row rotation) is still
+  unconfirmed (issue #6). New `docs/VALIDATION_RAID5.md` records the observed
+  geometry and the vendor-written-data check that would settle it.
+- **A non-member disk with valid RAIDCore metadata no longer takes the
+  legacy fallback.** The array box has a fourth `1022:B000` drive whose
+  metadata is valid but whose DeviceId appears in no LD record (a spare, or a
+  stale member). Since `md_valid` was set but never read, such a disk fell
+  through to the BDF-ordered fallback as a RAID0/2-member seed and could
+  out-race the real members at probe time. The parser now sets
+  `ld_record_seen` when a committed generation names an LD, and
+  `rc_volume_register_member()` refuses the fallback when that LD does not
+  name the disk. The fallback remains for metadata old enough to have no LD
+  record at all.
+- **Read-only RAID 5 validation tooling.** `scripts/validate-raid5.sh` checks
+  the trust gate, `level=raid5`/member count/`(N-1)` capacity, read-only
+  enforcement (including a write that must fail), cache-dropped O_DIRECT
+  reads at five offsets with repeatability, and a dmesg tripwire. It never
+  writes to the array. `scripts/raid5-live-test.sh` wraps it for the live
+  box: signs/loads the module, binds the members (restoring them on an
+  `insmod` failure), and verifies a staged 64 MiB ext4 fixture whose rows
+  carry `P = D0 XOR D1`. The fixture was written directly to the members,
+  reconstructed byte-for-byte, and `e2fsck`-checked. **Not yet run against a
+  loaded driver on this box:** Secure Boot rejected the unsigned test module
+  (`Key was rejected by service`); a local MOK key is signed and queued for
+  enrollment, which needs one reboot.
 - **`rc_ld_level_from()` never mapped firmware's RAID1 encoding.** Real
   firmware writes `DeviceType 0x1BF6` with `FirstCount=1 SecondCount=2` for a
   2-way mirror (see `rc_linux.h`), but the `0x1BF6` arm only mapped
@@ -94,22 +130,24 @@ been implemented, it's marked.
   tree that produces valid blocks — and reads the magic back off every member
   before reporting success. RAID10/5/6 selections fail with a message pointing
   at firmware RAIDXpert2 rather than stamping an unvalidatable layout.
-- **The `amd_ctl0` ioctl node is now privileged (issue #4).** Nothing in
-  `amd_raid_ioctl_multiplexer()` checked the caller, so any local user could
-  force-evict a member (`AMD_IOCTL_FAIL_MEMBER`) or start a resync on a live
-  array. Every command is now gated on `capable(CAP_SYS_ADMIN)` — `capable()`
-  rather than `ns_capable()`, because these actions reshape state shared by the
-  whole system — returning `-EPERM` and a rate-limited log naming the caller.
-  The check sits in the dispatcher so commands added later inherit it. No
-  in-tree consumer regresses: `rcraidXpert` issues its commands under magic
-  `'a'` (`0x30..0x32`), which already fell to `-EINVAL`.
-  Runtime-verified on the host with a throwaway build that wires the bridge up:
-  an unprivileged process opening the node and issuing `FAIL_MEMBER` got `OK`
-  before the gate (the vulnerability was real and reachable, not theoretical)
-  and `EPERM` with a `rejected ioctl … from unprivileged process` log after it.
-  **`rc_amd_init_ioctl_bridge()` currently has no caller**, so in the shipped
-  NVMe path `/dev/amd_ctl0` is never registered and issue #4 is latent: the gate
-  matters the day the bridge is wired into `rc_init()`, and only then.
+- **The `amd_ctl0` control node is registered and live.** `rc_init()` now
+  calls `rc_amd_init_ioctl_bridge()`, which registers a `misc` device at
+  `/dev/amd_ctl0` (mode 0644). `rc_amd_exit_ioctl_bridge()` removes it before
+  the volume is torn down. The old `register_chrdev()` path was replaced
+  because it allocated a major but never created a node.
+  Read-only `AMD_IOCTL_GET_STATUS` and `AMD_IOCTL_GET_HARDWARE_INVENTORY` are
+  available without privileges, so `rcraidXpert` can open the node `O_RDONLY`.
+  `AMD_IOCTL_FAIL_MEMBER`, `AMD_IOCTL_START_RESYNC`,
+  `AMD_IOCTL_COMMIT_NEW_ARRAY`, and `AMD_IOCTL_DESTROY_ARRAY` require
+  `capable(CAP_SYS_ADMIN)` — `capable()` rather than `ns_capable()`, because
+  these actions reshape state shared by the whole system — and log the caller
+  on refusal. Array create/destroy remain `-EOPNOTSUPP`; the metadata-writing
+  path is still unimplemented.
+  The commands now target the assembled volume (`rc_volume_get_status()`,
+  `rc_volume_fail_member_slot()`, `rc_volume_request_resync()`) instead of the
+  idle async mirror engine. RAID 5/6 resync is refused because there is no
+  live rebuild path. The kernel and `rcraidXpert` share
+  `src/amd_raid_uapi.h` for the ioctl numbers and packed inventory payload.
 - **The QEMU rig resolves a static busybox itself (issue #5).** It used
   `command -v busybox`, i.e. PATH order, which normally lands on the dynamic
   `/usr/bin/busybox` from `busybox-initramfs`; the "not static" check then
@@ -779,10 +817,14 @@ single hung command or transient fault without intervention.
   earlier versions.
 - **RAID 5/6 metadata was rejected by `rc_ld_level_from`, and RAID 6 N=4 was
   misparsed as RAID 10** (issue #3) — **fixed 2026-11-08.** A parity level is
-  now identified from its explicit `DeviceType` only (`0x1BFA` RAID5, `0x1BF5`
+  now identified from its explicit `DeviceType` only (`0x1BF5` RAID5, `0x1BFA`
   RAID6), because `FirstCount × SecondCount = Devices` cannot express a parity
   layout; a count-encoded `0x1BF6` record stays RAID0/RAID10 and an explicit
-  RAID 6 record can no longer fall through to the RAID10 arm. Still open: RAID 6
+  RAID 6 record can no longer fall through to the RAID10 arm. The two values
+  were swapped in the first cut of this fix and corrected on 2026-11-08 after a
+  BIOS-created 3-disk RAID 5 record read `devtype=0x1BF5, devices=3,
+  capacity=2 × per-member user size`; the vendor dispatch derives the parity
+  count as `(devtype == 0x1BFA) + 1`, which agrees. Still open: RAID 6
   Q in the vendor blob appears to be EVENODD (prime 17), not the GF(2⁸)
   Reed-Solomon Q in `patch_parity_math.c` — not confirmed against a test
   vector.
