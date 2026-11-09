@@ -123,8 +123,9 @@ This is the recommended deployment path for setting up a fresh Linux environment
 ### Phase 2 — Target Chroot System Locking
 1. Return to your active terminal where the installer script is waiting and press **Enter**.
 2. The engine safely scans your partitions, mounts your target OS root filesystem, bind-mounts virtual filesystems, and chroots inside.
-3. It installs DKMS, bakes the driver hooks straight into the new initramfs boot images, sets up structural udev definitions, and registers a fallback UEFI NVRAM string entry.
+3. It installs DKMS, bakes the driver hooks straight into the new initramfs boot images, sets up structural udev definitions, and registers a fallback UEFI NVRAM string entry. If you accept its offer to enrol a module-signing key, the driver is signed too, so Secure Boot can be switched back on later.
 4. Once the message flashes `🎉 DONE!`, run **`sudo reboot`** to launch your fresh system straight from the array!
+5. With a signing key enrolled, that first boot stops at shim's **MOK management** screen: **Enroll MOK → Continue → Yes**, type the one-time password the installer printed, and let it reboot. (The live session itself has to run with Secure Boot **off** — the installer refuses to start otherwise, because the live kernel rejects the unsigned module and the key it needs cannot be enrolled without rebooting the session. See `docs/INSTALL.md`, "Secure Boot".)
 
 ---
 

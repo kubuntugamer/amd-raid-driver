@@ -206,7 +206,9 @@ the module on disk, and — decisively — the module inside that kernel's
 initramfs. It supports both initramfs-tools (Debian/Ubuntu,
 `lsinitramfs`) and dracut (Fedora/RHEL/Arch, `lsinitrd`) layouts, prints
 the exact fix command for any kernel that fails, and exits non-zero if
-any installed kernel would not boot. Note the DKMS installer also drops
+any installed kernel would not boot. It also warns when a MOK enrolment is
+still queued: the next boot will stop at the MOK prompt, and until it is
+answered Secure Boot does not trust the signed module. Note the DKMS installer also drops
 `/etc/apt/apt.conf.d/52-rcraid-kernel-hold` on apt systems so
 unattended-upgrades never installs a kernel behind your back.
 
@@ -222,34 +224,71 @@ This usually appears right after a BIOS reset (CMOS clear, firmware
 update, "load optimized defaults") — all of which silently re-enable
 Secure Boot.
 
-**Fix: sign the module with an enrolled Machine Owner Key**, or turn
-Secure Boot off.
+**Fix: sign the module with a Machine Owner Key the firmware trusts**, or
+turn Secure Boot off.
 
-`install-dkms.sh` handles the signing path. It looks for a key pair in
-`/var/lib/shim-signed/mok/` (Debian/Ubuntu's shim key) or
-`/var/lib/dkms/`, confirms the certificate is actually enrolled in MOK
-(matching on the SHA-1, since several keys can share a subject), writes
-`/etc/dkms/framework.conf.d/rcraid-signing.conf` so DKMS signs every
-build — including the automatic rebuilds on kernel updates — and then
-verifies the signature of what it installed. With Secure Boot enforcing
-and no enrolled key it aborts up front instead of leaving an unbootable
-machine. Override the search with `RCRAID_MOK_KEY=` / `RCRAID_MOK_CERT=`.
+Signing is split across a reboot on purpose, and it is the reboot the install
+needs anyway. At install time the script puts a key pair on disk, points DKMS
+at it (`/etc/dkms/framework.conf.d/rcraid-signing.conf`, so kernel-update
+rebuilds are signed too) and queues a MOK enrolment. The first boot after the
+install completes it: shim's MOK manager runs **before** the kernel, so by the
+time the initramfs loads `rcraid.ko` the key is already trusted. There is no
+"enrol, reboot, install, reboot" round trip.
 
-To create a key from scratch (one-time; costs one reboot):
+What that looks like:
 
-```bash
-openssl req -new -x509 -newkey rsa:2048 -nodes -days 36500 \
-    -subj "/CN=rcraid module signing/" \
-    -keyout MOK.priv -outform DER -out MOK.der
-sudo mokutil --import MOK.der   # set a one-time password; on the next
-                                # reboot the MOK manager prompts you to
-                                # enrol the key with that password
-```
+- `install-dkms.sh` prints a one-time password and names the key it used.
+- At the next boot, shim shows "MOK management": **Enroll MOK → Continue →
+  Yes**, type the password, and let it reboot.
+- If a key is already enrolled — the usual case on Ubuntu/Debian, where
+  `update-secureboot-policy` has created the shim key — it is reused, with no
+  prompt and no password.
 
-Keep `MOK.priv` and `MOK.der` somewhere permanent: an enrolled
-certificate whose private key is gone cannot sign anything, and the
-enrolment cannot be reused. Put them in `/var/lib/shim-signed/mok/` to
-have `install-dkms.sh` find them automatically.
+Skipping the prompt leaves the key untrusted, so the kernel rejects
+`rcraid.ko` and the array is missing at that boot. If `/` lives on the array,
+that boot cannot complete: answer the prompt (it comes back until it is
+answered, and `sudo mokutil --import <cert>` re-queues it), or switch Secure
+Boot off to get in.
+
+All of this assumes the boot chain goes through shim, the default on Ubuntu,
+Debian and Fedora. A kernel started directly by firmware through its own EFI
+stub never runs MOK manager, and there Secure Boot has to stay off.
+
+`install-dkms.sh` verifies the signature of what DKMS installed, and refuses to
+finish when Secure Boot is enforcing but signing could not be arranged (missing
+`mokutil`/`openssl`, a DKMS too old for `framework.conf.d`, a firmware that
+rejects the request) — that failure belongs at install time, not at the next
+boot. The knobs:
+
+| Variable | Effect |
+|---|---|
+| `RCRAID_MOK_KEY` / `RCRAID_MOK_CERT` | sign with this pair instead of the discovered one (DER certificate) |
+| `RCRAID_MOK_PASSWORD` | use this one-time enrolment password instead of a generated one |
+| `RCRAID_MOK_ENROLL=0` / `1` | live-USB installer: skip / force the target's key enrolment without asking |
+| `RCRAID_ALLOW_SECURE_BOOT=1` | install anyway, unsigned — you sign by hand |
+
+### Live USB and Secure Boot
+
+The live session cannot run with Secure Boot on: the live kernel refuses an
+unsigned out-of-tree module, and the key that would sign it can only be
+enrolled by rebooting the live session — which throws away the session and the
+key with it. `install-livecd.sh` stops and says so, instead of failing at
+`insmod` after the disks have already been handed to the distro installer.
+
+The sequence that works:
+
+1. Switch Secure Boot off in firmware setup.
+2. Run `sudo ./install-livecd.sh`. It asks whether the installed system should
+   get its own signing key (default yes) — say yes if you intend to switch
+   Secure Boot back on later.
+3. Let the first boot finish: shim asks for the MOK password that the installer
+   printed, exactly as in the DKMS flow above.
+4. Only then re-enable Secure Boot.
+
+If you never plan to enable Secure Boot, answer no (or set
+`RCRAID_MOK_ENROLL=0`) and nothing is created, signed, or prompted.
+
+### Signing by hand
 
 A plain `make` build (outside DKMS) is not signed for you, so that path
 still needs one step per build:
@@ -264,7 +303,26 @@ sudo "/usr/src/kernels/$(uname -r)/scripts/sign-file" \
     sha256 MOK.priv MOK.der "$MODULE"
 
 modinfo -F signer "$MODULE"    # must name your key
+
+# and enrol the certificate the way the installers do:
+sudo mokutil --import MOK.der  # one-time password; answer it at the next boot
 ```
+
+To create a pair yourself — only needed when you want a key of your own, since
+`install-dkms.sh` creates one when Secure Boot is on and nothing is enrolled:
+
+```bash
+openssl req -new -x509 -newkey rsa:2048 -nodes -days 36500 \
+    -subj "/CN=rcraid module signing/" \
+    -addext "extendedKeyUsage=codeSigning" \
+    -keyout MOK.priv -outform DER -out MOK.der
+```
+
+Keep `MOK.priv` somewhere permanent: an enrolled certificate whose private key
+is gone cannot sign anything, and the enrolment cannot be reused. Put the pair
+in `/var/lib/shim-signed/mok/` to have the installers find it automatically.
+`uninstall-dkms.sh` removes rcraid's DKMS drop-in but leaves the key pair alone
+— it is enrolled in firmware, and other modules may be signed with it too.
 
 If the OS boots from the array, the initramfs carries its own copy of
 the module — regenerate it so the copy loaded at boot is the signed one

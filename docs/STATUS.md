@@ -64,7 +64,7 @@ first firmware-created 3-disk RAID 5 is now on the test box, its metadata
 parses as `0x1BF5`, and the module load/read run is done — the volume
 assembles `optimal`, serves reads and is forced read-only),
 hot-plug/rebuild, SMART pass-through,
-multi-volume, Secure Boot signing out of the box, array creation from Linux
+multi-volume, array creation from Linux
 beyond RAID0/RAID1 (the live installer now stamps real RAIDCore metadata for
 the 0/1 layouts via `scripts/qemu-test/mkmeta.py`; 10/5/6 metadata, and the
 firmware-compatible records RAIDXpert2/Windows would accept, are still open).
@@ -74,6 +74,34 @@ RE ground truth is in [`REVERSE_ENGINEERING.md`](REVERSE_ENGINEERING.md).
 The sections below are the dated implementation log — how each piece was built,
 kept for forensics. Where an early "Not started" / "Next steps" note has since
 been implemented, it's marked.
+
+## 2026-11-08 — Installer side: module signing moved to the post-install reboot
+
+- **Both installers now split key signing across the reboot instead of
+  demanding an enrolment reboot before the install.** `install-dkms.sh` used
+  to abort under Secure Boot when no enrolled key existed, telling the user to
+  create one, `mokutil --import` it and reboot — then install, then reboot
+  again. It now creates the key pair (or reuses the shim key
+  `update-secureboot-policy` leaves in `/var/lib/shim-signed/mok/`), points
+  DKMS at it through `/etc/dkms/framework.conf.d/rcraid-signing.conf`, builds
+  and signs, and queues the enrolment with a generated one-time password. The
+  reboot the install already needs finishes the job: shim's MOK manager runs
+  before the kernel, so the module in the initramfs is trusted the first time
+  it loads. The check that DKMS really signed (per installed kernel) stays, and
+  now fails the install rather than the boot.
+- **`install-livecd.sh` cannot sign its own session**, and now says so up front
+  instead of dying at `insmod`: the live kernel rejects the unsigned module,
+  and the only key that could sign it would need an enrolment reboot of the
+  live session — discarding the session and the key. Secure Boot must be off
+  for the live phase; the installer then asks whether to give the *installed*
+  system a key, signs the DKMS build inside the target, queues the enrolment
+  there, and prints the password for the target's first boot. Re-enable Secure
+  Boot after that prompt is answered.
+- Shared logic lives in `scripts/lib/secure-boot.sh` (enforcement probe, key
+  discovery/creation, DKMS drop-in, `mokutil` enrolment with pending
+  verification, user-facing instructions); `verify-boot-safety.sh` reports a
+  still-queued enrolment, and `uninstall-dkms.sh` now removes rcraid's signing
+  drop-in (leaving the enrolled key, which other modules may share).
 
 ## 2026-11-08 — First firmware RAID 5 metadata; RAID1 classification fix; installer stamps real metadata
 

@@ -151,10 +151,14 @@ Two things protect your data and your OS install. Understand both:
    unbind your OS drive**, and identify members by serial rather than by
    slot or model string.
 
-Also note: the module is built **unsigned**. `install-dkms.sh` signs it
-through DKMS when an enrolled MOK key is available, and verifies the
-result; without such a key, **Secure Boot must be off** (see `INSTALL.md`).
-Both installers check this up front and tell you exactly what to do.
+Also note: the module is built **unsigned** unless an installer signs it.
+`install-dkms.sh` creates a MOK key when the firmware has no enrolled one,
+points DKMS at it, signs what it installs, and queues the enrolment — the
+reboot the install needs anyway completes it, because shim's MOK manager runs
+before the kernel. Without an enrolled key, **Secure Boot must be off**. The
+live-USB installer requires it off for the live session itself, then enrols
+the installed system's key at that system's first boot (see `INSTALL.md`,
+"Secure Boot").
 
 ---
 
@@ -164,7 +168,9 @@ Both installers check this up front and tell you exactly what to do.
 
 - BIOS in RAID mode, array already created in RAIDXpert (see `INSTALL.md`
   for the one-time BIOS setup).
-- Secure Boot disabled, or an enrolled MOK key for DKMS to sign with.
+- Secure Boot **off** for the live-USB install; the installed system's signing
+  key is enrolled at its first boot, after which Secure Boot can be switched
+  back on. If you never enable Secure Boot, no key is enrolled.
 - Kernel **≥ 6.15** (on Ubuntu 24.04 that means the HWE stack, 6.17+ —
   the 6.8 GA kernel is too old).
 - `sudo apt install build-essential linux-headers-$(uname -r)`
@@ -317,9 +323,10 @@ Full setup, troubleshooting, and the Secure-Boot / signing details are in
   claimed**; the AHCI path is unimplemented, so those devices stay bound to
   `ahci` (see #7).
 - **No array management** — create/modify the array in BIOS/RAIDXpert.
-- **Signing is installer-driven** — `install-dkms.sh` signs via DKMS when an
-  enrolled MOK key exists (including on kernel-update rebuilds); a plain
-  `make` build stays unsigned.
+- **Signing is installer-driven** — `install-dkms.sh` creates or reuses a MOK
+  key, signs through DKMS (including kernel-update rebuilds) and queues the
+  enrolment that the post-install reboot completes; a plain `make` build stays
+  unsigned.
 - **No retry of transient NVMe errors** — a failed command surfaces as an
   I/O error (`BLK_STS_IOERR`) even when the drive reports it as retryable
   (DNR=0); it isn't re-dispatched. Controller-level failures still trigger

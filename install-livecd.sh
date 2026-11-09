@@ -5,6 +5,37 @@ SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 [ "$(id -u)" -eq 0 ] || { echo "Run as root: sudo $0" >&2; exit 1; }
 
+. "$SRC_DIR/scripts/lib/secure-boot.sh"
+
+# Secure Boot has to be off for the live session, and that is a property of
+# where this script runs rather than an oversight: the live kernel refuses
+# unsigned out-of-tree modules, and the only key that could sign this
+# session's rcraid.ko would have to be enrolled by rebooting the live session —
+# a reboot that throws away the session and the key it just made.  Fail here,
+# before anything on disk is touched, instead of at insmod after the user has
+# already handed the disks to the installer.
+if secure_boot_enforcing; then
+    cat >&2 <<'EOF'
+ERROR: Secure Boot is enforcing, so this live session cannot load rcraid.ko.
+
+The live kernel rejects unsigned out-of-tree modules ("Key was rejected by
+service"), so /dev/rcraid0 never appears and there is nothing to install onto.
+No key can fix that from here: enrolling one takes a reboot of the live
+session, which is exactly the reboot this installer ends with.
+
+What works:
+  1. Switch Secure Boot off in firmware setup.
+  2. Run this installer.
+  3. Its FIRST boot afterwards enrolls the installed system's own signing key
+     in MOK (the installer queues the request; shim's MOK manager asks for the
+     password before the kernel starts).  Switch Secure Boot back on once that
+     prompt has been answered.
+
+See docs/INSTALL.md, "Secure Boot".
+EOF
+    exit 1
+fi
+
 echo "======================================================================"
 echo "🚀 INITIALIZING VERBOSE DRIVER COMPILATION AND INTERFACE HANDOFF"
 echo "======================================================================"
@@ -15,9 +46,11 @@ echo "🛠️  Step 2: Invoking Makefile tree compilation..."
 make -C "$SRC_DIR" clean all
 
 echo "🖥️  Step 3: Launching interactive Terminal GUI wizard configuration pass..."
-export TUI_ENV_FILE=$(mktemp)
+TUI_ENV_FILE=$(mktemp)
+export TUI_ENV_FILE
 "$SRC_DIR/scripts/phase1-tui.sh"
 
+# shellcheck source=/dev/null  # temp file created just above
 . "$TUI_ENV_FILE"
 rm -f "$TUI_ENV_FILE"
 
@@ -168,9 +201,6 @@ rmdir "$PROBE_DIR"
 
 [ -z "$TARGET_PART" ] && { echo "❌ Couldn't find a valid Linux rootfs on the array partitions." >&2; exit 1; }
 
-TARGET_FAMILY="debian"
-[ "$target_os" = "fedora" ] && TARGET_FAMILY="fedora"
-
 TARGET_MNT="/mnt/rcraid-target"
 mkdir -p "$TARGET_MNT"
 mount "$TARGET_PART" "$TARGET_MNT"
@@ -188,22 +218,145 @@ for part in /dev/rcraid0p*; do
 done
 cp -L /etc/resolv.conf "$TARGET_MNT/etc/resolv.conf" 2>/dev/null || true
 
-TGT_SRC="$TARGET_MNT/usr/src/rcraid-$(cat VERSION)"
+TGT_VER="$(cat "$SRC_DIR/VERSION")"
+TGT_SRC="$TARGET_MNT/usr/src/rcraid-${TGT_VER}"
 mkdir -p "$TGT_SRC" && cp -r "$SRC_DIR"/{Makefile,dkms.conf,VERSION,rc_*.c,rc_*.h} "$TGT_SRC/"
-sed -i "s/@PKGVER@/$(cat VERSION)/g" "$TGT_SRC/dkms.conf"
-mkdir -p "$TARGET_MNT/tmp/pkg" && cp -r "$SRC_DIR/packaging" "$TARGET_MNT/tmp/pkg/"
+sed -i "s/@PKGVER@/${TGT_VER}/g" "$TGT_SRC/dkms.conf"
 
-chroot "$TARGET_MNT" /bin/bash -c "
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq && apt-get install -y -qq build-essential linux-headers-\$(uname -r) dkms initramfs-tools pciutils efibootmgr >/dev/null
-    if [ -z \"\$(dkms status -m rcraid -v \$(cat /usr/src/rcraid-/VERSION) 2>/dev/null)\" ]; then dkms add -m rcraid -v \$(cat /usr/src/rcraid-/VERSION) --quiet || true; fi
-    dkms install -m rcraid -v \$(cat /usr/src/rcraid-/VERSION) -k \$(uname -r) --force
-    install -m 0755 /tmp/pkg/packaging/sbin/rcraid-bind /usr/sbin/rcraid-bind
-    sed 's/@SUBSYSTEM_VENDOR@/${SUBSYSTEM_VENDOR}/g' /tmp/pkg/packaging/udev/50-rcraid.rules.in > /etc/udev/rules.d/50-rcraid.rules
-    sed 's/@SUBSYSTEM_VENDOR@/${SUBSYSTEM_VENDOR}/g' /tmp/pkg/packaging/modprobe.d/rcraid.conf.in > /etc/modprobe.d/rcraid.conf
-    install -m 0755 /tmp/pkg/packaging/initramfs-tools/hooks/rcraid /etc/initramfs-tools/hooks/rcraid
-    update-initramfs -u -k all
-"
+# Ask now, while there is someone to ask: Secure Boot is off at this point (see
+# the preflight), so this decides whether the installed system gets its own
+# signing key.  Enrolling it is what lets Secure Boot be switched back on
+# later, and the enrolment completes at the first boot — the same
+# signing-after-install ordering install-dkms.sh uses.
+RCRAID_TARGET_MOK="${RCRAID_MOK_ENROLL:-}"
+if [ -z "$RCRAID_TARGET_MOK" ]; then
+    if [ -t 0 ]; then
+        read -rp "Enrol the installed system's module-signing key in MOK (needed to re-enable Secure Boot later)? [Y/n] " _ans
+        case "$_ans" in
+            [nN]*) RCRAID_TARGET_MOK=0 ;;
+            *)     RCRAID_TARGET_MOK=1 ;;
+        esac
+    else
+        RCRAID_TARGET_MOK=1
+    fi
+fi
+if [ "$RCRAID_TARGET_MOK" != 1 ]; then
+    RCRAID_TARGET_MOK=0
+fi
+
+export RCRAID_TARGET_MOK
+mkdir -p "$TARGET_MNT/tmp/pkg"
+cp -r "$SRC_DIR/packaging" "$TARGET_MNT/tmp/pkg/"
+cp -r "$SRC_DIR/scripts/lib" "$TARGET_MNT/tmp/pkg/"
+
+# The chroot steps live in a script rather than a `bash -c` one-liner so they
+# can source the shared signing library and fail loudly: `set -e` inside means
+# a failed apt/dkms/initramfs step stops the install instead of being hidden
+# behind the exit status of whatever ran last.
+cat > "$TARGET_MNT/tmp/pkg/rcraid-target.sh" <<'EOS'
+#!/bin/bash
+set -euo pipefail
+
+VER="$1"
+SUBSYS="$2"
+. /tmp/pkg/lib/secure-boot.sh
+
+export DEBIAN_FRONTEND=noninteractive
+echo "==> installing build dependencies for the installed kernel(s)"
+apt-get update -qq
+KVER="$(ls /lib/modules | sort -V | tail -1)"
+apt-get install -y -qq build-essential "linux-headers-$KVER" dkms \
+    initramfs-tools pciutils efibootmgr mokutil >/dev/null
+
+# --- module signing --------------------------------------------------------
+# Configured before the build so the module DKMS installs is signed, with the
+# enrolment queued for this system's first boot (shim's MOK manager runs
+# before that kernel, so it is trusted the first time it is loaded).
+MOK_SIGNING=0
+MOK_ENROLL_PENDING=0
+MOK_PASSWORD="${RCRAID_MOK_PASSWORD:-}"
+MOK_KEY=""
+MOK_CERT=""
+if [ "${RCRAID_TARGET_MOK:-0}" = 1 ]; then
+    if mok_find_enrolled_pair; then
+        echo "    • signing key already enrolled: $MOK_KEY"
+    elif mok_find_pair || mok_create_pair; then
+        echo "    • signing key for this system: $MOK_KEY"
+    else
+        echo "Could not obtain a module signing key in the target system." >&2
+        exit 1
+    fi
+    if ! mok_write_dkms_conf; then
+        echo "DKMS in the target cannot be pointed at $MOK_CERT." >&2
+        exit 1
+    fi
+    MOK_SIGNING=1
+fi
+
+# --- build, install, and wire the boot path --------------------------------
+# One dkms install per installed kernel: -k all also walks kernels whose
+# headers are absent and dies on them, and the live kernel is not one of these.
+echo "==> building rcraid $VER with DKMS"
+dkms add -m rcraid -v "$VER" --quiet 2>/dev/null || true
+for k in /lib/modules/*; do
+    [ -e "$k/build" ] || continue
+    dkms install -m rcraid -v "$VER" -k "${k##*/}" --force
+done
+
+install -m 0755 /tmp/pkg/packaging/sbin/rcraid-bind /usr/sbin/rcraid-bind
+sed "s/@SUBSYSTEM_VENDOR@/$SUBSYS/g" \
+    /tmp/pkg/packaging/udev/50-rcraid.rules.in > /etc/udev/rules.d/50-rcraid.rules
+sed "s/@SUBSYSTEM_VENDOR@/$SUBSYS/g" \
+    /tmp/pkg/packaging/modprobe.d/rcraid.conf.in > /etc/modprobe.d/rcraid.conf
+install -m 0755 /tmp/pkg/packaging/initramfs-tools/hooks/rcraid \
+    /etc/initramfs-tools/hooks/rcraid
+update-initramfs -u -k all
+
+# Prove the installed copies are signed: when DKMS cannot read its key it warns
+# and carries on, and under Secure Boot that only shows up at the next boot, as
+# a missing array.
+UNSIGNED=0
+for ko in /lib/modules/*/updates/dkms/rcraid.ko*; do
+    [ -e "$ko" ] || continue
+    signer="$(modinfo -F signer "$ko" 2>/dev/null || true)"
+    if [ -n "$signer" ]; then
+        echo "    • ${ko%/updates/dkms/*}: signed by $signer"
+    else
+        echo "    • ${ko%/updates/dkms/*}: UNSIGNED" >&2
+        UNSIGNED=1
+    fi
+done
+if [ "$UNSIGNED" = 1 ] && [ "$MOK_SIGNING" = 1 ]; then
+    echo "ERROR: rcraid was built unsigned even though a signing key was configured." >&2
+    exit 1
+fi
+
+# Queue the enrolment last: if anything above failed, the user is not left with
+# a MOK prompt at the next boot whose password they never saw.
+if [ "$MOK_SIGNING" = 1 ] && ! mok_is_enrolled "$MOK_CERT"; then
+    MOK_ENROLL_PENDING=1
+    if ! mok_queue_enrollment "$MOK_CERT"; then
+        echo "Could not queue the MOK enrolment for the target system." >&2
+        exit 1
+    fi
+    echo "    • MOK enrolment queued (password for the next boot: $MOK_PASSWORD)"
+fi
+
+{
+    echo "MOK_SIGNING=$MOK_SIGNING"
+    echo "MOK_ENROLL_PENDING=$MOK_ENROLL_PENDING"
+    echo "MOK_CERT=$MOK_CERT"
+    echo "MOK_PASSWORD=$MOK_PASSWORD"
+} > /tmp/pkg/mok-state
+EOS
+
+chroot "$TARGET_MNT" /bin/bash /tmp/pkg/rcraid-target.sh "$TGT_VER" "$SUBSYSTEM_VENDOR"
+
+# Carry the signing outcome back out of the chroot for the closing message.
+mok_state_reset
+MOK_STATE="$TARGET_MNT/tmp/pkg/mok-state"
+mok_load_state "$MOK_STATE"
+rm -f "$MOK_STATE"
 
 if [ -n "$ESP_DEV" ] && [ -d "$TARGET_MNT/boot/efi/EFI" ]; then
     mkdir -p "$TARGET_MNT/boot/efi/EFI/BOOT"
@@ -213,4 +366,12 @@ if [ -n "$ESP_DEV" ] && [ -d "$TARGET_MNT/boot/efi/EFI" ]; then
 fi
 
 umount -R "$TARGET_MNT" 2>/dev/null || true
+
+mok_enrollment_instructions
+if [ "$MOK_SIGNING" = 1 ] && [ "$MOK_ENROLL_PENDING" = 1 ]; then
+    echo "After that boot, with the enrolment answered, Secure Boot can be switched"
+    echo "back on: the driver and every future DKMS rebuild are signed with it."
+    echo
+fi
+
 echo -e "\n🎉 DONE! The fresh bare-metal PC is 100% prepped. Run 'sudo reboot' to launch your array!"

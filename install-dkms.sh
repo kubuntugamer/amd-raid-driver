@@ -7,6 +7,9 @@
 #     so /dev/rcraid0 appears during boot without any manual unbind+insmod.
 #   - A modprobe.d drop-in records `enable_writes=1` and the array's
 #     `safe_subsys_vendor`, so no extra args are needed at load time.
+#   - Under Secure Boot the module is signed with a Machine Owner Key, and the
+#     enrolment is queued here: the reboot after this install completes the
+#     signing, instead of a separate enrolment reboot beforehand.
 #
 # Requires root.  Run from the repo root.
 
@@ -37,17 +40,21 @@ for tool in lspci dkms udevadm; do
     fi
 done
 
-# Secure Boot / module signing preflight.
+# Secure Boot / module signing.
 #
 # An enforcing kernel refuses an unsigned module ("Key was rejected by
 # service"), and the failure surfaces only at the next boot, with the array
-# absent.  DKMS signs every module it builds (/usr/sbin/dkms prepare_signing)
-# once it knows which key to use, so the work here is:
-#   1. find a key pair that is BOTH on disk and enrolled in MOK,
-#   2. point DKMS at it, including for every future kernel update,
-#   3. verify after the build that the installed module really is signed.
-# Step 3 is what keeps kernel updates bootable: a rebuild that silently lost
-# the key must fail here, not on an unbootable machine.
+# absent — unbootable when / lives on the array.  Signing is therefore set up
+# here and *completed by the reboot this install needs anyway*:
+#   1. pick a key pair (an enrolled one if present), or create one,
+#   2. point DKMS at it, so this build and every kernel-update rebuild is
+#      signed,
+#   3. queue a MOK enrolment and verify it really is pending.
+# shim's MOK manager runs before the kernel on that boot, so the module in the
+# initramfs is trusted the first time it is loaded: enrolment and first use
+# happen in the same boot, instead of one reboot to enrol plus another to
+# install.  Step 2b below then catches a DKMS that silently failed to sign.
+# scripts/lib/secure-boot.sh carries the details.
 . "$SRC_DIR/scripts/lib/secure-boot.sh"
 
 # Not `func && VAR=1`: under `set -e` a false return would abort the script.
@@ -56,92 +63,48 @@ if secure_boot_enforcing; then
     SB_ENFORCING=1
 fi
 
-# Resolve the key pair.  Order: explicit override, then the shim key that
-# update-secureboot-policy creates on Debian/Ubuntu, then DKMS's own default.
-MOK_KEY="${RCRAID_MOK_KEY:-}"
-MOK_CERT="${RCRAID_MOK_CERT:-}"
-if [ -z "$MOK_KEY" ] || [ -z "$MOK_CERT" ]; then
-    for pair in "/var/lib/shim-signed/mok/MOK.priv:/var/lib/shim-signed/mok/MOK.der" \
-                "/var/lib/dkms/mok.key:/var/lib/dkms/mok.pub"; do
-        cand_key="${pair%%:*}"
-        cand_cert="${pair#*:}"
-        if [ -f "$cand_key" ] && [ -f "$cand_cert" ]; then
-            MOK_KEY="$cand_key"
-            MOK_CERT="$cand_cert"
-            break
-        fi
-    done
-fi
+SETUP_RC=0
+mok_setup_signing || SETUP_RC=$?
 
-# Is this certificate trusted by the firmware?  Match on the SHA-1 hash, not
-# the subject: subjects are free text and stale keys sharing a CN are common.
-mok_enrolled() {
-    local fp
-    fp=$(openssl x509 -inform DER -in "$1" -noout -fingerprint -sha1 2>/dev/null \
-        | sed 's/.*=//' | tr -d ':' | tr 'A-Z' 'a-z')
-    [ -n "$fp" ] || return 1
-    mokutil --list-enrolled 2>/dev/null | tr -d ':' | tr -d ' \n' \
-        | tr 'A-Z' 'a-z' | grep -q "$fp"
-}
-
-SIGNING=0
-if [ -n "$MOK_KEY" ] && [ -n "$MOK_CERT" ] \
-   && [ -f "$MOK_KEY" ] && [ -f "$MOK_CERT" ]; then
-    if command -v mokutil >/dev/null 2>&1 && mok_enrolled "$MOK_CERT"; then
-        SIGNING=1
+if [ "$SETUP_RC" -ne 0 ]; then
+    if [ "${RCRAID_ALLOW_SECURE_BOOT:-0}" = 1 ]; then
+        echo "WARN: continuing because RCRAID_ALLOW_SECURE_BOOT=1 — the module is" >&2
+        echo "      left for you to sign by hand.  Sign it before rebooting, then" >&2
+        echo "      run scripts/verify-boot-safety.sh (INSTALL.md, \"Secure Boot\")." >&2
+        MOK_SIGNING=0
+        MOK_ENROLL_PENDING=0
+        echo
     else
-        echo "WARN: found a signing key at $MOK_CERT but it is not enrolled in MOK." >&2
-        echo "      Modules signed with it will still be rejected under Secure Boot." >&2
-        echo "      Enrol it: sudo mokutil --import $MOK_CERT   (set a one-time" >&2
-        echo "      password, reboot, complete the MOK manager prompt)." >&2
+        cat >&2 <<'EOF'
+ERROR: the module would be unsigned, and this kernel will refuse to load it.
+
+Secure Boot is enforcing and the signing set-up above did not finish (usually
+mokutil or openssl is missing).  Installing now would look successful and
+leave the array absent after the next reboot — on a machine that boots from
+the array, that boot cannot complete at all.
+
+Fix what is reported above (usually `sudo apt install mokutil openssl`) and
+re-run: the installer creates the key, signs with it, and queues the enrolment
+that the post-install reboot completes.
+
+If you sign the modules yourself, point the installer at your key:
+
+  sudo RCRAID_MOK_KEY=/path/MOK.priv RCRAID_MOK_CERT=/path/MOK.der \
+      ./install-dkms.sh
+
+or set RCRAID_ALLOW_SECURE_BOOT=1 to have the installer skip signing entirely.
+EOF
+        exit 1
     fi
 fi
 
-if [ "$SB_ENFORCING" = 1 ] && [ "$SIGNING" = 0 ] \
-   && [ "${RCRAID_ALLOW_SECURE_BOOT:-0}" != 1 ]; then
-    cat >&2 <<'EOF'
-ERROR: Secure Boot is enabled and no enrolled signing key was found.
-
-rcraid.ko would be unsigned, so the kernel refuses to load it (insmod:
-"Key was rejected by service"; dmesg: "Loading of unsigned module is
-rejected").  Installing now would look successful but leave the array
-absent after the next reboot.
-
-Either disable Secure Boot in BIOS setup, or create and enrol a Machine
-Owner Key first (DKMS signs with it automatically from then on):
-
-  sudo openssl req -new -x509 -newkey rsa:2048 -nodes -days 36500 \
-      -subj "/CN=rcraid module signing/" \
-      -keyout MOK.priv -outform DER -out MOK.der
-  sudo mokutil --import MOK.der
-  # set a one-time password, reboot, complete the MOK manager prompt
-
-Keep MOK.priv somewhere permanent — a key whose private half is lost cannot
-sign anything, and the enrolled certificate cannot be reused.  Then re-run
-this script; it verifies the signature of what DKMS installed.
-
-Override with RCRAID_ALLOW_SECURE_BOOT=1 if you have signed the module by
-hand (see INSTALL.md, "Secure Boot").
-EOF
-    exit 1
-fi
-
 # Tell DKMS which key to sign with, so kernel-update rebuilds inherit it.
-if [ "$SIGNING" = 1 ]; then
-    if grep -q 'framework.conf.d' /usr/sbin/dkms 2>/dev/null; then
-        install -d /etc/dkms/framework.conf.d
-        cat > /etc/dkms/framework.conf.d/rcraid-signing.conf <<EOF
-# Written by rcraid install-dkms.sh.  DKMS sources this when signing, so every
-# rebuild — including automatic ones on kernel updates — is signed with the
-# key the firmware trusts.
-mok_signing_key="$MOK_KEY"
-mok_certificate="$MOK_CERT"
-EOF
-        chmod 0644 /etc/dkms/framework.conf.d/rcraid-signing.conf
-        echo "==> DKMS signing configured ($MOK_KEY)"
-    else
-        echo "WARN: this DKMS does not read /etc/dkms/framework.conf.d; signing" >&2
-        echo "      relies on the distribution default key." >&2
+if [ "$MOK_SIGNING" = 1 ]; then
+    echo "==> DKMS signing configured ($MOK_KEY)"
+    if [ "$MOK_ENROLL_PENDING" = 1 ]; then
+        # Printed here as well as at the end: if a later step fails, the
+        # enrolment is already queued and the password must not be lost.
+        echo "    MOK enrolment queued for the next boot — password: ${MOK_PASSWORD:-<set when it was queued>}"
     fi
     echo
 fi
@@ -313,7 +276,7 @@ echo
 # only visible at the next boot, as a missing array — so check here instead.
 # ----------------------------------------------------------------------------
 
-if [ "$SIGNING" = 1 ] || [ "$SB_ENFORCING" = 1 ]; then
+if [ "$MOK_SIGNING" = 1 ] || [ "$SB_ENFORCING" = 1 ]; then
     echo "==> verifying module signatures"
     UNSIGNED=0
     for ko in /lib/modules/*/updates/dkms/${PKG_NAME}.ko*; do
@@ -456,13 +419,15 @@ effect on the next reboot.
 EOF
 fi
 
+SIGNING_SUMMARY="$(mok_signing_summary)"
+
 cat <<EOF
 ==> Install complete.
 
 What's installed:
   DKMS module    /usr/src/${PKG_NAME}-${PKG_VERSION}/
                  /lib/modules/\$(uname -r)/updates/dkms/rcraid.ko
-  Signing        $([ "$SIGNING" = 1 ] && echo "DKMS signs with ${MOK_KEY} on every rebuild" || echo 'none — module is unsigned (Secure Boot must stay off)')
+  Signing        ${SIGNING_SUMMARY}
   Bind helper    /usr/sbin/rcraid-bind
   udev rule      /etc/udev/rules.d/50-rcraid.rules
                  (binds only devices carrying RAIDCore metadata)
@@ -475,11 +440,38 @@ $([ -e /etc/apt/apt.conf.d/52-rcraid-kernel-hold ] && echo '  apt hold       /et
 After any kernel update, run scripts/verify-boot-safety.sh BEFORE
 rebooting — it confirms rcraid is built and present in every installed
 kernel's initramfs.
+EOF
+
+if [ "$MOK_ENROLL_PENDING" = 1 ]; then
+    MOK_FP="$(mok_cert_fingerprint "$MOK_CERT" 2>/dev/null || true)"
+    mok_enrollment_instructions
+    cat <<EOF
+
+Next: reboot, answer the MOK prompt above, then check:
+
+  mokutil --list-enrolled | grep -i ${MOK_FP:0:8}   # key is now trusted
+  lsblk /dev/rcraid0                                 # volume + partitions
+  lspci -d 1022:b000 -k                              # members show "rcbottom"
+EOF
+else
+    cat <<EOF
 
 Next: reboot to test the auto-bind path end-to-end.  After reboot:
 
   lsblk /dev/rcraid0     # should show your volume + partitions
   lspci -d 1022:b000 -k  # array members should show "rcbottom"
+EOF
+fi
+
+if [ "$MOK_ENROLL_PENDING" = 1 ]; then
+    cat <<'EOF'
+
+Note: the one-shot load below is rejected until the MOK prompt is answered
+("Key was rejected by service") — the key is not trusted yet.
+EOF
+fi
+
+cat <<EOF
 
 To take effect WITHOUT rebooting (one-shot test):
 
