@@ -740,12 +740,20 @@ Still needing Ghidra investigation. Run via `scripts/ghidra/HuntBlockers.java`
    It matters for reconstruction, for a parity verify pass, and for any write
    path.
 
-   Consequence for this port: `rc_amd_generate_raid6_parity()` is GF(2⁸)
-   Reed-Solomon and is therefore **not** the vendor's Q. It currently has no
-   callers — RAID 6 is read-only and healthy reads never touch parity — so no
-   wrong bytes are produced today, but it has to be replaced before a write
-   path or a Q-based rebuild exists. Issue #3's second half is this answer;
-   the code change is tracked in issue #10.
+   Consequence for this port: `rc_amd_generate_raid6_parity()` was GF(2⁸)
+   Reed-Solomon and therefore **not** the vendor's Q. That has been replaced
+   by this construction (issue #10): the arithmetic lives in
+   `src/raid6_evenodd.h`, which the userspace harness compiles as well, and
+   the GF(2⁸) tables are gone from `src/`. It still has no callers — RAID 6 is
+   read-only and healthy reads never touch parity — so no Q is written yet;
+   the first consumer is a P/Q write path or a Q-based rebuild, and agreement
+   with firmware-written Q remains unobserved.
+
+   One reading the trace leaves open, settled here: member `d` contributes
+   word `16 - d` to `S`, not `15 - d`. The alternative is singular —
+   two-failure recovery fails for nearly every member pair — whereas `16 - d`
+   is full rank for all 120 pairs across 2..16 data members, which
+   `src/test_parity_userspace.c` asserts directly.
 
    Cross-check against `rcraid.sys` 9.3.3-00291 (`V:\RC-933\RC_933_00291`):
    the Windows image is symbol-stripped, but the code is there and it is the

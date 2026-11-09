@@ -193,9 +193,9 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
 
 - [ ] **RAID5 / RAID6** — **read-only, 2026-11-08.** Parity math and the
       dedicated-parity layout map are done (`src/patch_parity_math.c`, the one
-      place to change once a vendor array confirms the placement) — except the
-      RAID 6 Q, which the vendor computes as EVENODD (prime 17), so the GF(2^8)
-      Q generator here is a placeholder that no caller uses; the level is
+      place to change once a vendor array confirms the placement). RAID 6 Q is
+      the vendor's EVENODD construction (prime 17, `src/raid6_evenodd.h`), but
+      nothing calls it — there is no P/Q write path; the level is
       identified from the LD `DeviceType` (`0x1BF5` / `0x1BFA`, confirmed on a
       BIOS-created 3-disk RAID 5), a parity volume
       assembles at `(N-1)` / `(N-2)` × per-member user size, and reads go
@@ -496,8 +496,8 @@ rather than code.
    test box (`0x1BF5`, N=3, `(N-1)` × user size), but the array was zeroed at
    creation. The dedicated-parity placement in `src/patch_parity_math.c` is
    taken from the vendor core rather than inferred, and the RAID6 Q generator
-   still has to be swapped from GF(2⁸) to the vendor's EVENODD (the algorithm
-   itself is settled — issue #3). A staged fixture can only show that the
+   is now the vendor's EVENODD (issue #10) — though nothing calls it, because
+   there is no parity write path yet. A staged fixture can only show that the
    driver reads the map it implements: re-stamped under the dedicated layout
    on 2026-11-08 it round-trips byte-identically, which is self-consistency,
    not corroboration. Only data written through RAIDXpert2/Windows can prove

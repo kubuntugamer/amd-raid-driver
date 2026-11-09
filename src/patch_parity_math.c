@@ -5,21 +5,19 @@
  * MODULE PATH: joeytroy/amd-raid-driver / patch_parity_math.c
  * ==============================================================================
  *
- * Galois Field GF(2^8) arithmetic for RAID 6 Q parity.
- * Primitive polynomial: x^8 + x^4 + x^3 + x^2 + 1  (0x11D)
- * Generator element:    α = 0x02
- * This is the standard Reed-Solomon field used by Linux md RAID-6 and by
- * Windows Storage Spaces.  It is NOT what AMD's firmware uses: the vendor
- * core computes RAID 6 Q as EVENODD/RDP diagonal parity — a prime-17 integer
- * modulus with XOR only and no field arithmetic at all
- * (rc_raid6_evenodd.cpp; docs/REVERSE_ENGINEERING.md item 8).  Q computed
- * here does not match vendor-written parity.
+ * RAID 5 P parity, and the vendor's RAID 6 dual parity (P + Q).
  *
- * Q parity formula (Reed-Solomon):
- *   Q = Σ (di × α^i)  for i = 0..k-1  where k = data drives
- *   P = d0 ⊕ d1 ⊕ ... ⊕ d(k-1)  (simple XOR)
+ * RAID 6 Q is NOT GF(2^8) Reed-Solomon.  The vendor computes it as EVENODD/RDP
+ * diagonal parity over a 512-byte unit with prime 17 — XOR plus an integer
+ * modulus, no field arithmetic at all (rc_raid6_evenodd.cpp;
+ * docs/REVERSE_ENGINEERING.md item 8).  That construction lives in
+ * raid6_evenodd.h, which the userspace harness compiles too, so the test
+ * exercises the code this module ships instead of a private copy of it.  The
+ * GF(2^8) exp/log tables this file used to build in a module constructor are
+ * gone with it.
  *
- * Both parities are computed per-byte across the stripe.
+ * P = d0 ⊕ d1 ⊕ ... ⊕ d(k-1)   (plain XOR, per word column)
+ * Q = EVENODD diagonal parity (see raid6_evenodd.h for the full geometry)
  */
 
 #include <linux/module.h>
@@ -27,53 +25,7 @@
 #include <linux/bio.h>
 #include <linux/slab.h>
 
-/* =========================================================================
- * GF(2^8) ARITHMETIC — standard polynomial 0x11D (x^8 + x^4 + x^3 + x^2 + 1)
- * Generator α = 0x02.  Tables generated once at module load.
- * ========================================================================= */
-
-#define GF28_POLY  0x11D
-#define GF28_ALPHA 0x02
-
-static uint8_t gf28_exp[256];   /* α^i for i = 0..255 (wraps at 255) */
-static uint8_t gf28_log[256];   /* log_α(x) for x = 1..255, log(0) = 255 (unused) */
-static uint8_t gf28_mul[256];   /* multiplication by α (0x02): gf28_mul[x] = x * α */
-
-static void gf28_init_tables(void)
-{
-    int i;
-    uint16_t v = 1;
-
-    /* Build exp/log tables: exp[i] = α^i, log[exp[i]] = i */
-    for (i = 0; i < 255; i++) {
-        gf28_exp[i] = (uint8_t)v;
-        gf28_log[(uint8_t)v] = (uint8_t)i;
-        v <<= 1;
-        if (v & 0x100)
-            v ^= GF28_POLY;
-    }
-    gf28_exp[255] = gf28_exp[0];  /* α^255 = α^0 = 1 */
-    gf28_log[0] = 255;            /* log(0) undefined, mark as 255 */
-
-    /* Precompute multiplication by α (0x02) for fast Q parity */
-    for (i = 0; i < 256; i++) {
-        if (i == 0) {
-            gf28_mul[i] = 0;
-        } else if (i & 0x80) {
-            gf28_mul[i] = (uint8_t)((i << 1) ^ GF28_POLY);
-        } else {
-            gf28_mul[i] = (uint8_t)(i << 1);
-        }
-    }
-}
-
-/* Multiply two GF(2^8) elements using log/exp tables */
-static inline uint8_t gf28_mul_general(uint8_t a, uint8_t b)
-{
-    if (a == 0 || b == 0)
-        return 0;
-    return gf28_exp[(gf28_log[a] + gf28_log[b]) % 255];
-}
+#include "raid6_evenodd.h"
 
 /* =========================================================================
  * RAID 5 PARITY (P) — simple XOR across all data drives
@@ -101,69 +53,41 @@ EXPORT_SYMBOL_GPL(rc_amd_generate_raid5_parity);
 /* =========================================================================
  * RAID 6 DUAL PARITY (P + Q)
  *
- * P = d0 ⊕ d1 ⊕ ... ⊕ d(k-1)                    (XOR)
- * Q = Σ (di × α^i)  for i = 0..k-1              (Reed-Solomon)
+ * P = d0 ⊕ d1 ⊕ ... ⊕ d(k-1)                     (XOR, per word column)
+ * Q = EVENODD/RDP diagonal parity, prime 17      (raid6_evenodd.h)
  *
- * Where k = data_drives = num_drives - 2
- * α = 0x02 is the primitive element.
- *
- * Per-byte computation:
- *   For each byte position j in [0, block_len):
- *     P[j] = d0[j] ⊕ d1[j] ⊕ ... ⊕ d(k-1)[j]
- *     Q[j] = gf_mul(d0[j], α^0) ⊕ gf_mul(d1[j], α^1) ⊕ ... ⊕ gf_mul(d(k-1)[j], α^(k-1))
- *
- * WARNING: only P above matches the vendor.  The Q here is Reed-Solomon and
- * the vendor's Q is EVENODD (p = 17, XOR + integer modulus), so these bytes
- * would not be a valid on-disk parity chunk for a vendor-created array.
- * Nothing calls this yet — see the status note at the top of the file.
+ * k = data_drives = num_drives - 2.  The vendor's per-unit geometry — sixteen
+ * 32-byte words, seventeen diagonals, the S correction term — is documented in
+ * raid6_evenodd.h; this function only adapts the driver's buffer and argument
+ * convention to it, and Q covers whole 512-byte units only.
  * ========================================================================= */
 void rc_amd_generate_raid6_parity(uint8_t **data_buffers, uint8_t *p_buffer,
                                    uint8_t *q_buffer, size_t block_len, int num_drives)
 {
     int data_drives = num_drives - 2;
-    size_t i;
-    int d;
 
     if (unlikely(data_drives <= 0 || block_len == 0))
         return;
 
-    memset(p_buffer, 0, block_len);
-    memset(q_buffer, 0, block_len);
-
-    /* Process one byte at a time — compiler will vectorize the inner loop */
-    for (i = 0; i < block_len; i++) {
-        uint8_t p = 0;
-        uint8_t q = 0;
-
-        for (d = 0; d < data_drives; d++) {
-            uint8_t byte = data_buffers[d][i];
-
-            /* P parity: XOR */
-            p ^= byte;
-
-            /* Q parity: multiply by α^d */
-            if (byte != 0) {
-                int exp_idx = d % 255;          /* α^d wraps at 255 (α^255 = 1) */
-                uint8_t coeff = gf28_exp[exp_idx];
-                q ^= gf28_mul_general(byte, coeff);
-            }
-        }
-
-        p_buffer[i] = p;
-        q_buffer[i] = q;
+    /* The S walk assumes at most p-1 = 16 data members; beyond that the
+     * vendor's own encoder does not exist, so refuse rather than emit Q that
+     * no AMD stack could read.  WARN because reaching here means a caller
+     * built an array geometry the driver should have rejected earlier. */
+    if (unlikely(data_drives > RC_RAID6_MAX_DATA_MEMBERS)) {
+        WARN_ON_ONCE(1);
+        memset(p_buffer, 0, block_len);
+        memset(q_buffer, 0, block_len);
+        return;
     }
+
+    rc_raid6_evenodd_encode((uint8_t *const *)data_buffers, data_drives,
+                            p_buffer, q_buffer, block_len);
 }
 EXPORT_SYMBOL_GPL(rc_amd_generate_raid6_parity);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Independent Cleanroom Parity Architecture Team");
-MODULE_DESCRIPTION("RAID 5/6 parity generation — cleanroom GF(2^8) implementation");
-
-/* Constructor: build GF(2^8) tables at module load time */
-static __attribute__((constructor)) void rc_parity_init(void)
-{
-    gf28_init_tables();
-}
+MODULE_DESCRIPTION("RAID 5/6 parity — vendor EVENODD RAID 6 Q (prime 17)");
 
 /* =========================================================================
  * AMD-SPECIFIC ROTATION ROUTING PLANE (RAID 5 / RAID 6)
@@ -266,11 +190,11 @@ EXPORT_SYMBOL_GPL(rc_amd_map_distributed_raid5);
  * The blob proves the DATA range (RC_RAID6DriveMap: %% (Devices - 2)) and
  * shows the last member accessed explicitly as a parity drive; which of the
  * two trailing members holds P versus Q is assumed here in ascending order.
- * The Q *algorithm* is settled (issue #3): the vendor uses EVENODD/RDP
- * diagonal parity with prime 17, not the GF(2^8) Reed-Solomon Q this file
- * still generates — see rc_amd_generate_raid6_parity().  Placement is
+ * The Q *algorithm* is settled (issue #3) and implemented: the vendor uses
+ * EVENODD/RDP diagonal parity with prime 17, not GF(2^8) Reed-Solomon — see
+ * rc_amd_generate_raid6_parity() and raid6_evenodd.h.  Placement is
  * unaffected, since a healthy array never reads parity; RAID 6 remains
- * read-only either way.
+ * read-only either way, because there is no P/Q write path yet.
  *
  * Returns: physical sector on target_member
  */

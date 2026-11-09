@@ -5,11 +5,18 @@
  * ==============================================================================
  *
  * Verifies:
- *   1. GF(2^8) tables (exp/log/mul) match mathematical reference
- *   2. RAID 5 P parity = XOR across data drives
- *   3. RAID 6 Q parity = Reed-Solomon Σ(di × α^i)
+ *   1. RAID 5 P parity = XOR across data drives
+ *   2. RAID 6 Q parity = the vendor's EVENODD/RDP construction (prime 17),
+ *      against hardcoded vectors that were not produced by this code
+ *   3. Diagonal topology: which Q words each data word feeds, including the
+ *      S correction term
  *   4. Distributed parity mapping (RAID 5/6) for N=3..8
- *   5. Round-trip: generate → corrupt one/two drives → reconstruct → verify
+ *   5. Recovery: any two simultaneous member failures, 2..16 data members,
+ *      solved as a GF(2) linear system independent of the encoder's loops
+ *
+ * The generator itself is NOT copied here.  src/raid6_evenodd.h is included
+ * directly, and it is the same file src/patch_parity_math.c compiles, so a
+ * change to the driver cannot leave this test measuring stale code (issue #10).
  */
 
 #include <stdio.h>
@@ -18,56 +25,9 @@
 #include <string.h>
 #include <assert.h>
 
-/* =========================================================================
- * GF(2^8) ARITHMETIC — copied from patch_parity_math.c
- * Primitive polynomial: x^8 + x^4 + x^3 + x^2 + 1 (0x11D)
- * Generator: α = 0x02
+#include "raid6_evenodd.h"/* =========================================================================
+ * PARITY GENERATION — RAID 5 is a copy; RAID 6 comes from raid6_evenodd.h
  * ========================================================================= */
-
-#define GF28_POLY  0x11D
-#define GF28_ALPHA 0x02
-
-static uint8_t gf28_exp[256];
-static uint8_t gf28_log[256];
-static uint8_t gf28_mul[256];
-
-static void gf28_init_tables(void)
-{
-    int i;
-    uint16_t v = 1;
-
-    for (i = 0; i < 255; i++) {
-        gf28_exp[i] = (uint8_t)v;
-        gf28_log[v] = (uint8_t)i;
-        v <<= 1;
-        if (v & 0x100)
-            v ^= GF28_POLY;
-    }
-    gf28_exp[255] = gf28_exp[0];
-    gf28_log[0] = 255;
-
-    for (i = 0; i < 256; i++) {
-        if (i == 0) {
-            gf28_mul[i] = 0;
-        } else if (i & 0x80) {
-            gf28_mul[i] = (uint8_t)((i << 1) ^ GF28_POLY);
-        } else {
-            gf28_mul[i] = (uint8_t)(i << 1);
-        }
-    }
-}
-
-static inline uint8_t gf28_mul_general(uint8_t a, uint8_t b)
-{
-    if (a == 0 || b == 0)
-        return 0;
-    return gf28_exp[(gf28_log[a] + gf28_log[b]) % 255];
-}
-
-/* =========================================================================
- * PARITY GENERATION — copied from patch_parity_math.c
- * ========================================================================= */
-
 void rc_amd_generate_raid5_parity(uint8_t **data_buffers, uint8_t *parity_buffer,
                                    size_t block_len, int num_drives)
 {
@@ -87,36 +47,21 @@ void rc_amd_generate_raid5_parity(uint8_t **data_buffers, uint8_t *parity_buffer
     }
 }
 
-void rc_amd_generate_raid6_parity(uint8_t **data_buffers, uint8_t *p_buffer,
-                                   uint8_t *q_buffer, size_t block_len, int num_drives)
+/* Mirrors the driver's exported wrapper exactly: num_drives counts the data
+ * members plus P and Q, and the shared encoder does the work. */
+static void rc_amd_generate_raid6_parity(uint8_t **data_buffers, uint8_t *p_buffer,
+                                         uint8_t *q_buffer, size_t block_len,
+                                         int num_drives)
 {
     int data_drives = num_drives - 2;
-    size_t i;
-    int d;
 
     if (data_drives <= 0 || block_len == 0)
         return;
 
-    memset(p_buffer, 0, block_len);
-    memset(q_buffer, 0, block_len);
+    assert(data_drives <= RC_RAID6_MAX_DATA_MEMBERS);
 
-    for (i = 0; i < block_len; i++) {
-        uint8_t p = 0;
-        uint8_t q = 0;
-
-        for (d = 0; d < data_drives; d++) {
-            uint8_t byte = data_buffers[d][i];
-            p ^= byte;
-            if (byte != 0) {
-                int exp_idx = d % 255;
-                uint8_t coeff = gf28_exp[exp_idx];
-                q ^= gf28_mul_general(byte, coeff);
-            }
-        }
-
-        p_buffer[i] = p;
-        q_buffer[i] = q;
-    }
+    rc_raid6_evenodd_encode((uint8_t *const *)data_buffers, data_drives,
+                            p_buffer, q_buffer, block_len);
 }
 
 /* =========================================================================
@@ -190,39 +135,148 @@ uint64_t rc_amd_map_distributed_raid6(uint64_t sector_lba, uint32_t chunk_sector
 
 #define TEST_BLOCK_LEN  4096
 
-static void test_gf28_tables(void)
+/* =========================================================================
+ * EVENODD TEST VECTORS — expected bytes are literals, not recomputed
+ *
+ * Each word is filled with one byte value repeated across all 32 bytes, so one
+ * byte identifies a whole word and the unit stays hand-checkable.  The expected
+ * parities were derived from the construction in docs/REVERSE_ENGINEERING.md
+ * item 8 by independent arithmetic, not by the code below — otherwise the
+ * assertion would only prove the encoder agrees with itself, the circularity
+ * issue #10 called out.
+ * ========================================================================= */
+
+#define PATTERN_WIDE    0   /* byte 16 * member + word + 1 */
+#define PATTERN_SPARSE  1   /* byte  7 * member + 3 * word + 1 */
+
+static uint8_t vector_byte(int pattern, int member, int word)
 {
-    printf("Testing GF(2^8) tables...\n");
-    
-    /* Verify exp/log are inverses */
-    for (int i = 1; i < 256; i++) {
-        uint8_t log_val = gf28_log[i];
-        uint8_t exp_val = gf28_exp[log_val];
-        assert(exp_val == i);
+    if (pattern == PATTERN_WIDE)
+        return (uint8_t)(16 * member + word + 1);
+    return (uint8_t)(7 * member + 3 * word + 1);
+}
+
+static void check_vector(int pattern, int members, const uint8_t *expect_q,
+                         const uint8_t *expect_p)
+{
+    uint8_t *bufs[RC_RAID6_MAX_DATA_MEMBERS];
+    uint8_t p[RC_RAID6_UNIT_BYTES];
+    uint8_t q[RC_RAID6_UNIT_BYTES];
+
+    for (int d = 0; d < members; d++) {
+        bufs[d] = malloc(RC_RAID6_UNIT_BYTES);
+        assert(bufs[d]);
+        for (int w = 0; w < RC_RAID6_WORDS; w++)
+            memset(bufs[d] + (size_t)w * RC_RAID6_WORD_BYTES,
+                   vector_byte(pattern, d, w), RC_RAID6_WORD_BYTES);
     }
-    
-    /* Verify α^255 = 1 */
-    assert(gf28_exp[255] == 1);
-    assert(gf28_exp[0] == 1);
-    
-    /* Verify α^i * α^j = α^(i+j mod 255) */
-    for (int i = 0; i < 10; i++) {
-        for (int j = 0; j < 10; j++) {
-            uint8_t a = gf28_exp[i];
-            uint8_t b = gf28_exp[j];
-            uint8_t prod = gf28_mul_general(a, b);
-            uint8_t expected = gf28_exp[(i + j) % 255];
-            assert(prod == expected);
+
+    rc_amd_generate_raid6_parity(bufs, p, q, RC_RAID6_UNIT_BYTES, members + 2);
+
+    for (int w = 0; w < RC_RAID6_WORDS; w++) {
+        for (int b = 0; b < RC_RAID6_WORD_BYTES; b++) {
+            assert(q[(size_t)w * RC_RAID6_WORD_BYTES + b] == expect_q[w]);
+            assert(p[(size_t)w * RC_RAID6_WORD_BYTES + b] == expect_p[w]);
         }
     }
-    
-    /* Verify multiplication by α table */
-    for (int i = 1; i < 256; i++) {
-        uint8_t expected = gf28_mul_general(i, 2);
-        assert(gf28_mul[i] == expected);
+
+    for (int d = 0; d < members; d++)
+        free(bufs[d]);
+}
+
+static void test_evenodd_vectors(void)
+{
+    /* 4 data members, member m word w = 16m + w + 1  (S = 0x31) */
+    static const uint8_t q4[RC_RAID6_WORDS] = {
+        0x3f, 0x62, 0x01, 0x35, 0x31, 0x35, 0x31, 0x3d,
+        0x31, 0x3d, 0x31, 0x35, 0x31, 0x35, 0x31, 0x2d,
+    };
+    static const uint8_t p4[RC_RAID6_WORDS] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+    };
+    /* 16 data members — the encoder's maximum — member m word w = 7m + 3w + 1 */
+    static const uint8_t q16[RC_RAID6_WORDS] = {
+        0x7c, 0x4e, 0x32, 0x4c, 0x38, 0x6a, 0xfe, 0x78,
+        0xf4, 0xe6, 0x2a, 0xa4, 0x10, 0xa2, 0x56, 0x71,
+    };
+    static const uint8_t p16[RC_RAID6_WORDS] = {
+        0x40, 0x70, 0x40, 0x30, 0x20, 0x50, 0x40, 0x30,
+        0xe0, 0xd0, 0x40, 0x50, 0xc0, 0xf0, 0x80, 0x70,
+    };
+
+    printf("Testing RAID 6 Q against recorded vectors...\n");
+    check_vector(PATTERN_WIDE, 4, q4, p4);
+    check_vector(PATTERN_SPARSE, RC_RAID6_MAX_DATA_MEMBERS, q16, p16);
+    printf("  EVENODD vectors: PASS\n");
+}
+
+/* Which Q words a single data word feeds.  Word (member d, word w) sits on
+ * diagonal (w + d) mod 17, so it lands in exactly that one Q word — unless
+ * that diagonal is 16, the one the encoder cannot read: then the word goes
+ * into S instead and moves every Q word.  This is the topology asserted
+ * directly rather than by comparing against another encoder run. */
+static void test_evenodd_topology(void)
+{
+    uint8_t *base[RC_RAID6_MAX_DATA_MEMBERS];
+    uint8_t *alt[RC_RAID6_MAX_DATA_MEMBERS];
+    uint8_t p0[RC_RAID6_UNIT_BYTES], q0[RC_RAID6_UNIT_BYTES];
+    uint8_t p1[RC_RAID6_UNIT_BYTES], q1[RC_RAID6_UNIT_BYTES];
+
+    printf("Testing EVENODD diagonal topology...\n");
+
+    for (int members = 2; members <= RC_RAID6_MAX_DATA_MEMBERS; members++) {
+        for (int d = 0; d < members; d++) {
+            base[d] = malloc(RC_RAID6_UNIT_BYTES);
+            alt[d] = malloc(RC_RAID6_UNIT_BYTES);
+            assert(base[d] && alt[d]);
+            for (int i = 0; i < RC_RAID6_UNIT_BYTES; i++) {
+                base[d][i] = (uint8_t)(d * 13 + i);
+                alt[d][i] = base[d][i];
+            }
+        }
+
+        rc_amd_generate_raid6_parity(base, p0, q0, RC_RAID6_UNIT_BYTES,
+                                     members + 2);
+
+        for (int d = 0; d < members; d++) {
+            for (int w = 0; w < RC_RAID6_WORDS; w++) {
+                size_t at = (size_t)w * RC_RAID6_WORD_BYTES;
+                int expect_col = (w + d) % RC_RAID6_PRIME;
+
+                alt[d][at] ^= 0xff;    /* one byte of one word */
+                rc_amd_generate_raid6_parity(alt, p1, q1, RC_RAID6_UNIT_BYTES,
+                                             members + 2);
+                alt[d][at] ^= 0xff;
+
+                for (int col = 0; col < RC_RAID6_WORDS; col++) {
+                    int changed = memcmp(q0 + (size_t)col * RC_RAID6_WORD_BYTES,
+                                         q1 + (size_t)col * RC_RAID6_WORD_BYTES,
+                                         RC_RAID6_WORD_BYTES) != 0;
+
+                    if (expect_col == RC_RAID6_PRIME - 1)
+                        assert(changed);        /* carried in S: hits all */
+                    else
+                        assert(changed == (col == expect_col));
+                }
+
+                /* P is per word row, so only that row moves. */
+                for (int row = 0; row < RC_RAID6_WORDS; row++) {
+                    int changed = memcmp(p0 + (size_t)row * RC_RAID6_WORD_BYTES,
+                                         p1 + (size_t)row * RC_RAID6_WORD_BYTES,
+                                         RC_RAID6_WORD_BYTES) != 0;
+                    assert(changed == (row == w));
+                }
+            }
+        }
+
+        for (int d = 0; d < members; d++) {
+            free(base[d]);
+            free(alt[d]);
+        }
     }
-    
-    printf("  GF(2^8) tables: PASS\n");
+
+    printf("  EVENODD topology: PASS\n");
 }
 
 static void test_raid5_parity(void)
@@ -277,7 +331,7 @@ static void test_raid5_parity(void)
 
 static void test_raid6_parity(void)
 {
-    printf("Testing RAID 6 parity...\n");
+    printf("Testing RAID 6 P parity and single-member rebuild...\n");
     
     const int num_drives = 6;  /* 4 data + 2 parity (P+Q) */
     const int data_drives = num_drives - 2;
@@ -294,26 +348,14 @@ static void test_raid6_parity(void)
     
     rc_amd_generate_raid6_parity(buffers, p_parity, q_parity, TEST_BLOCK_LEN, num_drives);
     
-    /* Verify P = XOR */
+    /* P = XOR down each byte column — the one parity the vendor also computes
+     * this way (RC_RAID6_Compute_XOR).  Q is pinned by the vectors and the
+     * topology test, not by re-deriving the encoder's loops here. */
     for (int i = 0; i < TEST_BLOCK_LEN; i++) {
         uint8_t expected = 0;
         for (int d = 0; d < data_drives; d++)
             expected ^= buffers[d][i];
         assert(p_parity[i] == expected);
-    }
-    
-    /* Verify Q = Σ(di × α^i) */
-    for (int i = 0; i < TEST_BLOCK_LEN; i++) {
-        uint8_t expected = 0;
-        for (int d = 0; d < data_drives; d++) {
-            uint8_t byte = buffers[d][i];
-            if (byte != 0) {
-                int exp_idx = d % 255;
-                uint8_t coeff = gf28_exp[exp_idx];
-                expected ^= gf28_mul_general(byte, coeff);
-            }
-        }
-        assert(q_parity[i] == expected);
     }
     
     /* Test reconstruction: lose ONE drive, rebuild from P + remaining */
@@ -333,45 +375,79 @@ static void test_raid6_parity(void)
     memcpy(buffers[1], lost_drive, TEST_BLOCK_LEN);
     free(lost_drive);
     
-    /* Test reconstruction: lose TWO drives, rebuild from P+Q + remaining */
-    uint8_t *lost1 = malloc(TEST_BLOCK_LEN);
-    uint8_t *lost2 = malloc(TEST_BLOCK_LEN);
-    memcpy(lost1, buffers[0], TEST_BLOCK_LEN);
-    memcpy(lost2, buffers[3], TEST_BLOCK_LEN);
-    memset(buffers[0], 0, TEST_BLOCK_LEN);
-    memset(buffers[3], 0, TEST_BLOCK_LEN);
+    for (int d = 0; d < data_drives; d++) free(buffers[d]);
     
-    for (int i = 0; i < TEST_BLOCK_LEN; i++) {
-        /* P' = P ⊕ d1 ⊕ d2 = d0 ⊕ d3 */
-        uint8_t p_prime = p_parity[i] ^ buffers[1][i] ^ buffers[2][i];
-        
-        /* Q' = Q ⊕ d1×α¹ ⊕ d2×α² = d0 ⊕ d3×α³ */
-        uint8_t q_prime = q_parity[i];
-        if (buffers[1][i] != 0)
-            q_prime ^= gf28_mul_general(buffers[1][i], gf28_exp[1]);
-        if (buffers[2][i] != 0)
-            q_prime ^= gf28_mul_general(buffers[2][i], gf28_exp[2]);
-        
-        /* d0 ⊕ d3 = P'
-         * d0 ⊕ d3×α³ = Q'
-         * d3 = (P' ⊕ Q') / (1 ⊕ α³)
-         */
-        uint8_t alpha3 = gf28_exp[3];
-        uint8_t denom = 1 ^ alpha3;
-        uint8_t numerator = p_prime ^ q_prime;
-        uint8_t denom_inv = gf28_exp[(255 - gf28_log[denom]) % 255];
-        uint8_t d3 = gf28_mul_general(numerator, denom_inv);
-        uint8_t d0 = p_prime ^ d3;
-        
-        assert(d0 == lost1[i]);
-        assert(d3 == lost2[i]);
+    /* Degenerate geometry: one data member.  S is empty and every Q word is
+     * that member's word at the same index, so Q (and P) must mirror the data
+     * exactly — the single-row, dense case. */
+    {
+        uint8_t *one[1];
+        uint8_t p1[RC_RAID6_UNIT_BYTES];
+        uint8_t q1[RC_RAID6_UNIT_BYTES];
+
+        one[0] = malloc(RC_RAID6_UNIT_BYTES);
+        assert(one[0]);
+        for (int i = 0; i < RC_RAID6_UNIT_BYTES; i++)
+            one[0][i] = (uint8_t)(i * 7 + 1);
+
+        rc_amd_generate_raid6_parity(one, p1, q1, RC_RAID6_UNIT_BYTES, 3);
+        assert(memcmp(one[0], p1, RC_RAID6_UNIT_BYTES) == 0);
+        assert(memcmp(one[0], q1, RC_RAID6_UNIT_BYTES) == 0);
+        free(one[0]);
     }
     
-    for (int d = 0; d < data_drives; d++) free(buffers[d]);
-    free(lost1);
-    free(lost2);
+    /* All-zero data must give all-zero parity: the construction is linear and
+     * carries no constant term (no α^0 offset like the Reed-Solomon version). */
+    {
+        uint8_t *zero[4];
+        uint8_t pz[RC_RAID6_UNIT_BYTES];
+        uint8_t qz[RC_RAID6_UNIT_BYTES];
+
+        for (int d = 0; d < 4; d++) {
+            zero[d] = calloc(1, RC_RAID6_UNIT_BYTES);
+            assert(zero[d]);
+        }
+        memset(pz, 0xff, sizeof(pz));
+        memset(qz, 0xff, sizeof(qz));
+
+        rc_amd_generate_raid6_parity(zero, pz, qz, RC_RAID6_UNIT_BYTES, 6);
+        for (int i = 0; i < RC_RAID6_UNIT_BYTES; i++) {
+            assert(pz[i] == 0);
+            assert(qz[i] == 0);
+        }
+        for (int d = 0; d < 4; d++) free(zero[d]);
+    }
     
-    printf("  RAID 6 parity: PASS\n");
+    /* Length that is not a whole 512-byte unit: P is defined everywhere, Q is
+     * not, and the tail must come back zeroed rather than holding whatever the
+     * caller left in the buffer. */
+    {
+        uint8_t *bufs[3];
+        uint8_t p[700];
+        uint8_t q[700];
+
+        for (int d = 0; d < 3; d++) {
+            bufs[d] = malloc(sizeof(p));
+            assert(bufs[d]);
+            for (size_t i = 0; i < sizeof(p); i++)
+                bufs[d][i] = (uint8_t)(d * 41 + i * 5);
+        }
+        memset(q, 0xa5, sizeof(q));
+
+        rc_amd_generate_raid6_parity(bufs, p, q, sizeof(p), 5);
+
+        for (size_t i = 0; i < sizeof(p); i++) {
+            uint8_t expected = 0;
+            for (int d = 0; d < 3; d++)
+                expected ^= bufs[d][i];
+            assert(p[i] == expected);
+            if (i >= RC_RAID6_UNIT_BYTES)
+                assert(q[i] == 0);   /* no vendor Q definition past the unit */
+        }
+        for (int d = 0; d < 3; d++) free(bufs[d]);
+    }
+    
+    printf("  RAID 6 P parity: PASS\n");
 }
 
 static void test_mapping_functions(void)
@@ -443,113 +519,194 @@ static void test_mapping_functions(void)
     printf("  Mapping functions: PASS\n");
 }
 
-static void test_known_vectors(void)
+/* =========================================================================
+ * TWO-MEMBER RECOVERY — solved, not re-encoded
+ *
+ * Recomputing Q and comparing would only prove the encoder agrees with itself.
+ * Here the unknowns are the 32 words of the two failed members (2 x 16), the
+ * equations are P (one per word row) and Q (one per diagonal column, S terms
+ * included), and each byte column is recovered by Gaussian elimination over
+ * GF(2).  A construction that cannot survive two failures shows up as a
+ * singular or inconsistent system instead of passing quietly.
+ * ====================================================================== */
+
+#define RDP_UNKNOWNS (2 * RC_RAID6_WORDS)
+
+/* Independent of raid6_evenodd.h on purpose: if the shared modulus were wrong,
+ * the encoder and this check would otherwise be wrong together. */
+static int rdp_mod(int v, int m)
 {
-    printf("Testing known GF(2^8) vectors...\n");
-    
-    /* Known test: α^0 = 1, α^1 = 2, α^2 = 4, α^3 = 8, α^4 = 16, α^5 = 32, α^6 = 64, α^7 = 128 */
-    assert(gf28_exp[0] == 0x01);
-    assert(gf28_exp[1] == 0x02);
-    assert(gf28_exp[2] == 0x04);
-    assert(gf28_exp[3] == 0x08);
-    assert(gf28_exp[4] == 0x10);
-    assert(gf28_exp[5] == 0x20);
-    assert(gf28_exp[6] == 0x40);
-    assert(gf28_exp[7] == 0x80);
-    
-    /* α^8 = 0x1D (x^8 + x^4 + x^3 + x^2 + 1 = 0x11D → x^8 = x^4+x^3+x^2+1 = 0x1D) */
-    assert(gf28_exp[8] == 0x1D);
-    
-    /* 0x57 × 0x83 = 0x31 (verified for 0x11D polynomial, α=0x02) */
-    uint8_t test = gf28_mul_general(0x57, 0x83);
-    assert(test == 0x31);
-    
-    printf("  Known vectors: PASS\n");
+    int r = v % m;
+
+    return r < 0 ? r + m : r;
 }
 
-static void test_raid6_reconstruction_edge_cases(void)
+/* Coefficient mask for the Q equation of column @col when members @a and @b
+ * are the unknowns.  Bit i of the low half is word i of member a, bit 16 + i is
+ * word i of member b.  A member contributes its diagonal word, and — because S
+ * is XORed into every Q column — its word 16 - member as well. */
+static uint32_t rdp_q_mask(int members, int a, int b, int col)
 {
-    printf("Testing RAID 6 reconstruction edge cases...\n");
-    
-    const int num_drives = 8;  /* Max: 6 data + 2 parity */
-    const int data_drives = num_drives - 2;
-    const size_t len = 1024;
-    
-    /* Use fixed seed for reproducibility */
-    srand(42);
-    
-    uint8_t *buffers[6];
-    uint8_t p_parity[len];
-    uint8_t q_parity[len];
-    
-    for (int d = 0; d < data_drives; d++) {
-        buffers[d] = malloc(len);
-        for (size_t i = 0; i < len; i++)
-            buffers[d][i] = (uint8_t)rand();
+    uint32_t mask = 0;
+
+    for (int i = 0; i < members; i++) {
+        int side, m;
+
+        if (i == a)
+            side = 0;
+        else if (i == b)
+            side = 1;
+        else
+            continue;
+
+        m = rdp_mod(col - i, RC_RAID6_PRIME);
+        if (m != RC_RAID6_PRIME - 1)
+            mask ^= 1u << (side * RC_RAID6_WORDS + m);
+        if (i >= 1)     /* word 16 - i feeds S, hence every column */
+            mask ^= 1u << (side * RC_RAID6_WORDS + (16 - i));
     }
-    
-    rc_amd_generate_raid6_parity(buffers, p_parity, q_parity, len, num_drives);
-    
-    /* Test all pairs of drive failures */
-    for (int fail1 = 0; fail1 < data_drives; fail1++) {
-        for (int fail2 = fail1 + 1; fail2 < data_drives; fail2++) {
-            /* Save lost data */
-            uint8_t *lost1 = malloc(len);
-            uint8_t *lost2 = malloc(len);
-            memcpy(lost1, buffers[fail1], len);
-            memcpy(lost2, buffers[fail2], len);
-            
-            /* Zero them */
-            memset(buffers[fail1], 0, len);
-            memset(buffers[fail2], 0, len);
-            
-            /* Rebuild using P+Q */
-            for (size_t i = 0; i < len; i++) {
-                /* Compute P' = P ⊕ (all surviving data) = d_f1 ⊕ d_f2 */
-                uint8_t p_prime = p_parity[i];
-                for (int d = 0; d < data_drives; d++) {
-                    if (d != fail1 && d != fail2)
-                        p_prime ^= buffers[d][i];
+
+    return mask;
+}
+
+/* Gauss-Jordan over GF(2): one bit lane per call, @coeff masks over @nvars
+ * unknowns.  Returns 0 when the system is singular or inconsistent. */
+static int gf2_solve(uint32_t *coeff, uint8_t *rhs, int nrows, int nvars,
+                     uint8_t *sol)
+{
+    int pivot_col[RDP_UNKNOWNS];
+    int pivots = 0;
+
+    for (int col = 0; col < nvars; col++) {
+        int sel = -1;
+
+        for (int k = pivots; k < nrows; k++) {
+            if ((coeff[k] >> col) & 1u) {
+                sel = k;
+                break;
+            }
+        }
+        if (sel < 0)
+            continue;
+
+        if (sel != pivots) {
+            uint32_t tc = coeff[pivots];
+            uint8_t tr = rhs[pivots];
+
+            coeff[pivots] = coeff[sel];
+            rhs[pivots] = rhs[sel];
+            coeff[sel] = tc;
+            rhs[sel] = tr;
+        }
+        for (int k = 0; k < nrows; k++) {
+            if (k != pivots && ((coeff[k] >> col) & 1u)) {
+                coeff[k] ^= coeff[pivots];
+                rhs[k] ^= rhs[pivots];
+            }
+        }
+        pivot_col[pivots++] = col;
+    }
+
+    for (int k = 0; k < nrows; k++) {
+        if (coeff[k] == 0 && rhs[k] != 0)
+            return 0;           /* inconsistent */
+    }
+    if (pivots != nvars)
+        return 0;               /* not enough independent equations */
+
+    for (int k = 0; k < nvars; k++)
+        sol[pivot_col[k]] = rhs[k];
+    return 1;
+}
+
+static void test_raid6_two_failure_recovery(void)
+{
+    printf("Testing RAID 6 two-member recovery, 2..%d data members...\n",
+           RC_RAID6_MAX_DATA_MEMBERS);
+
+    for (int members = 2; members <= RC_RAID6_MAX_DATA_MEMBERS; members++) {
+        uint8_t *bufs[RC_RAID6_MAX_DATA_MEMBERS];
+        uint8_t p[RC_RAID6_UNIT_BYTES];
+        uint8_t q[RC_RAID6_UNIT_BYTES];
+        uint8_t s_known[RC_RAID6_WORD_BYTES];
+
+        srand(1000 + members);
+        for (int d = 0; d < members; d++) {
+            bufs[d] = malloc(RC_RAID6_UNIT_BYTES);
+            assert(bufs[d]);
+            for (int i = 0; i < RC_RAID6_UNIT_BYTES; i++)
+                bufs[d][i] = (uint8_t)rand();
+        }
+        rc_amd_generate_raid6_parity(bufs, p, q, RC_RAID6_UNIT_BYTES,
+                                     members + 2);
+
+        for (int a = 0; a < members; a++) {
+            for (int b = a + 1; b < members; b++) {
+                uint32_t coeff[2 * RC_RAID6_WORDS];
+                uint8_t rhs[2 * RC_RAID6_WORDS];
+                uint8_t sol[RDP_UNKNOWNS];
+
+                /* S over the survivors, word 16 - i of each. */
+                memset(s_known, 0, sizeof(s_known));
+                for (int i = 1; i < members; i++) {
+                    if (i == a || i == b)
+                        continue;
+                    for (int t = 0; t < RC_RAID6_WORD_BYTES; t++)
+                        s_known[t] ^= bufs[i][(size_t)(16 - i) *
+                                              RC_RAID6_WORD_BYTES + t];
                 }
-                
-                /* Compute Q' = Q ⊕ (all surviving × α^d) = d_f1×α^f1 ⊕ d_f2×α^f2 */
-                uint8_t q_prime = q_parity[i];
-                for (int d = 0; d < data_drives; d++) {
-                    if (d != fail1 && d != fail2) {
-                        int exp_idx = d % 255;
-                        uint8_t coeff = gf28_exp[exp_idx];
-                        /* Always XOR out the contribution (0 * coeff = 0 is fine) */
-                        q_prime ^= gf28_mul_general(buffers[d][i], coeff);
+
+                /* Byte lanes of a word are independent, so solve each. */
+                for (int t = 0; t < RC_RAID6_WORD_BYTES; t++) {
+                    for (int w = 0; w < RC_RAID6_WORDS; w++) {
+                        uint8_t known = p[(size_t)w * RC_RAID6_WORD_BYTES + t];
+
+                        for (int i = 0; i < members; i++) {
+                            if (i == a || i == b)
+                                continue;
+                            known ^= bufs[i][(size_t)w * RC_RAID6_WORD_BYTES + t];
+                        }
+                        coeff[w] = (1u << w) | (1u << (RC_RAID6_WORDS + w));
+                        rhs[w] = known;
+                    }
+
+                    for (int col = 0; col < RC_RAID6_WORDS; col++) {
+                        uint8_t known =
+                            q[(size_t)col * RC_RAID6_WORD_BYTES + t] ^ s_known[t];
+
+                        for (int i = 0; i < members; i++) {
+                            int m;
+
+                            if (i == a || i == b)
+                                continue;
+                            m = rdp_mod(col - i, RC_RAID6_PRIME);
+                            if (m == RC_RAID6_PRIME - 1)
+                                continue;
+                            known ^= bufs[i][(size_t)m * RC_RAID6_WORD_BYTES + t];
+                        }
+                        coeff[RC_RAID6_WORDS + col] =
+                            rdp_q_mask(members, a, b, col);
+                        rhs[RC_RAID6_WORDS + col] = known;
+                    }
+
+                    assert(gf2_solve(coeff, rhs, 2 * RC_RAID6_WORDS,
+                                     RDP_UNKNOWNS, sol));
+
+                    for (int w = 0; w < RC_RAID6_WORDS; w++) {
+                        assert(sol[w] ==
+                               bufs[a][(size_t)w * RC_RAID6_WORD_BYTES + t]);
+                        assert(sol[RC_RAID6_WORDS + w] ==
+                               bufs[b][(size_t)w * RC_RAID6_WORD_BYTES + t]);
                     }
                 }
-                
-                uint8_t alpha_f1 = gf28_exp[fail1 % 255];
-                uint8_t alpha_f2 = gf28_exp[fail2 % 255];
-                
-                uint8_t p_times_af1 = gf28_mul_general(p_prime, alpha_f1);
-                uint8_t numerator = q_prime ^ p_times_af1;
-                uint8_t denom = alpha_f1 ^ alpha_f2;
-                
-                uint8_t denom_inv = gf28_exp[(255 - gf28_log[denom]) % 255];
-                
-                uint8_t d_fail2 = gf28_mul_general(numerator, denom_inv);
-                uint8_t d_fail1 = p_prime ^ d_fail2;
-                
-                assert(d_fail1 == lost1[i]);
-                assert(d_fail2 == lost2[i]);
             }
-            
-            /* Restore */
-            memcpy(buffers[fail1], lost1, len);
-            memcpy(buffers[fail2], lost2, len);
-            free(lost1);
-            free(lost2);
         }
+
+        for (int d = 0; d < members; d++)
+            free(bufs[d]);
     }
-    
-    for (int d = 0; d < data_drives; d++) free(buffers[d]);
-    
-    printf("  RAID 6 all-pair reconstruction: PASS\n");
+
+    printf("  RAID 6 two-member recovery: PASS\n");
 }
 
 /* A distributed layout must be one-to-one: no two logical sectors may map to
@@ -660,15 +817,13 @@ int main(void)
     printf("RAID 5/6 Parity Math Test Harness\n");
     printf("========================================\n\n");
     
-    gf28_init_tables();
-    
-    test_known_vectors();
-    test_gf28_tables();
     test_raid5_parity();
+    test_evenodd_vectors();
+    test_evenodd_topology();
     test_raid6_parity();
+    test_raid6_two_failure_recovery();
     test_mapping_functions();
     test_mapping_bijection();
-    test_raid6_reconstruction_edge_cases();
     
     printf("\n========================================\n");
     printf("ALL TESTS PASSED ✓\n");

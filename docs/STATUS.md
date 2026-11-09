@@ -215,6 +215,19 @@ been implemented, it's marked.
   ext4 filesystem mounting read-only and every file checksum matching. That
   makes the read path self-consistent with the map the code implements; it
   still cannot discriminate against a vendor-written array (issue #6).
+- **RAID 6 Q is now the vendor's EVENODD construction (issue #10).** The
+  generator is no longer GF(2⁸) Reed-Solomon: Q is XOR plus a modulus by 17
+  over the vendor's 512-byte unit — sixteen 32-byte words, seventeen
+  diagonals, the skipped diagonal carried in an `S` term. It lives in
+  `src/raid6_evenodd.h`, which `src/test_parity_userspace.c` includes, so the
+  harness compiles the code the module ships instead of the private copy it
+  used to carry; that duplicate is what would have let the two drift. The
+  GF(2⁸) exp/log tables are gone from `src/`. Checked in userspace: hardcoded
+  vectors at 4 and 16 data members, the diagonal topology per word, and
+  two-member recovery solved as a GF(2) system for every pair across 2..16
+  data members (full rank throughout). The generator still has no kernel
+  caller — RAID 6 is read-only — so this tree writes no Q yet, and agreement
+  with firmware-written parity remains unobserved.
 
 ## 2026-10-07 — X399 fixtures verified; RAID10 pair convention settled
 
@@ -854,11 +867,11 @@ single hung command or transient fault without intervention.
   the RAID 6 Q **algorithm** — is settled too: the vendor's whole dual-parity
   path is `rc_raid6_evenodd.cpp`, and its Q is EVENODD/RDP diagonal parity
   with a prime-17 integer modulus and **no field arithmetic** (no multiply,
-  no exp/log tables anywhere in the binary). So the GF(2⁸) Reed-Solomon Q in
-  `patch_parity_math.c` is not vendor-compatible. It is also unreachable —
-  RAID 6 is read-only, healthy reads never touch parity, and the generator
-  has no callers — so no wrong bytes are produced today; replacing it
-  belongs to the write path. Placement is unchanged by any of this
+  no exp/log tables anywhere in the binary). The GF(2⁸) Reed-Solomon Q that
+  `patch_parity_math.c` used to carry has since been replaced by exactly that
+  construction (issue #10, `src/raid6_evenodd.h`). It still has no kernel
+  caller — RAID 6 is read-only, healthy reads never touch parity — so this
+  tree produces no parity bytes yet. Placement is unchanged by any of this
   (`docs/REVERSE_ENGINEERING.md` item 8).
 - **QEMU RAID test depends on PATH order for static busybox** (issue #5).
 - **rcraid ioctl control node has no `capable()`/`ns_capable()` check**
