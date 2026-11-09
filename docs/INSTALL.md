@@ -386,6 +386,52 @@ up. See the low-priority open questions (BAR discovery, vendor PCI
 config writes) in `docs/REVERSE_ENGINEERING.md`. Capture the full dmesg
 and paste it into a new development session.
 
+### `rmmod rcraid` says "Module is in use" after a live-CD install
+
+Phase 2 of `install-livecd.sh` mounts the target root and then bind-mounts
+the live session's `/dev`, `/proc`, `/sys` and `/run` into it for the
+chroot. Mount events propagate, and the live session's root is a shared
+peer, so those mounts also appear in every systemd service namespace. The
+installer unmounts its own view of them but not the copies: the target
+filesystem stays open, the block device never closes, and the module keeps
+refcount 1. `rmmod rcraid` then fails with "Module rcraid is in use", and
+every later attempt to mount the target reports `already mounted or mount
+point busy`.
+
+Phase 2 must therefore run in a **private mount namespace**. The installer
+re-execs itself once under
+
+```bash
+unshare --mount --propagation private -- /bin/bash "$0" "$@"
+```
+
+so every mount it makes stays local to that process tree and is discarded
+when it exits. Setting propagation flags around each mount is not enough:
+applying `--make-rslave` after the bind is too late, and making the target
+private *before* binding still leaks the target mount itself, because that
+one propagated at creation. Measured against `systemd-udevd`'s namespace on
+Ubuntu 26.10: 3 leaked mounts with the previous code, 1 with the flag
+applied first, 0 inside the private namespace.
+
+A missing `unshare(1)` only downgrades this to a warning, since the install
+itself is unaffected — but the session then cannot unload `rcraid` until it
+reboots. If you are running an older copy and hit this, the copies can be
+found and unmounted per namespace:
+
+```bash
+for pid in $(lsns -t mnt -o PID -n); do
+    nsenter -t "$pid" -m -- bash -c \
+        'findmnt -A -n -r -o TARGET | grep "^/mnt/rcraid-target" | sort -r |
+         while read -r t; do umount -l "$t"; done'
+done
+```
+
+Note that `findmnt -A` from your own shell shows nothing; the mounts live in
+namespaces you are not in. Cleaning them up restores the ability to mount and
+write the target (which is how a driver can still be repaired in place), but
+the filesystem instance that already leaked can keep the module pinned until
+the next reboot — so the leak is worth preventing rather than cleaning up.
+
 ### "I just want to compare against the working Windows driver"
 
 The Windows binaries were removed from the tree (vendor-distributed
@@ -450,6 +496,13 @@ quick-start path 🅐. It builds and loads the driver, hands
 `/dev/rcraid0` to the distro installer, then chroots into the fresh
 install to set up DKMS, the initramfs hook, and a UEFI boot entry.
 Validated end to end on RAID0 and RAID1.
+
+The chroot step runs inside a private mount namespace
+(`unshare --mount --propagation private`). That is mandatory, not tidiness:
+mounts made without it propagate into systemd's service namespaces and keep
+the array's filesystem open after the install, leaving `rcraid` impossible to
+unload. See `rmmod rcraid` under Troubleshooting for the details and the
+measured leak counts.
 
 The array itself normally comes from the **UEFI RAIDXpert2 utility**, and
 that is what the script expects: it reads the RAIDCore metadata at LBA
