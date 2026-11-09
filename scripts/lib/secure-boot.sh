@@ -273,6 +273,12 @@ mok_queue_enrollment() {
         return 1
     fi
     MOK_PASSWORD="$pw"
+
+    # MokManager waits ~10 s by default and then *clears* the pending request
+    # and boots on.  On a machine that boots from the array that is a failed
+    # boot with a password nobody got to use, so ask it to wait for a human
+    # instead.  Best-effort: mokutil older than 0.5 has no --timeout.
+    mokutil --timeout -1 >/dev/null 2>&1 || true
 }
 
 # ---------------------------------------------------------------------------
@@ -332,7 +338,8 @@ already signed with a key that boot trusts.
 
 At the blue "MOK management" screen: Enroll MOK -> Continue -> Yes -> type the
 password -> Reboot.  (MOK manager reboots by itself when it is done; that is
-the same boot, not another install step.)
+the same boot, not another install step.  Its ~10 s default timeout is
+disabled, so the screen waits for you instead of dropping the request.)
 
 If you skip the prompt, the key stays untrusted: with Secure Boot enabled the
 kernel then rejects rcraid.ko and the array is missing — and when / lives on

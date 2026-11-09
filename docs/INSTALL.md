@@ -250,6 +250,14 @@ that boot cannot complete: answer the prompt (it comes back until it is
 answered, and `sudo mokutil --import <cert>` re-queues it), or switch Secure
 Boot off to get in.
 
+The prompt does not have to be answered with Secure Boot on, and the safe order
+is to do it with Secure Boot still **off**: shim launches MokManager whenever a
+request is pending, whatever the firmware is enforcing, and with enforcement
+off a rejected module costs nothing — the array still comes up. Enrol there,
+then switch Secure Boot on. The installers disable MokManager's ~10 s default
+timeout (`mokutil --timeout -1`) so a slow boot cannot silently drop the
+request, which is what MokManager otherwise does.
+
 All of this assumes the boot chain goes through shim, the default on Ubuntu,
 Debian and Fedora. A kernel started directly by firmware through its own EFI
 stub never runs MOK manager, and there Secure Boot has to stay off.
