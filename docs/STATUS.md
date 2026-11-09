@@ -85,9 +85,12 @@ been implemented, it's marked.
   `0x1BF5` to RAID 6 and requires ≥ 4 members. The vendor dispatch settles the
   encoding — parity count = `(DeviceType == 0x1BFA) + 1` — so the two
   constants were swapped; `rc_linux.h` now has RAID5=`0x1BF5`,
-  RAID6=`0x1BFA`. Level *placement* (left-symmetric row rotation) is still
-  unconfirmed (issue #6). New `docs/VALIDATION_RAID5.md` records the observed
-  geometry and the vendor-written-data check that would settle it.
+  RAID6=`0x1BFA`. Level *placement* is now settled from the vendor blob:
+  dedicated parity on member `N-1`, no rotation — which the row-rotating map
+  in `patch_parity_math.c` does not match, so reads on a vendor-written array
+  are not yet trustworthy (issue #6, `docs/REVERSE_ENGINEERING.md`). New
+  `docs/VALIDATION_RAID5.md` records the observed geometry and the
+  vendor-written-data check that would still confirm the read path.
 - **A non-member disk with valid RAIDCore metadata no longer takes the
   legacy fallback.** The array box has a fourth `1022:B000` drive whose
   metadata is valid but whose DeviceId appears in no LD record (a spare, or a

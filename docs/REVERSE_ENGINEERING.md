@@ -610,35 +610,62 @@ Still needing Ghidra investigation. Run via `scripts/ghidra/HuntBlockers.java`
    (a 0x1c-byte struct `0x1c,4,2,2,2,2,1`) may set adapter parameters we don't
    replicate. Worth a look if NVMe init produces a controller fatal status.
 
-### RAID 5/6 layout (open, from the blob)
+### RAID 5/6 layout — parity is dedicated, on the last member (settled 2026-11-08)
 
-7. **Where the blob's parity rotation is computed.** Traced from
-   `RC_RAID5DriveMap` / `RC_RAID6DriveMap` (data member = `(LBA >> s) % (N-1)`
-   or `% (N-2)`; no rotation) through `RC_FlushDirtyDataRAID5DoneGetDataLocks`
-   (parity at fixed `IocList[SecondCount - k]`). `RC_LookupParityBlock` is a
-   cache lookup, `RC_GetQParityIoc` is RAID 60 only, and
-   `RC_GetStripeStartSector` picks no parity member. `RC_ConfigUpdateMapDriver`
-   gives RAID 5/6 the `default` case, `RC_VolumeLogicalToPhysical`, which walks
-   `RAID0List` by sector offset and never reads a parity layout. So parity
-   placement seems to come from the element table built at array creation,
-   which is not yet traced. This conflicts with the row-rotating layout in
-   `patch_parity_math.c` and needs confirming before anyone relies on it —
-   which is why the driver assembles parity volumes **read-only**.
+7. **Vendor parity placement: fixed slot, no rotation.** Derived from the
+   DWARF-bearing `rcblob.x86_64` (SDK 9.3.0-00283), so every listing below
+   carries AMD's own file:line rather than a guessed function name.
 
-   Our own layout (unconfirmed, not vendor-derived): a *row* is one chunk on
-   every member; the logical stripe number selects the data chunk within its
-   row; parity (one member for RAID 5, two for RAID 6) rotates one member per
-   row; the chunk sits at `row * chunk + offset` on its member, so each member
-   covers the whole row space and capacity is `(N-1)`/`(N-2)` × per-member
-   user size. Rotating parity per *chunk* instead is not a bijection, and
-   addressing chunks at their logical stripe number needs the full logical
-   space on every member — both were shipped bugs, caught by the userspace
-   harness's bijection + packing checks.
+   - `RC_RAID5DriveMap` (`rc_cache.cpp:5500-5506`) returns
+     `(lba >> chunk_pow) % (Devices - 1)` — the **data** member. Data chunks
+     therefore map to members `0 .. N-2` and never to `N-1`.
+   - `RC_RAID6DriveMap` (`rc_cache.cpp:5510-5515`) is the same shape with
+     `% (Devices - 2)`, leaving `N-2` and `N-1` for P and Q.
+   - The map result is the drive index for the Ioc: call sites write it to
+     `IocList.FailedDrive` (`ioc+0x438`) in the generic read paths
+     (`rc_generic_io.cpp:4724-4726`, `:5063-5066`, `:5770-5772`). Since it can
+     only be `0 .. N-2`, member `N-1` never receives data.
+   - `RC_FlushDirtyDataRAID5DoneGetParityLock` (`rc_raid5_io.cpp:6793-6799`)
+     sets `IocList.ChildrenTotalIo = Devices - 1` — one child per data drive —
+     derives the parity count as `(DeviceType == 0x1BFA) + 1`, and for RAID 6
+     separately locks the Ioc at index `Devices - 1`. No stripe or row term
+     appears anywhere in it.
+   - `RC_GetStripeStartSector` (`rc_driver_map.cpp:2095-2115`) strides rows by
+     `(Devices - parity_count) × chunk`, i.e. dense rows: `N-1` data chunks
+     plus one parity chunk, all at the same row offset on their member.
+   - `CacheTagSectors` (`rc_core_config.h:1007-1023`) decodes chunk index
+     `3/2/other` as `0x200/0x100/0x80` sectors = 256/128/64 KiB.
 
-   A parity level is selected by `DeviceType` alone: `FirstCount ×
-   SecondCount = Devices` holds on every real record and cannot express
-   `(N-1) × 1` or `(N-2) × 2`, so the counts never identify a parity array
-   (issue #3).
+   So the vendor layout is **dedicated parity on member `N-1`**, rows packed
+   at `row * chunk`. It is not the left-symmetric rotating map this port
+   implements (`parity_pos = (N-1) - (row % N)`, `patch_parity_math.c:230`),
+   which disagrees with the vendor on two rows out of three for `N=3`. The
+   element table is not consulted for placement after all — the map is pure
+   arithmetic.
+
+   The one assumption left in that chain is that the returned data index is
+   used against the member Ioc array without a per-row permutation. Nothing in
+   the read, parity-lock or parity-memory paths applies a row term, and the
+   decompile behind issue #6 saw the parity Ioc selected as
+   `pIocList[SecondCount - k]`, so a hidden rotation is unlikely — but it is
+   the step a hardware confirmation would remove entirely.
+
+   Cross-checked against `rcraid.sys` 9.3.3-00291: the Windows build carries
+   the same RAID 5 family (`RC_FlushDirtyDataRAID5NonStripeWrite*` asserts,
+   `RC_CreateRaidArray: Error, raid5 set greater than %d elements`), so the
+   design is shared, but the map arithmetic is only readable in the DWARF
+   blob.
+
+   Consequence: parity volumes stay **read-only** until `patch_parity_math.c`
+   is switched to dedicated parity, and no read on a data-bearing vendor array
+   can be trusted before that. Hardware confirmation is still outstanding —
+   the dev array is zeroed, and the staged fixture was written with the
+   rotating map, so it cannot discriminate (issue #6).
+
+   Earlier reasoning worth keeping: a parity level is selected by `DeviceType`
+   alone — `FirstCount × SecondCount = Devices` holds on every real record and
+   cannot express `(N-1) × 1` or `(N-2) × 2`, so the counts never identify a
+   parity array (issue #3).
 8. **RAID 6 Q algorithm.** The decompiled Q routine indicates EVENODD (prime 17).
    The repo's Q is GF(2⁸) Reed-Solomon. Not yet checked against an EVENODD test
    vector (issue #3).

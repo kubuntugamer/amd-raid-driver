@@ -307,8 +307,10 @@ Full setup, troubleshooting, and the Secure-Boot / signing details are in
   [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md). **RAID5/6** — a parity volume
   is now identified from the LD `DeviceType`, assembles at the right capacity
   and serves reads, but it is forced **read-only**: the parity write path, the
-  rebuild, and the metadata writer are not wired, and the on-disk parity
-  placement is unconfirmed (issue #6). Don't write to one.
+  rebuild, and the metadata writer are not wired. Vendor parity placement is
+  settled from the blob (dedicated, on member `N-1`), and the driver's
+  row-rotating map does not match it yet — so don't trust reads on a
+  vendor-written array, and don't write to one (issue #6).
 - **SATA RAID** — the `43BD / 7905 / 7916 / 7917` controllers are **not
   claimed**; the AHCI path is unimplemented, so those devices stay bound to
   `ahci` (see #7).

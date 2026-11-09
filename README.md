@@ -17,8 +17,10 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 > its own array-box run yet**, so treat it as unproven for production data until
 > [`docs/VALIDATION_RAID10.md`](docs/VALIDATION_RAID10.md) is signed off.
 > **RAID 5/6** assemble **read-only**: the driver identifies them and reads
-> them, but the parity write path is not implemented and the on-disk parity
-> placement is unconfirmed, so they are not deployable yet.
+> them, but the parity write path is not implemented and its parity map is
+> being corrected to match the vendor (dedicated parity on the last member,
+> found by reverse engineering — not the row-rotating map it shipped), so they
+> are not deployable yet.
 > The mirror completion and array rebuild paths run on a
 > **modern non-blocking asynchronous thread runner** (`kamd_async_worker` parks
 > parent-bio endio off the hardware completion context; `kamd_resync` owns
@@ -86,8 +88,8 @@ write until the parity write path and the layout itself are confirmed.
 | **RAID 0 (Stripe)** | ✅ **Baseline — stable** | Full horizontal data chunk striping. |
 | **RAID 1 (Mirror)** | ✅ **Baseline — stable** | Duplicated writes across pairs; round-robin load-balanced reads; degraded failover + non-blocking resync. |
 | **RAID 10 (Nested)** | 🟡 **Feature-complete — validation pending** | Striped row segments over 2-way mirrored pairs (≥ 4 drives). Writes/discards mirror to both copies, reads round-robin, per-pair degraded failover. Pair-aware member rebuild/resync and boot-time degraded assembly landed; a lost pair refuses assembly. Mirror-pair convention (adjacent `{2c, 2c+1}`) confirmed against real X399 firmware dumps (2026-10-07), but the NVMe `1022:B000` data path has **not** had its own array-box run — the [runbook's](docs/VALIDATION_RAID10.md) results table is still empty. |
-| RAID 5 (Parity) | 🟡 **Read-only — assembly + reads wired** | Single-parity, row-rotating map shared with the userspace harness (`rc_amd_map_distributed_raid5`, dense per-member packing, one chunk per member per row). Level comes from the LD `DeviceType` only (`0x1BF5`, confirmed on a BIOS-created 3-disk array 2026-11-08). Volume assembles at `(N-1)` × per-member capacity and serves reads; writes/discards are refused and the queue is capped at one stripe per request, because the parity-chunk address is the *same* row slot as the data chunk it protects. **Level/geometry hardware-confirmed; parity placement still unconfirmed** ([VALIDATION_RAID5.md](docs/VALIDATION_RAID5.md)), and no parity write path, rebuild, or metadata writer yet (issue #6). |
-| RAID 6 (Dual Parity) | 🟡 **Read-only — assembly + reads wired** | P + GF(2⁸) Q dual parity, two row-rotating parity slots per row (`0x1BFA`). Same read-only contract as RAID 5, capacity `(N-2)` × per-member. The vendor blob's Q may be EVENODD (prime 17) rather than Reed-Solomon — unconfirmed against a test vector (issue #3) — so treat reconstructed data as unverified. |
+| RAID 5 (Parity) | 🟡 **Read-only — assembly + reads wired** | Single-parity, dense per-row packing. Level comes from the LD `DeviceType` only (`0x1BF5`, confirmed on a BIOS-created 3-disk array 2026-11-08). Volume assembles at `(N-1)` × per-member capacity and serves reads; writes/discards are refused and the queue is capped at one stripe per request, because the parity-chunk address is the *same* row slot as the data chunk it protects. **Level/geometry hardware-confirmed.** Parity placement is settled from the vendor blob — **dedicated parity on member `N-1`, no rotation** — which the current row-rotating map (`rc_amd_map_distributed_raid5`) does **not** match; reads on a vendor-written array cannot be trusted until that map is corrected ([VALIDATION_RAID5.md](docs/VALIDATION_RAID5.md), issue #6). No parity write path, rebuild, or metadata writer yet. |
+| RAID 6 (Dual Parity) | 🟡 **Read-only — assembly + reads wired** | P + GF(2⁸) Q dual parity (`0x1BFA`); vendor blob puts data on `0..N-3` with P/Q on `N-2`/`N-1`, not rotating — the current map rotates and does not match. Same read-only contract as RAID 5, capacity `(N-2)` × per-member. The vendor blob's Q may be EVENODD (prime 17) rather than Reed-Solomon — unconfirmed against a test vector (issue #3) — so treat reconstructed data as unverified. |
 
 ---
 

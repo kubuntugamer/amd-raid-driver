@@ -97,9 +97,29 @@ volume goes straight to `failed`; there is no reconstruction/rebuild path.
 - [ ] A write to `/dev/rcraid0` fails and the disk stays read-only.
 - [ ] No new `rcraid` I/O error / timeout / reset lines in dmesg.
 
-## 3. Layout confirmation — the open item (issue #6)
+## 3. Layout confirmation — answered from the vendor binary (issue #6)
 
-Do **one** of these before calling the parity map confirmed.
+**The vendor placement is dedicated parity on the last member, not the
+rotating map this tree implements.** Read out of the DWARF-bearing
+`rcblob.x86_64` (SDK 9.3.0-00283); the derivation is in
+`docs/REVERSE_ENGINEERING.md` ("RAID 5/6 layout"):
+
+| | vendor blob | this driver |
+|---|---|---|
+| RAID 5 data member | `(lba >> chunk_pow) % (N-1)` → members `0..N-2` | same |
+| RAID 5 parity member | **`N-1`, every row** | `(N-1) - (row % N)` — rotates |
+| RAID 6 | data `0..N-3`, P/Q on `N-2`/`N-1` | Q rotates, P adjacent |
+| row stride | `(N - parity_count) × chunk`, packed per row | same |
+
+So for the 3-disk array on the dev box, row 1 has its parity on member 2 per
+the vendor, but on member 1 per this driver — two rows in three disagree.
+`patch_parity_math.c` must be changed to dedicated parity before reads on a
+vendor-written array can be trusted. Nothing below has been re-run against a
+real payload; the array is zeroed and the staged fixture was written with the
+rotating map, so it cannot discriminate.
+
+What is still worth doing on hardware, once such data exists, is to confirm
+the *read* map end to end:
 
 ### 3a. Vendor-written data (non-destructive, preferred)
 
@@ -112,25 +132,26 @@ Do **one** of these before calling the parity map confirmed.
       mapping is wrong.
 - [ ] Record the observed layout here: `LAYOUT = ______________`.
 
-### 3b. Direct-member stamp (destructive; validates the driver against the documented model, not the firmware)
+### 3b. Direct-member stamp (destructive; validates the driver against whichever map it implements)
 
-This proves the driver reads the *documented* map; it cannot prove the vendor
-writes that map. It is still useful to separate a read-path bug from a
-layout mismatch.
+This proves the driver reads the map it implements; it cannot prove the vendor
+writes that map. Useful for a regression check after the map changes, and to
+separate a read-path bug from a layout mismatch.
 
-The documented map (`src/patch_parity_math.c`) for N=3, 256 KiB chunks:
+The **vendor** map for N=3, 256 KiB chunks — what a stamped fixture should
+now use:
 
 | row | parity member | data members (stripe 0, stripe 1) | physical offset on every member |
 |---|---|---|---|
 | 0 | 2 | 0, 1 | `UserDataOffset + 0 × chunk` |
-| 1 | 1 | 0, 2 | `UserDataOffset + 1 × chunk` |
-| 2 | 0 | 1, 2 | `UserDataOffset + 2 × chunk` |
+| 1 | 2 | 0, 1 | `UserDataOffset + 1 × chunk` |
+| 2 | 2 | 0, 1 | `UserDataOffset + 2 × chunk` |
 
-Parity rotates backward: `parity_member = (N-1) - (row % N)`; data chunks are
-the non-parity members in ascending order; the row's chunks are packed at the
-same row offset on each member. Stamp `data0`, `data1`, `P = data0 XOR data1`
-accordingly, load the driver, and verify `/dev/rcraid0` returns the logical
-data. Restore zeros afterwards (the array started zeroed).
+Parity is fixed on the last member (`N-1`); data chunks are members `0..N-2`
+in ascending order, packed at the same row offset on each member. Stamp
+`data0`, `data1`, `P = data0 XOR data1` accordingly, load the driver, and
+verify `/dev/rcraid0` returns the logical data. Restore zeros afterwards (the
+array started zeroed).
 
 - [ ] Stamp + read-back matches for at least several full rows.
 - [ ] Restore the stamped region.
@@ -150,7 +171,7 @@ data. Restore zeros afterwards (the array started zeroed).
 | 0 | Trust gate | | |
 | 1 | Level / geometry / capacity | | 0x1BF5, N=3, `(N-1)` × user size |
 | 2 | Read path + read-only enforcement | | |
-| 3 | Parity placement | | issue #6 |
+| 3 | Parity placement | resolved (RE) | issue #6: dedicated parity on member `N-1`; read map not yet changed |
 | 4 | Boot / install | | blocked on writes |
 
 ## Promote
