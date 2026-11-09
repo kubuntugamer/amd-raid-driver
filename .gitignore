@@ -34,3 +34,6 @@ Module.symvers
 # Python bytecode from scripts/qemu-test (mkmeta.py)
 __pycache__/
 *.pyc
+
+# Local hardware-run fixtures, metadata backups, and agent build tree
+.freebuff/
