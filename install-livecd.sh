@@ -218,9 +218,24 @@ for part in /dev/rcraid0p*; do
 done
 cp -L /etc/resolv.conf "$TARGET_MNT/etc/resolv.conf" 2>/dev/null || true
 
-TGT_VER="$(cat "$SRC_DIR/VERSION")"
+# The DKMS package version comes from dkms.conf, so the tree staged in the
+# target matches the PACKAGE_VERSION dkms is told on the command line there.
+TGT_VER="$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)".*/\1/p' "$SRC_DIR/dkms.conf")"
+[ -n "$TGT_VER" ] || { echo "❌ Cannot read PACKAGE_VERSION from dkms.conf." >&2; exit 1; }
 TGT_SRC="$TARGET_MNT/usr/src/rcraid-${TGT_VER}"
-mkdir -p "$TGT_SRC" && cp -r "$SRC_DIR"/{Makefile,dkms.conf,VERSION,rc_*.c,rc_*.h} "$TGT_SRC/"
+# Same layout as the repo: build files at the root, sources under src/ (the
+# root Makefile's rcraid-objs paths are relative to it).
+mkdir -p "$TGT_SRC/src"
+cp "$SRC_DIR"/Makefile "$SRC_DIR"/dkms.conf "$TGT_SRC/"
+for f in "$SRC_DIR"/src/*.c "$SRC_DIR"/src/*.h; do
+    case "${f##*/}" in
+        test_*) continue ;;
+    esac
+    cp "$f" "$TGT_SRC/src/"
+done
+if [ -f "$SRC_DIR/docs/VERSION" ]; then
+    cp "$SRC_DIR/docs/VERSION" "$TGT_SRC/VERSION"
+fi
 sed -i "s/@PKGVER@/${TGT_VER}/g" "$TGT_SRC/dkms.conf"
 
 # Ask now, while there is someone to ask: Secure Boot is off at this point (see

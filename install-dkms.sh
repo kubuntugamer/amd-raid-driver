@@ -17,11 +17,19 @@ set -euo pipefail
 
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 PKG_NAME="rcraid"
-# The dkms package version tracks the driver version (VERSION file); the
-# repo dkms.conf carries a @PKGVER@ placeholder we substitute at staging
-# time, so each driver release installs into its own dkms tree.
-DRIVER_VERSION="$(cat "$SRC_DIR/VERSION")"
-PKG_VERSION="$DRIVER_VERSION"
+# Two versions, and they are not the same thing:
+#   PKG_VERSION     the DKMS package version.  Read from dkms.conf so the tree
+#                   staged under /usr/src always carries the PACKAGE_VERSION
+#                   this script passes to `dkms add/build/install` — dkms
+#                   refuses the mismatch if those two ever diverge.
+#   DRIVER_VERSION  the AMD release this port matches, from docs/VERSION.  It
+#                   is staged as VERSION for the Makefile's banner/modinfo.
+PKG_VERSION="$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)".*/\1/p' "$SRC_DIR/dkms.conf")"
+if [ -z "$PKG_VERSION" ]; then
+    echo "cannot read PACKAGE_VERSION from $SRC_DIR/dkms.conf" >&2
+    exit 1
+fi
+DRIVER_VERSION="$(cat "$SRC_DIR/docs/VERSION" 2>/dev/null || echo unknown)"
 DKMS_SRC="/usr/src/${PKG_NAME}-${PKG_VERSION}"
 
 [ "$(id -u)" -eq 0 ] || { echo "must be root" >&2; exit 1; }
@@ -220,16 +228,26 @@ echo
 
 echo "==> staging sources at $DKMS_SRC"
 rm -rf "$DKMS_SRC"
-mkdir -p "$DKMS_SRC"
-cp -r \
-    "$SRC_DIR"/Makefile \
-    "$SRC_DIR"/dkms.conf \
-    "$SRC_DIR"/VERSION \
-    "$SRC_DIR"/rc_*.c \
-    "$SRC_DIR"/rc_*.h \
-    "$DKMS_SRC/"
+mkdir -p "$DKMS_SRC/src"
+# Stage the tree's own layout, not a flat copy: the root Makefile lists its
+# objects as src/*.o, so the sources have to arrive under src/ or kbuild finds
+# nothing to build.  test_*.c are userspace harnesses, not part of the module.
+cp "$SRC_DIR"/Makefile "$SRC_DIR"/dkms.conf "$DKMS_SRC/"
+for f in "$SRC_DIR"/src/*.c "$SRC_DIR"/src/*.h; do
+    case "${f##*/}" in
+        test_*) continue ;;
+    esac
+    cp "$f" "$DKMS_SRC/src/"
+done
 
-# Substitute the package version into the staged dkms.conf.
+# docs/VERSION is the AMD release this port matches; the Makefile reads it as
+# VERSION from the source dir and bakes it into the banner and modinfo.
+if [ -f "$SRC_DIR/docs/VERSION" ]; then
+    cp "$SRC_DIR/docs/VERSION" "$DKMS_SRC/VERSION"
+fi
+
+# Substitute the package version if the repo file still carries the
+# placeholder; with a literal PACKAGE_VERSION this is a no-op.
 sed -i "s/@PKGVER@/$PKG_VERSION/g" "$DKMS_SRC/dkms.conf"
 
 # Bake the source revision into the staged tree — it has no .git, so the
