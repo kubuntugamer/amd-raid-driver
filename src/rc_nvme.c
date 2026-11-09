@@ -2952,22 +2952,22 @@ static void rc_volume_register_member(struct rc_adapter *adapter)
 			rc_volume_geometry_untrust_reason =
 				"the on-disk ChunkSize is not a plausible stripe size (power of two, 8 KiB..1 MiB) — the field is probably being misread, so the write path cannot trust the stripe math";
 		}
-		/* RAID5/6 is wired for ASSEMBLY and READS only.  The write
-		 * path would have to generate P (and Q) and read-modify-write
-		 * the affected stripe, and the on-disk parity placement is
-		 * still unconfirmed (issue #6), so a write could encode parity
-		 * in a layout no vendor controller reads back.  Force read-only
-		 * through the same veto every other untrusted-geometry path
-		 * uses — the volume still comes up and its data can be
-		 * inspected, which is the point of a read-only assembly. */
+		/* RAID5/6 is wired for ASSEMBLY and READS only.  The placement
+		 * is settled against the vendor core (dedicated parity on member
+		 * N-1, issue #6), but there is no write path at all: no P/Q
+		 * generation and no read-modify-write of a partial stripe.
+		 * Force read-only through the same veto every other
+		 * untrusted-geometry path uses — the volume still comes up and
+		 * its data can be inspected, which is the point of a read-only
+		 * assembly. */
 		if (nvme->ld_level == RC_LDT_RAID5 ||
 		    nvme->ld_level == RC_LDT_RAID6) {
 			rc_printk(RC_WARN,
-				  "rc_volume_register_member: %s %s recognised — assembly and READS only (no parity write path, parity placement unconfirmed; issue #6) — volume will be READ-ONLY\n",
+				  "rc_volume_register_member: %s %s recognised — assembly and READS only (no parity write path yet; layout taken from the vendor core) — volume will be READ-ONLY\n",
 				  pci_name(adapter->pdev),
 				  rc_level_name(nvme->ld_level));
 			rc_volume_geometry_untrust_reason =
-				"RAID 5/6 is assembled READ-ONLY: the parity write path is not implemented and the on-disk parity placement is unconfirmed (issue #6)";
+				"RAID 5/6 is assembled READ-ONLY: there is no parity write path yet (no P/Q generation, no partial-stripe read-modify-write)";
 		}
 	} else {
 		/* A committed config generation with an LD record that does

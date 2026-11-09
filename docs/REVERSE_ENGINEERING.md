@@ -350,7 +350,7 @@ size`) writes `DeviceType=0x1BF5`. The vendor dispatch confirms the
 direction: `FUN_140055760` and `FUN_140052404` compute
 `parity_count = (devtype == 0x1BFA) + 1`, so `0x1BFA` is the two-parity
 (RAID6) encoding and `0x1BF5` is single-parity (RAID5). The on-disk parity
-*placement* is still unconfirmed (issue #6).
+*placement* is settled from the vendor core (issue #6, item 7 below).
 
 AMD also writes one single-device "raw disk" LD per physical member
 (`devtype=0x1BF9, devices=1, capacity=NSZE`); the parser skips those by
@@ -645,10 +645,10 @@ Still needing Ghidra investigation. Run via `scripts/ghidra/HuntBlockers.java`
 
    The one assumption left in that chain is that the returned data index is
    used against the member Ioc array without a per-row permutation. Nothing in
-   the read, parity-lock or parity-memory paths applies a row term, and the
-   decompile behind issue #6 saw the parity Ioc selected as
-   `pIocList[SecondCount - k]`, so a hidden rotation is unlikely — but it is
-   the step a hardware confirmation would remove entirely.
+   the read, parity-lock or parity-memory paths applies a row term, and   the decompile behind issue #6 saw the parity Ioc selected as
+   `pIocList[SecondCount - k]`, so a hidden rotation is unlikely — but that is
+   an inference from absence, which is why it stays listed here. Reading a
+   vendor-written array back is the only thing that would remove it.
 
    Cross-checked against `rcraid.sys` 9.3.3-00291: the Windows build carries
    the same RAID 5 family (`RC_FlushDirtyDataRAID5NonStripeWrite*` asserts,
@@ -657,10 +657,20 @@ Still needing Ghidra investigation. Run via `scripts/ghidra/HuntBlockers.java`
    blob.
 
    Consequence: `patch_parity_math.c` now implements this layout (2026-11-08),
-   replacing the row-rotating map, and parity volumes remain **read-only**.
-   Hardware confirmation is still outstanding — the dev array is zeroed, and
-   the staged fixture was written with the rotating map, so it cannot
-   discriminate (issue #6).
+   replacing the row-rotating map, and parity volumes remain **read-only** —
+   for want of a write path, not because the layout is in doubt.
+
+   **Where that leaves the claim.** The placement is settled against the
+   vendor implementation: it is read out of AMD's code, which is the code that
+   writes these arrays, and both shipped builds agree. Two things are
+   unobserved rather than unsettled. First, no array written by the vendor has
+   been read back through this driver — the dev array is zeroed and the staged
+   fixture was written with the rotating map, so neither can discriminate
+   (issue #6). Second, member order comes from the LD element array, so a
+   permutation there would misroute reads without contradicting any of the
+   arithmetic above. Neither is evidence against the layout; both are reasons
+   the claim should say "settled against the vendor code" and not
+   "hardware-proven".
 
    Earlier reasoning worth keeping: a parity level is selected by `DeviceType`
    alone — `FirstCount × SecondCount = Devices` holds on every real record and

@@ -120,9 +120,13 @@ module still assembles `optimal`, reads are stable, and the first 64 MiB hash
 changes (`7321098d…ed2a3` instead of `63bf7f7d…c83673`) because the staged
 fixture on the members was written with the old rotating map.
 
-What is still missing is a read of **vendor-written** data: the array is
-zeroed, and the staged fixture cannot discriminate. Until that exists, treat
-the map as vendor-derived but not hardware-proven.
+The layout is therefore **settled against the vendor implementation** — the
+arithmetic is AMD's own and no read, parity-lock or parity-memory path applies
+a row term — rather than inferred from one array. What is still missing is
+*corroboration on real bytes*: the array is zeroed, and the staged fixture was
+written by this driver, so it cannot discriminate. Two things stay unobserved
+rather than unsettled: no vendor-written array has been read back, and member
+order comes from the LD element array.
 
 What is still worth doing on hardware, once such data exists, is to confirm
 the *read* map end to end:
@@ -177,12 +181,13 @@ array started zeroed).
 | 0 | Trust gate | | |
 | 1 | Level / geometry / capacity | | 0x1BF5, N=3, `(N-1)` × user size |
 | 2 | Read path + read-only enforcement | | |
-| 3 | Parity placement | resolved (RE) + map changed | issue #6: dedicated parity on member `N-1`, driver follows it since 2026-11-08; no vendor-written read yet |
+| 3 | Parity placement | settled against the vendor code + map changed | issue #6: dedicated parity on member `N-1`, driver follows it since 2026-11-08; not yet corroborated by a vendor-written read |
 | 4 | Boot / install | | blocked on writes |
 
 ## Promote
 
-Do **not** mark RAID 5 stable until the parity write path, placement
-confirmation, and rebuild exist. When step 3 signs off, the README row may
-move from "level/geometry unconfirmed" to "assembles and reads on hardware;
-placement confirmed", still read-only.
+Do **not** mark RAID 5 stable until the parity write path and rebuild exist.
+Placement no longer gates it — the layout is settled against the vendor code
+and the map matches it; what step 3 adds is corroboration on real bytes. The
+README row may already say "assembles and reads on hardware; layout settled
+against the vendor implementation", and moves to stable only when writes land.

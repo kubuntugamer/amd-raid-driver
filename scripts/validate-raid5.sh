@@ -4,9 +4,10 @@
 #
 # RUN THIS ON THE ARRAY BOX (the machine with the 1022:B000 controller and a
 # RAIDXpert2-created RAID 5 array), NOT on a development laptop.  RAID 5/6 is
-# assembled READ-ONLY: there is no parity write path, no rebuild, and the
-# on-disk parity placement is still unconfirmed (issue #6).  This script
-# therefore never writes to the array — it verifies that writes are REFUSED.
+# assembled READ-ONLY: there is no parity write path and no rebuild.  The
+# on-disk placement is settled against the vendor core (issue #6) but has not
+# been corroborated on vendor-written data.  This script therefore never
+# writes to the array — it verifies that writes are REFUSED.
 #
 #   sudo ./scripts/validate-raid5.sh
 #   sudo ./scripts/validate-raid5.sh --full-read    # sequential-read the

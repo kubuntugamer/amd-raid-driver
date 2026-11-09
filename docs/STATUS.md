@@ -88,10 +88,11 @@ been implemented, it's marked.
   RAID6=`0x1BFA`. Level *placement* is settled from the vendor blob:
   dedicated parity on member `N-1`, no rotation, and `patch_parity_math.c`
   now implements that layout (it used to rotate; issue #6,
-  `docs/REVERSE_ENGINEERING.md`). Reads are still not trustworthy on a
-  vendor-written array until one exists to compare against. New
-  `docs/VALIDATION_RAID5.md` records the observed geometry and the
-  vendor-written-data check that would settle the read path.
+  `docs/REVERSE_ENGINEERING.md`). The layout therefore rests on the vendor
+  implementation rather than on inference from one array; what has not
+  happened is reading a vendor-written array back through the driver.
+  `docs/VALIDATION_RAID5.md` records the observed geometry and that
+  corroboration step.
 - **A non-member disk with valid RAIDCore metadata no longer takes the
   legacy fallback.** The array box has a fourth `1022:B000` drive whose
   metadata is valid but whose DeviceId appears in no LD record (a spare, or a

@@ -308,9 +308,11 @@ Full setup, troubleshooting, and the Secure-Boot / signing details are in
   is now identified from the LD `DeviceType`, assembles at the right capacity
   and serves reads, but it is forced **read-only**: the parity write path, the
   rebuild, and the metadata writer are not wired. Vendor parity placement is
-  settled from the blob (dedicated, on member `N-1`) and the map now matches
-  it, but no vendor-written array has confirmed the result — so don't trust
-  reads on one, and don't write to one (issue #6).
+  settled against the vendor implementation (dedicated, on member `N-1`) and
+  the map now matches it; what is still owed is corroboration — no
+  vendor-written array has been read back through it, so treat that as the last
+  open check rather than as doubt about the layout. Don't write to one: there
+  is no write path (issue #6).
 - **SATA RAID** — the `43BD / 7905 / 7916 / 7917` controllers are **not
   claimed**; the AHCI path is unimplemented, so those devices stay bound to
   `ahci` (see #7).

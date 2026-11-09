@@ -185,9 +185,13 @@ static __attribute__((constructor)) void rc_parity_init(void)
  *   or row term.  This REPLACES the earlier left-symmetric rotation, which no
  *   vendor code performs.
  *
- *   Still unconfirmed on hardware: the read map has not been checked against
- *   an array written by the vendor, which is why the driver assembles these
- *   volumes read-only.
+ *   This layout is settled against the vendor implementation, not guessed:
+ *   the arithmetic above is AMD's own, and no read, parity-lock or
+ *   parity-memory path applies a row term.  Two things are unobserved rather
+ *   than unsettled — nobody has read a vendor-written array back through
+ *   this driver, and member order comes from the LD element array.  Neither
+ *   affects the map arithmetic.  Parity volumes are read-only because there
+ *   is no P/Q write path yet, not because the map is in doubt.
  *
  * Everything the driver knows about the parity layout lives in the two map
  * functions below; that is the single place to change if a vendor-written
