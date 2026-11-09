@@ -640,16 +640,19 @@ sudo modprobe -r rcraid && sudo insmod rcraid.ko enable_writes=1
 
 ## Next implementation steps (in order)
 
-The original bring-up backlog (interrupt-driven completion, per-CPU queues) is
-done — see "Since done" above. What remains, in rough priority:
+[`IMPLEMENTATION.MD`](IMPLEMENTATION.MD) carries the ordered roadmap; this is
+the short view. The original bring-up backlog (interrupt-driven completion,
+per-CPU queues) is done — see "Since done" above. What remains, in rough
+priority:
 
-1. **RAID10 hardware validation** — RAID0/1/10 dispatch is implemented and
+1. **Metadata writer for RAID10/5/6** — `scripts/qemu-test/mkmeta.py` writes
+   0/1 only, so the installer's 10/5/6 choices stop at an error message.
+2. **RAID10 hardware validation** — RAID0/1/10 dispatch is implemented and
    RAID0/1 are hardware-validated; what remains for RAID10 is the array-box run
    and sign-off in [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md), then promoting
-   the row in `README.md` and here. See [`IMPLEMENTATION.MD`](IMPLEMENTATION.MD).
-2. **Multi-volume support** — one gendisk per LD instead of a single
+   the row in `README.md` and here.
+3. **Multi-volume support** — one gendisk per LD instead of a single
    `/dev/rcraid0`.
-3. **Hot-plug / drive-failure handling** — clean member teardown + drain.
 4. **SATA RAID (AHCI) path** — the `1022:7905 / 43BD / 7916 / 7917` IDs are
    deliberately absent from MODULE_DEVICE_TABLE, because claiming a device
    with no code path strands it; add them back together with the AHCI
