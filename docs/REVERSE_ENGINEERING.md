@@ -730,10 +730,23 @@ Still needing Ghidra investigation. Run via `scripts/ghidra/HuntBlockers.java`
    path or a Q-based rebuild exists. Issue #3's second half is this answer;
    the code change is tracked by the open write path.
 
-   Cross-check against `rcraid.sys` 9.3.3-00291 was **inconclusive**: the
-   Windows image is symbol-stripped, and searching for the modulus-17 constant
-   found nothing conclusive. The claim rests on the DWARF blob, which is the
-   shared core both builds come from.
+   Cross-check against `rcraid.sys` 9.3.3-00291 (`V:\RC-933\RC_933_00291`):
+   the Windows image is symbol-stripped, but the code is there and it is the
+   same algorithm. MSVC compiles the `AbsoluteModulus(…, 17)` call into a
+   reciprocal multiply — `mov $0x78787879` / `imul` / `sar $3` /
+   `imul $0x11` / `sub` — followed by the identical `if (x < 0) x += 17`
+   fixup, then `cmp $0x10 / jae <skip>` (diagonal 16 dropped), a `shl $0x5`
+   word stride and four qword XORs. Nine such sites sit in one code block
+   around `0x140071d20`, with an outer loop that terminates on `cmp $0x10`
+   after 17 iterations and an `S` buffer at struct offset `+0x190`. The
+   matching also explains why the naive search failed: MSVC never emits
+   `idiv` for a constant divisor, so there is no modulus-17 `div` to find.
+   No GF(2⁸) exp or log table exists in that binary either (`0x11D` and
+   `0x187` both absent). Both shipped builds carry EVENODD Q.
+
+   Caveat on that cross-check: the identification is by instruction
+   signature, not by symbol, since the image is stripped — but the signature
+   is the `S`/mod-17/32-byte layout, which nothing else in the driver uses.
 
 ### Resolved
 
