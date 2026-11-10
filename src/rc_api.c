@@ -13,9 +13,13 @@
  * state.
  *
  * Read-only by construction: this file never writes metadata.  rcadm's
- * only observed write is the 8 KiB mailbox descriptor that precedes a
- * window read (command word 1); every other command is refused with
- * CHECK CONDITION instead of being silently accepted.
+ * only observed accepted write is the 8 KiB mailbox descriptor that
+ * precedes a window read (command word 1).  Mutation frames
+ * (CREATE/DELETE/TRANSFORM) are decoded into named fields so the log
+ * says exactly what was asked for, then refused with CHECK CONDITION:
+ * this driver has no metadata writer, and reporting success for a
+ * change it cannot persist would leave rcadm believing in a volume that
+ * does not exist on disk.
  *
  * Original work, independently authored from clean-room reverse
  * engineering of the AMD-RAID Windows driver binaries under DMCA
@@ -37,6 +41,7 @@
 
 #include "rc_linux.h"
 #include "rc_api.h"
+#include "rc_cfgwrite.h"
 
 #define RC_API_DEVICE_NAME	"rc_api"
 #define RC_API_ID_STRING	"AMD-RAID Controller"
@@ -90,6 +95,21 @@
 
 /* The only mailbox command rcadm was observed to issue (read-config). */
 #define RC_API_MAILBOX_CMD_CONFIG 1u
+
+/*
+ * Largest mutation frame we decode.  The captures were 1536 bytes (the
+ * 1 KiB RC_CfgWrite request plus a 512-byte tail); the header is all
+ * that matters for command 1, which is handled before this limit.
+ */
+#define RC_API_WRITE_MAX	4096u
+
+/*
+ * RaidType in a *request* is the on-disk encoding with one twist: 0x1BF6
+ * carries RAID 0, RAID 1 and RAID 10 with the geometry in
+ * FirstCount/SecondCount, and 0x1BF7 is the one-disk "volume" verb.
+ * (On disk 0x1BF7 means RAID 1 — do not substitute RC_LDT_* here.)
+ */
+#define RC_API_REQ_TYPE_VOLUME	0x1BF7u
 
 #define RC_API_OP_INQUIRY	0x12
 #define RC_API_OP_READ_10	0x28
@@ -371,6 +391,162 @@ static long rc_api_read(struct file *file, struct sg_io_hdr *hdr,
 	return 0;
 }
 
+/*
+ * Name the layout a request's RaidType/FirstCount/SecondCount ask for.
+ * Classification only; the geometry is checked separately, because a
+ * frame can name a level and a member count that do not agree.
+ */
+static const char *rc_api_req_level(u32 type, u32 first, u32 second)
+{
+	if (type == RC_LDT_RAID5)
+		return "RAID5";
+	if (type == RC_LDT_RAID6)
+		return "RAID6";
+	if (type == RC_API_REQ_TYPE_VOLUME)
+		return "single-disk volume";
+	if (type == RC_LDT_RAID0) {
+		if (second == 1 && first >= 2)
+			return "RAID0";
+		if (first == 1 && second == 2)
+			return "RAID1";
+		if (first == 2 && second == 2)
+			return "RAID10";
+	}
+	return "unknown layout";
+}
+
+/* Does the geometry in the request describe `count` members? */
+static bool rc_api_req_geometry_ok(u32 type, u32 count, u32 first,
+				   u32 second)
+{
+	if (type == RC_API_REQ_TYPE_VOLUME)
+		return count == 1 && first == 1 && second == 1;
+	if (type == RC_LDT_RAID5 || type == RC_LDT_RAID6)
+		return first == 1 && second == count;
+	if (type == RC_LDT_RAID0)
+		return first >= 1 && second >= 1 &&
+		       (u64)first * second == count;
+	return false;
+}
+
+static void rc_api_log_create(const struct rc_cfgwrite *r)
+{
+	const struct rc_cfgwrite_create *c = &r->u.create;
+	u64 bytes = (u64)c->size_mb << 20;
+
+	rc_printk(RC_WARN,
+		  "/dev/rc_api: config-write CREATE refused (gen %llu, sync %u, %u B payload): %s type 0x%04x, %u device(s) %u x %u%s, %u spare, %u MiB (%llu B), cache flags 0x%08x tag %u, first device %16phN — no metadata writer, nothing persisted\n",
+		  (unsigned long long)r->hdr.generation,
+		  r->hdr.sync_command, r->payload_bytes,
+		  rc_api_req_level(c->raid_type, c->first_count,
+				   c->second_count),
+		  c->raid_type, c->device_count, c->first_count,
+		  c->second_count,
+		  rc_api_req_geometry_ok(c->raid_type, c->device_count,
+					 c->first_count, c->second_count) ?
+		  "" : " (INCONSISTENT)",
+		  c->spare_count, c->size_mb, (unsigned long long)bytes,
+		  c->cache_flags, c->cache_tag_size, c->device_id[0]);
+}
+
+static void rc_api_log_delete(const struct rc_cfgwrite *r)
+{
+	const struct rc_cfgwrite_delete *d = &r->u.delete;
+
+	rc_printk(RC_WARN,
+		  "/dev/rc_api: config-write DELETE refused (gen %llu, sync %u, %u B payload): all %u, %u device(s), first %16phN — no metadata writer, nothing persisted\n",
+		  (unsigned long long)r->hdr.generation,
+		  r->hdr.sync_command, r->payload_bytes, d->all,
+		  d->device_count, d->device_id[0]);
+}
+
+static void rc_api_log_transform(const struct rc_cfgwrite *r)
+{
+	const struct rc_cfgwrite_transform *t = &r->u.transform;
+	u64 bytes = (u64)t->size_mb << 20;
+
+	rc_printk(RC_WARN,
+		  "/dev/rc_api: config-write TRANSFORM refused (gen %llu, sync %u, %u B payload): %s type 0x%04x, %u device(s) %u x %u%s, %u spare, %u MiB (%llu B), LD %16phN, first device %16phN — no metadata writer, nothing persisted\n",
+		  (unsigned long long)r->hdr.generation,
+		  r->hdr.sync_command, r->payload_bytes,
+		  rc_api_req_level(t->raid_type, t->first_count,
+				   t->second_count),
+		  t->raid_type, t->device_count, t->first_count,
+		  t->second_count,
+		  rc_api_req_geometry_ok(t->raid_type, t->device_count,
+					 t->first_count, t->second_count) ?
+		  "" : " (INCONSISTENT)",
+		  t->spare_count, t->size_mb, (unsigned long long)bytes,
+		  t->logical_device, t->device_id[0]);
+}
+
+/*
+ * Decode a configuration-change frame and refuse it.  Decoding is the
+ * point: the request is validated against the captured layout and logged
+ * field by field, so an rcadm verb that still fails names its level,
+ * geometry, size and member instead of a bare "command refused".
+ *
+ * Execution is deliberately absent.  Persisting a change means writing a
+ * new config generation plus the commit block, and this driver has no
+ * metadata writer (docs/IMPLEMENTATION.MD, "Array creation from Linux").
+ * A success reply here would be a lie the next reboot would expose.
+ */
+static long rc_api_config_write(struct sg_io_hdr *hdr, u64 lba, u32 bytes)
+{
+	struct rc_cfgwrite req;
+	u8 *frame;
+	int rc;
+
+	if (bytes > RC_API_WRITE_MAX) {
+		rc_printk(RC_WARN,
+			  "/dev/rc_api: config-write frame of %u bytes from lba 0x%llx is larger than the %u-byte maximum\n",
+			  bytes, (unsigned long long)lba, RC_API_WRITE_MAX);
+		return rc_api_reject(hdr, RC_API_ASC_INVALID_FIELD);
+	}
+
+	frame = kmalloc(bytes, GFP_KERNEL);
+	if (!frame) {
+		rc_printk(RC_ERROR,
+			  "/dev/rc_api: config-write: cannot allocate %u-byte frame\n",
+			  bytes);
+		return -ENOMEM;
+	}
+	if (copy_from_user(frame, hdr->dxferp, bytes)) {
+		kfree(frame);
+		return -EFAULT;
+	}
+
+	rc = rc_cfgwrite_decode(frame, bytes, &req);
+	if (rc) {
+		rc_printk(RC_WARN,
+			  "/dev/rc_api: config-write command %u from lba 0x%llx refused: %s (%u-byte frame)\n",
+			  req.hdr.command, (unsigned long long)lba,
+			  rc == -EOPNOTSUPP ? "no layout for this command" :
+					     "malformed frame", bytes);
+		kfree(frame);
+		return rc_api_reject(hdr, rc == -EOPNOTSUPP ?
+				     RC_API_ASC_INVALID_OPCODE :
+				     RC_API_ASC_INVALID_FIELD);
+	}
+
+	switch (req.hdr.command) {
+	case RC_CW_CREATE:
+		rc_api_log_create(&req);
+		break;
+	case RC_CW_DELETE:
+		rc_api_log_delete(&req);
+		break;
+	case RC_CW_TRANSFORM:
+		rc_api_log_transform(&req);
+		break;
+	default:
+		break;	/* rc_cfgwrite_decode() has no other command */
+	}
+
+	kfree(frame);
+	return rc_api_reject(hdr, RC_API_ASC_INVALID_OPCODE);
+}
+
 static long rc_api_write(struct sg_io_hdr *hdr, const u8 *cdb)
 {
 	u64 lba = ((u64)cdb[2] << 24) | ((u64)cdb[3] << 16) |
@@ -387,24 +563,21 @@ static long rc_api_write(struct sg_io_hdr *hdr, const u8 *cdb)
 		return rc_api_reject(hdr, RC_API_ASC_INVALID_FIELD);
 	if (get_user(command, (u32 __user *)hdr->dxferp))
 		return -EFAULT;
-	if (get_user(window, (u32 __user *)hdr->dxferp + 1))
-		return -EFAULT;
 
 	/*
 	 * Command word 1 is the read-config window preparation: rcadm
 	 * writes it immediately before reading the same window, and the
-	 * reply does not depend on it.  Anything else could only be a
-	 * configuration change, which this driver does not implement (it
-	 * never writes firmware metadata) — refuse loudly rather than
-	 * report a change that never happened.
+	 * reply does not depend on it.
 	 */
 	if (command != RC_API_MAILBOX_CMD_CONFIG) {
-		rc_printk(RC_WARN,
-			  "/dev/rc_api: REFUSED mailbox command %u (lba 0x%llx, %u bytes) — this driver never writes firmware metadata\n",
-			  command, (unsigned long long)lba, want);
-		return rc_api_reject(hdr, RC_API_ASC_INVALID_OPCODE);
+		if (want < RC_CW_HDR_BYTES)
+			return rc_api_reject(hdr,
+					     RC_API_ASC_INVALID_FIELD);
+		return rc_api_config_write(hdr, lba, want);
 	}
 
+	if (get_user(window, (u32 __user *)hdr->dxferp + 1))
+		return -EFAULT;
 	rc_printk(RC_NOTE,
 		  "/dev/rc_api: mailbox prepare (command %u, window lba 0x%x, %u bytes)\n",
 		  command, window, want);

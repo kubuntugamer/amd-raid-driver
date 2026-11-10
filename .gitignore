@@ -31,6 +31,9 @@ Module.symvers
 # Userspace async-engine harness build dir (make test-async)
 .async-test/
 
+# Userspace RC_CfgWrite decoder harness build dir (make test-cfgwrite)
+.cfgwrite-test/
+
 # Python bytecode from scripts/qemu-test (mkmeta.py)
 __pycache__/
 *.pyc

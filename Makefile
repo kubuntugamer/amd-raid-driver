@@ -67,6 +67,7 @@ clean:
 	@rm -f *.o *.ko *.mod.c *.mod *.symvers *.order .*.cmd
 	@rm -rf .tmp_versions
 	@rm -rf $(ASYNC_TEST_BIN) $(dir $(ASYNC_TEST_BIN))
+	@rm -rf $(CFGWRITE_TEST_BIN) $(dir $(CFGWRITE_TEST_BIN))
 	@echo "Clean completed"
 
 # Lenient build target: extra warnings suppressed via KCFLAGS (the
@@ -143,6 +144,26 @@ test-async-tsan:
 		ASYNC_TEST_BIN=$(ASYNC_TEST_BIN)-tsan \
 		ASYNC_TEST_CFLAGS="-fsanitize=thread -fno-omit-frame-pointer"
 
+# ------------------------------------------------------------------------------
+# Userspace harness for the RC_CfgWrite decoder (src/rc_cfgwrite.h).
+#
+# The decoder is header-only and dependency-free precisely so the wire layout
+# captured off rcadm can be checked without kernel headers or hardware: an
+# offset error here becomes an offset error in an array operation later.
+# ------------------------------------------------------------------------------
+CFGWRITE_TEST_BIN ?= $(CURDIR)/.cfgwrite-test/cfgwrite_test
+CFGWRITE_TEST_SRC := src/test_cfgwrite_userspace.c
+CFGWRITE_TEST_DEPS := $(CFGWRITE_TEST_SRC) src/rc_cfgwrite.h
+
+test-cfgwrite: $(CFGWRITE_TEST_BIN)
+	@$(CFGWRITE_TEST_BIN)
+
+$(CFGWRITE_TEST_BIN): $(CFGWRITE_TEST_DEPS)
+	@mkdir -p $(dir $(CFGWRITE_TEST_BIN))
+	@echo "Building RC_CfgWrite decoder harness (userspace, no kernel headers)..."
+	$(CC) -O1 -g -Wall -Wextra -Werror -o $(CFGWRITE_TEST_BIN) \
+		$(CFGWRITE_TEST_SRC) -Isrc
+
 # Help target
 help:
 	@echo "AMD RAID Driver for Linux"
@@ -153,6 +174,8 @@ help:
 	@echo "  test-async      - Build and run the async engine harness (userspace)"
 	@echo "  test-async-asan - Same, under AddressSanitizer + UBSan + LeakSanitizer"
 	@echo "  test-async-tsan - Same, under ThreadSanitizer"
+	@echo "  test-cfgwrite   - Build and run the RC_CfgWrite decoder harness (userspace)"
 	@echo "  help            - Show this help"
 
-.PHONY: all clean install help test-async test-async-asan test-async-tsan
+.PHONY: all clean install help test-async test-async-asan test-async-tsan \
+	test-cfgwrite
