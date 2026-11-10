@@ -99,7 +99,12 @@ bind_nvme_functions() {
     [ "$bound" -ge "$min_found" ] || fail "only $bound of $found NVMe functions bound to rcbottom"
 }
 
-MODARGS="enable_writes=1 allow_foreign_nvme=1"
+# meta_write_probe*: the driver verifies its own metadata write path in
+# assembly — rewrite the member's RC_MetaData block over its NVMe queues,
+# flush, read back; junk mode additionally proves the write reached media
+# by putting a different block there first and restoring the real one.
+# Disposable images only, which is what this rig is.
+MODARGS="enable_writes=1 allow_foreign_nvme=1 meta_write_probe=1 meta_write_probe_junk=1"
 [ "$degraded_boot" = "1" ] && MODARGS="$MODARGS allow_degraded=1"
 
 echo "rcraid-test: loading rcraid.ko ($MODARGS)"
@@ -137,6 +142,18 @@ if [ -n "$expected_level" ]; then
     fi
     echo "rcraid-test: assembled level verified: $want_level"
 fi
+
+# The metadata write path must have been exercised and verified by the
+# driver itself, on every member it assembled from.  A missing line means
+# the probe never ran; a mismatch is a FAIL inside the driver's own log.
+probe_ok=$(dmesg | grep -c "rc_meta_write_probe: .* probe complete")
+probe_members=$(dmesg | grep -c "rc_meta_write_probe: .* refusing to write")
+[ "$probe_ok" -ge 1 ] || fail "metadata write probe did not complete (see rc_meta_write_probe lines)"
+[ "$probe_members" -eq 0 ] || fail "metadata write probe refused to write on $probe_members member(s): encoder does not match media"
+if dmesg | grep -q "rc_meta_write_probe: .* mismatch\|rc_meta_write_probe: .* failed"; then
+    fail "metadata write probe reported an error"
+fi
+echo "rcraid-test: metadata write probe verified ($probe_ok member probe(s))"
 
 # ---------------------------------------------------------------------------
 # Degraded BOOT scenario (degraded_boot=1): one member was never attached;
@@ -199,6 +216,7 @@ for cycle in 1 2 3; do
     mark "reload cycle $cycle"
     rmmod rcraid || fail "rmmod (cycle $cycle)"
     insmod /rcraid.ko enable_writes=1 allow_foreign_nvme=1 \
+        meta_write_probe=1 meta_write_probe_junk=1 \
         || fail "re-insmod (cycle $cycle)"
     bind_nvme_functions
     i=0
@@ -215,6 +233,11 @@ for cycle in 1 2 3; do
     # reads raced the ISR (or the commit block failed to parse).
     if dmesg | grep -q "falling back to legacy BDF ordering"; then
         fail "a member fell back to legacy assembly during reload (cycle $cycle)"
+    fi
+    # Every reload re-runs the metadata write probe on every member; an
+    # error there would mean the write path regressed between loads.
+    if dmesg | grep -q "rc_meta_write_probe: .*mismatch\|rc_meta_write_probe: .* failed"; then
+        fail "metadata write probe failed after reload (cycle $cycle)"
     fi
 done
 

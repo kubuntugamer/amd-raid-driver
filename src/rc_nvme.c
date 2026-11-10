@@ -408,6 +408,28 @@ module_param_named(enable_writes, rc_volume_enable_writes, int, 0444);
 MODULE_PARM_DESC(enable_writes,
 		 "If non-zero, expose /dev/rcraid0 as read-write (default 0). Verify the array contents look right via reads BEFORE enabling.");
 
+/* Metadata write probe.  Off by default; the QEMU rig turns it on.  When
+ * set, the driver rewrites a member's RC_MetaData block at LBA 0x5000
+ * through its own NVMe queues, flushes, and reads it back — and refuses
+ * to do so unless the block it is about to write is byte-identical to the
+ * one already on media, so the probe cannot change what the array means.
+ * This exercises the WRITE/FLUSH path and the metadata LBA without
+ * touching the encoder question (that is rc_nvme_verify_meta_encoding). */
+static int rc_meta_write_probe;
+module_param_named(meta_write_probe, rc_meta_write_probe, int, 0444);
+MODULE_PARM_DESC(meta_write_probe,
+		 "If non-zero, verify the metadata write path at assembly by rewriting the member's own RC_MetaData block and reading it back (default 0).");
+
+/* Destructive half of the probe, for disposable test arrays only: write a
+ * different (junk DeviceId) block first to prove the media really changed,
+ * then restore the real block and verify the restore.  Interrupting the
+ * driver between those two writes leaves the member with a junk metadata
+ * block, so never enable this on an array you intend to keep. */
+static int rc_meta_write_probe_junk;
+module_param_named(meta_write_probe_junk, rc_meta_write_probe_junk, int, 0444);
+MODULE_PARM_DESC(meta_write_probe_junk,
+		 "With meta_write_probe, also prove the write reaches media by writing a junk block and restoring it. Disposable arrays only (default 0).");
+
 /* Stripe-size override for diagnostic probing.  Set at insmod time to force
  * the volume to use this many sectors per stripe, bypassing the derivation
  * from RC_LogicalDevice.ChunkSize / firmware default.  Zero = use derived
@@ -1971,6 +1993,8 @@ static int rc_nvme_io_cmd_sync(struct rc_adapter *adapter,
 /* Forward decls — defined below. */
 static int rc_nvme_read_lba(struct rc_adapter *adapter, u64 slba,
 			    u16 nlb_zbased, dma_addr_t buf_dma);
+static int rc_nvme_write_lba(struct rc_adapter *adapter, u64 slba,
+			     u16 nlb_zbased, dma_addr_t buf_dma);
 static int rc_volume_create_disk(void);
 static void rc_volume_parse_logical_device(struct rc_adapter *adapter);
 static void rc_nvme_auto_reset_fn(struct work_struct *w);
@@ -2023,6 +2047,163 @@ static u64 rc_raidcore_checksum(const void *data, size_t bytes)
 	}
 	return acc;
 }
+
+/* Write (nlb_zbased + 1) LBAs from a DMA-coherent buffer.  Same PRP rules
+ * and 2-page ceiling as rc_nvme_read_lba: PRP2 when the transfer spills
+ * past the first page.  Synchronous — the caller owns the barrier. */
+static int rc_nvme_write_lba(struct rc_adapter *adapter, u64 slba,
+			     u16 nlb_zbased, dma_addr_t buf_dma)
+{
+	struct rc_nvme_sqe cmd;
+	u32 bytes = ((u32)nlb_zbased + 1) * 512u;
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opc   = RC_NVME_NVM_OP_WRITE;
+	cmd.nsid  = cpu_to_le32(1);
+	cmd.prp1  = cpu_to_le64(buf_dma);
+	if (bytes > PAGE_SIZE) {
+		if (WARN_ON_ONCE(bytes > 2 * PAGE_SIZE))
+			return -EINVAL;
+		cmd.prp2 = cpu_to_le64(buf_dma + PAGE_SIZE);
+	}
+	cmd.cdw10 = cpu_to_le32((u32)(slba & 0xffffffff));
+	cmd.cdw11 = cpu_to_le32((u32)(slba >> 32));
+	cmd.cdw12 = cpu_to_le32(nlb_zbased);
+	return rc_nvme_io_cmd_sync(adapter, &cmd);
+}
+
+/* NVMe FLUSH (opcode 0x00): push the writes above to media before the
+ * read-back, so a verified probe means verified on the medium and not
+ * just in the controller's write cache. */
+static int rc_nvme_flush(struct rc_adapter *adapter)
+{
+	struct rc_nvme_sqe cmd;
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opc  = RC_NVME_NVM_OP_FLUSH;
+	cmd.nsid = cpu_to_le32(1);
+	return rc_nvme_io_cmd_sync(adapter, &cmd);
+}
+
+/* Write one sector, flush, read it back and compare.  Every step is
+ * logged on failure; `what` names the phase in the message. */
+static int rc_nvme_write_verify_lba(struct rc_adapter *adapter, u64 slba,
+				    const u8 *src, const char *what)
+{
+	struct device *dev = &adapter->pdev->dev;
+	void *buf;
+	dma_addr_t buf_dma;
+	int ret;
+
+	buf = dma_alloc_coherent(dev, PAGE_SIZE, &buf_dma, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	memcpy(buf, src, RC_MB_SECTOR);
+	ret = rc_nvme_write_lba(adapter, slba, 0, buf_dma);
+	if (ret) {
+		rc_printk(RC_ERROR,
+			  "rc_meta_write_probe: %s %s write LBA 0x%llx failed (%d)\n",
+			  pci_name(adapter->pdev), what,
+			  (unsigned long long)slba, ret);
+		goto out;
+	}
+
+	ret = rc_nvme_flush(adapter);
+	if (ret) {
+		rc_printk(RC_ERROR,
+			  "rc_meta_write_probe: %s %s flush failed (%d)\n",
+			  pci_name(adapter->pdev), what, ret);
+		goto out;
+	}
+
+	memset(buf, 0, RC_MB_SECTOR);
+	ret = rc_nvme_read_lba(adapter, slba, 0, buf_dma);
+	if (ret) {
+		rc_printk(RC_ERROR,
+			  "rc_meta_write_probe: %s %s read-back LBA 0x%llx failed (%d)\n",
+			  pci_name(adapter->pdev), what,
+			  (unsigned long long)slba, ret);
+		goto out;
+	}
+
+	if (memcmp(buf, src, RC_MB_SECTOR)) {
+		rc_printk(RC_ERROR,
+			  "rc_meta_write_probe: %s %s read-back mismatch at LBA 0x%llx — metadata write path is broken\n",
+			  pci_name(adapter->pdev), what,
+			  (unsigned long long)slba);
+		ret = -EIO;
+		goto out;
+	}
+
+out:
+	dma_free_coherent(dev, PAGE_SIZE, buf, buf_dma);
+	return ret;
+}
+
+/* Metadata write probe: rewrite this member's own RC_MetaData block at
+ * LBA 0x5000 through the driver's NVMe queues, flush, and read it back.
+ * The rewrite is gated on an exact match with the block on media, so the
+ * array's meaning cannot change; the optional junk phase proves the media
+ * really received the write (a dropped command would leave the read-back
+ * equal by luck) and then restores the real block.  Never fails assembly:
+ * a broken write path is logged loudly and left for the caller to notice. */
+static void rc_nvme_meta_write_probe(struct rc_adapter *adapter,
+				     const u8 *on_disk)
+{
+	struct device *dev = &adapter->pdev->dev;
+	u8 *page, *built, *junk;
+	dma_addr_t page_dma;
+	bool junk_done = false;
+	int ret;
+
+	/* Two sectors in one page rather than two stack blocks: keeps the
+	 * frame small enough for -Wframe-larger-than and gives the buffers
+	 * the alignment the NVMe PRP path expects. */
+	page = dma_alloc_coherent(dev, PAGE_SIZE, &page_dma, GFP_KERNEL);
+	if (!page)
+		return;
+	built = page;
+	junk = page + RC_MB_SECTOR;
+
+	rc_mb_metadata_block(built, adapter->ctx.nvme.md_device_id);
+	if (memcmp(built, on_disk, RC_MB_SECTOR)) {
+		rc_printk(RC_ERROR,
+			  "rc_meta_write_probe: %s refusing to write: encoder output does not match the block on media\n",
+			  pci_name(adapter->pdev));
+		goto out;
+	}
+
+	ret = rc_nvme_write_verify_lba(adapter, RC_MB_METADATA_LBA, built,
+				       "rewrite");
+	if (ret)
+		goto out;
+
+	if (rc_meta_write_probe_junk) {
+		rc_mb_metadata_block(junk,
+				     ~adapter->ctx.nvme.md_device_id);
+		ret = rc_nvme_write_verify_lba(adapter, RC_MB_METADATA_LBA,
+					       junk, "junk");
+		if (!ret)
+			junk_done = true;
+		/* Restore regardless: after a failed junk phase we cannot
+		 * tell whether the junk block reached media, and a member
+		 * left carrying one will not assemble. */
+		ret = rc_nvme_write_verify_lba(adapter, RC_MB_METADATA_LBA,
+					       built, "restore");
+		if (ret)
+			goto out;
+	}
+
+	rc_printk(RC_NOTE,
+		  "rc_meta_write_probe: %s probe complete (LBA 0x%x rewrite verified%s)\n",
+		  pci_name(adapter->pdev), RC_MB_METADATA_LBA,
+		  junk_done ? ", media proven changed, original restored" : "");
+
+out:
+	dma_free_coherent(dev, PAGE_SIZE, page, page_dma);
+}
+
 
 /* Encoder self-check: rebuild the RC_MetaData block this member carries
  * from its parsed DeviceId and compare against the bytes just read from
@@ -2150,6 +2331,8 @@ static int rc_nvme_read_validate_metadata(struct rc_adapter *adapter)
 		  (unsigned long long)nvme->md_mbr_checksum);
 
 	rc_nvme_verify_meta_encoding(adapter, buf);
+	if (rc_meta_write_probe)
+		rc_nvme_meta_write_probe(adapter, buf);
 
 	/* Walk the config ring to find the active RC_LogicalDevice record;
 	 * gives us the real member count, per-member position, and

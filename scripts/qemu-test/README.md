@@ -45,6 +45,16 @@ Design notes:
 `mkmeta.py` writes only what the Linux driver consumes — images it
 produces are for driver testing, not for RAIDXpert or Windows.
 
+**The metadata write path verifies itself.**  This rig always loads the
+module with `meta_write_probe=1 meta_write_probe_junk=1`, so at assembly
+the driver rewrites each member's own RC_MetaData block through its NVMe
+queues, flushes, and reads it back, refusing to write unless the block it
+is about to write already matches media.  Junk mode first puts a
+different block at LBA 0x5000 to prove the medium really changed — a
+dropped WRITE would otherwise leave the read-back equal by luck — then
+restores the real block.  Any mismatch, refusal or error fails the guest
+battery, so a regression in the write path cannot pass CI silently.
+
 ## Knobs
 
 ```

@@ -222,9 +222,13 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
       driver also re-encodes each member's RC_MetaData block at
       assembly and logs whether it matches the bytes on media
       (`rc_nvme_verify_meta_encoding`), which is true on rig-written
-      RAID0/RAID1 images.  Still missing: writing the images to the
-      members, choosing the free devices, and the hot gendisk
-      create/teardown.
+      RAID0/RAID1 images.  The member block can also be written back
+      through the driver's own NVMe queues and flushed
+      (`meta_write_probe`, rig-only): the QEMU battery rewrites LBA
+      0x5000, proves the medium changed, and restores the original on
+      RAID0, RAID1 and degraded RAID1.  Still missing: stamping a full
+      image set (generation + commit) onto members that have none,
+      choosing the free devices, and the hot gendisk create/teardown.
 
 - [x] **Replace / rebuild a failed drive** — moot for RAID0; needed
       for RAID1/5/10. Background rebuild kthread, progress in
