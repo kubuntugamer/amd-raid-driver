@@ -830,6 +830,126 @@ previous-generation variant.
 
 ---
 
+## Vendor kernel-side config-write chain (9.3.3-00302)
+
+The packet above is only the userspace half of the ABI. The blob's kernel
+side is fully symbolized, so the mutation path can be specified from DWARF
+and disassembly instead of inferred from captures. Facts below are layouts
+and observed control flow only; no vendor code is copied, and none of this
+was executed against the vendor driver.
+
+### Chain (`nm` addresses)
+
+| Symbol | Address |
+|---|---|
+| `RC_ConfigWrite(RC_CoreIoc*)` | `0x67ED0` |
+| `RC_BuildConfigWrite(RC_CoreIoc*)` | `0x67D50` |
+| `RC_ConfigWriteNoLock(RC_CoreIoc*)` | `0x681E0` |
+| `RC_ConfigWriteLower(RC_CoreIoc*)` | `0x5C1C0` |
+| `RC_ConfigWriteDiskMetaData(RC_CoreIoc*)` | `0x5D810` |
+| `RC_WriteMemCommitConfigPacket(RC_ConfigCommit*)` | `0x3D560` |
+| `RC_CheckConfigCommit(RC_ConfigCommit*)` | `0x936E0` |
+| `RC_GetConfigWriteLock(RC_CoreIoc*, u32)` | `0x806E0` |
+| `RC_ReleaseConfigWriteLock(RC_CoreIoc*, u32)` | `0x807D0` |
+
+`RC_ConfigWrite` allocates a `0x4000`-byte packet buffer (IOC `+0x428`) and
+copies the caller's 1 KiB request (IOC `+0x60`) into it, then parks an async
+state machine on IOC `+0x1D0` (states `0x2`, `0x3`, `0xF9`, `0x103`; the
+previous state is saved at `+0x2B8` and the value at `+0x28` moved to `+0x1D8`).
+`RC_BuildConfigWrite` makes its own `0x400`-byte copy of the same request,
+stores it at `+0x428` and switches to state `0x2` (queued). The commit is a
+separate record: `RC_WriteMemCommitConfigPacket` writes it,
+`RC_CheckConfigCommit` is the matching check entry point, and the config
+update path validates the commit checksum (below). All writers serialize on
+`ConfigLockCode`/`ConfigLockLine` (IOC `+0x2EC`/`+0x2F0`).
+
+### Request: `RC_CfgWrite` (1024 B)
+
+The kernel-side request format; a replacement write path has to supply these
+fields even though the userspace half only ever sends a packet.
+
+| Offset | Size | Field |
+|---|---|---|
+| `0x00` | 4 | `Command` (`RC_ConfigWriteCommand`) |
+| `0x04` | 4 | `ChannelID` |
+| `0x08` | 8 | `GenerationNumber` |
+| `0x10` | 4 | `SyncCommand` |
+| `0x14` | 4 | `ConfigWriteSizeInBytes` |
+| `0x18` | 4 | `MajorVersion` |
+| `0x1C` | 4 | `MinorVersion` |
+| `0x20` | 992 | command payload union / `ConfigWriteSizeReservedByte[992]` |
+
+Command values that map to `rcadm` verbs: `CREATE` 2, `DELETE` 3, `MANAGE` 7,
+`TRANSFORM` 8, `SPLIT` 14, `ACCEPT_CONFIG_CHANGES` 15, `RESCAN` 16,
+`OFFLINE` 17, `MANAGE_PHYSICAL_DEVICE` 29, `CONTROL_TASK` 34, `COPY` 35,
+`COMMIT_PREVIOUS_CONFIG` 36, `WRITE_METADATA` 44.
+
+Payload sizes (`pahole`): create 172 (`RC_WpGetCreateInfo`), transform 140,
+manage 76, copy 56, split 52, swap 32, write-metadata 32, task-control 28,
+delete 24, offline 20, commit-previous 4. `RC_CoreCreateLogicalDevice` is the
+344-byte in-kernel form of create: `ChannelID` 0, `RaidType` 4, `DeviceCount`
+8, `SpareDeviceCount` 12, `CacheTagSize` 16, `CacheFlags` 20, `Flags` 24,
+`SizeInMegabytes` 32, `PreferDeviceID` 40, `FirstCount` 48, `SecondCount` 52,
+`DistributedSpare` 56, `PreferReadElement` 60, `TaskPriority` 64,
+`DevicePrivate[32]` 68, `DeviceID` 104, `SpareDeviceList[8]` 128,
+`DeviceList[1]` 320.
+
+### Commit block: `RC_ConfigCommit` (512 B)
+
+| Offset | Size | Field |
+|---|---|---|
+| `0x00` | 8 | `Checksum` |
+| `0x08` | 4 | `ConfigPacketOffset` |
+| `0x0C` | 4 | `PacketSize` |
+| `0x10` | 8 | `CommittedChecksum` |
+| `0x18` | 8 | `GenerationNumber` |
+| `0x20` | 8 | `LastModifierSerialNumber` |
+| `0x28` | 8 | `LastOnlineSerialNumber` |
+| `0x30` | 8 | `PacketNumber` |
+| `0x38` | 4 | `CommittedBy` |
+| `0x3C` | 452 | `Reserved[113]` |
+
+### On-disk member record: `RC_PhysicalDeviceOnDisk` (128 B, packed)
+
+| Offset | Size | Field |
+|---|---|---|
+| `0x00` | 4 | `StructureType` |
+| `0x04` | 16 | `DeviceID` |
+| `0x14` | 4 | `PreviousHandle` |
+| `0x18` | 4 | `Devices` |
+| `0x1C` | 8 | `Capacity` |
+| `0x24` | 4 | `DeviceType` |
+| `0x28` | 4 | `BusType` |
+| `0x2C` | 4 | `DeviceState` |
+| `0x30` | 4 | `SpareInfo` |
+| `0x34` | 16 | `StartMetaDataSpace` |
+| `0x44` | 16 | `EndMetaDataSpace` |
+| `0x54` | 4 | `Features` |
+| `0x58` | 4 | `PortType` |
+| `0x5C` | 36 | `Reserved[9]` |
+
+### Unlike `rcadm`, the kernel validates the commit
+
+`rcadm` ignores the packet checksum (see above). The blob does not: it
+contains `RC_UpdateCorePhysicalDevice: *** INVALID *** Commit config
+checksum = 0x%llx`, `CommittedChecksum = 0x%llx`, `*** INVALID *** Config
+packet offset = 0x%x`, `*** INVALID *** Config packet size = 0x%x`, plus the
+status codes `RC_STS_INVALID_GENERATION_NUMBER` and
+`RC_STS_ACCEPT_CONFIG_CHANGE_PENDING`.
+
+Consequences for Phase 2, and for anything that claims to replace `rcadm`:
+
+- A config write is a generation-guarded transaction. The request carries
+  `GenerationNumber`, the commit record carries its own, and a
+  `WaitForAcceptConfigChange` state exists between write and accept.
+- Persisting means writing the 16 KiB packet and a 512-byte commit block with
+  correct `Checksum`/`CommittedChecksum`; a shim may not report success for a
+  mutation it did not persist.
+- Member stamps use the 128-byte packed `RC_PhysicalDeviceOnDisk` record, not
+  the 256-byte userspace PD variant the read path emits.
+
+---
+
 ## Debunked theories (do not re-investigate)
 
 Each wasted significant effort in the 2024 analysis round. They are wrong; the
