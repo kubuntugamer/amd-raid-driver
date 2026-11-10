@@ -894,6 +894,76 @@ delete 24, offline 20, commit-previous 4. `RC_CoreCreateLogicalDevice` is the
 `DevicePrivate[32]` 68, `DeviceID` 104, `SpareDeviceList[8]` 128,
 `DeviceList[1]` 320.
 
+### Captured mutation frames (rcadm 9.3.3-00302)
+
+Observed by running `rcadm` under an `LD_PRELOAD` shim that logs
+`ioctl(fd, SG_IO)` and completes a `WRITE(10)` carrying a mutation
+`Command` without issuing it; reads pass through unchanged, so no array was
+mutated. The only array on the box is the live RAID 0 system array: the
+delete/transform runs used it with the write dropped, and create needed a
+synthetic config view because the maximum size is computed by the vendor
+driver from its own config, not by userspace. The shim reported the member
+disks free and forced the single `GET_CREATE_INFO` reply to success; the
+resulting `CREATE` frame was captured and dropped like the others.
+
+Every offset below matched the DWARF layout exactly.
+
+Request header as sent:
+
+| Field | Observed |
+|---|---|
+| `Command` (`0x00`) | 2, 3 or 8; payload union at `0x20` |
+| `ChannelID` (`0x04`) | the SG_IO LBA of the frame (`0xdb0`, `0xfd0`, ...), **not** a controller channel; the response is read back from the same LBA |
+| `GenerationNumber` (`0x08`) | 13, the live config header generation |
+| `SyncCommand` (`0x10`) | 0 for create/transform, **1 for delete** |
+| `ConfigWriteSizeInBytes` (`0x14`) | **0 for every mutation** |
+| `MajorVersion`/`MinorVersion` | 2/1 |
+
+A mutation frame is 1536 bytes on the wire (1 KiB request plus 512); the
+8 KiB `WRITE_PART_OF_READ` frames are the read handshake, not requests.
+Since `ConfigWriteSizeInBytes` is always zero, a receiver has to size the
+payload from `Command` (172/24/140 B, ...), never from the frame length.
+
+`CREATE` payload (`RC_WpGetCreateInfo`, 172 B at `0x20`): `RaidType` 0,
+`DeviceCount` 4, `SpareDeviceCount` 8, `CacheTagSize` 0xC, `CacheFlags`
+0x10, `Flags` 0x14, `SizeInMegabytes` 0x18, `PreferDeviceID` 0x20,
+`FirstCount` 0x28, `SecondCount` 0x2C, `DistributedSpare` 0x30,
+`PreferReadElement` 0x34, `TaskPriority` 0x38, `DevicePrivate[32]` 0x3C,
+`SpareDeviceList[4]` 0x5C, `DeviceList[1]` 0x9C. Defaults: `CacheTagSize`
+3 (256 KiB) and `CacheFlags` `0xC0000000` (read+write-back).
+
+The request does **not** distinguish RAID 0/1/10 by `RaidType`; the
+geometry is in `FirstCount`/`SecondCount`:
+
+| rcadm verb | `RaidType` | `DeviceCount` | `FirstCount` | `SecondCount` |
+|---|---|---|---|---|
+| RAID 0 | `0x1BF6` | N | N | 1 |
+| RAID 1 | `0x1BF6` | 2 | 1 | 2 |
+| RAID 10 | `0x1BF6` | 4 | 2 | 2 |
+| RAID 5 | `0x1BF5` | N | 1 | N |
+| volume (JBOD) | `0x1BF7` | 1 | 1 | 1 |
+
+Size units differ between the CLI and the payload: `-s` is decimal MB
+(10^6 B) while `SizeInMegabytes` is MiB (2^20 B). `-s 1024` produced 977
+(1024e6 / 2^20, rounded); `-T ... -ss` on the ~16 TB array produced
+15,259,608. `PreferDeviceID` in these captures is not trustworthy: the
+create path was entered through a forced max-size comparison and the field
+held differing uninitialised stack values per run.
+
+`DELETE` payload (`RC_CW_DeleteLogicalDevice`, 24 B at `0x20`): `All` 0,
+`DeviceCount` 1, `DeviceList[0]` the 16-byte logical-device identifier
+whose first 8 bytes are the array `Id` (`4e1f33065b470000` =
+`0x0000475b06331f4e`), followed by `01000000 00000000`.
+
+`TRANSFORM` payload (`RC_WpGetTransformInfo`, 140 B at `0x20`): `RaidType`
+0, `LogicalDevice` 4 (16 B), `DeviceCount` 0x14, `SpareDeviceCount` 0x18,
+`Flags` 0x1C, `SizeInMegabytes` 0x20, `FirstCount` 0x28, `SecondCount`
+0x2C, `DistributedSpare` 0x30, `PreferReadElement` 0x34, `TaskPriority`
+0x38, `SpareDeviceList[4]` 0x3C, `DeviceList[1]` 0x7C. Observed for
+`-T -r5 -a 1 -d 0 1 2 -ss`: `RaidType` `0x1BF5`, `DeviceCount` 3,
+`FirstCount` 1, `SecondCount` 3, `SizeInMegabytes` 15,259,608, and
+`DeviceList` the three member device IDs.
+
 ### Commit block: `RC_ConfigCommit` (512 B)
 
 | Offset | Size | Field |
