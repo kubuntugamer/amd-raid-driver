@@ -710,21 +710,73 @@ Controller FR/MN/SN strings, space-padded.
 
 ### ControllerDevice records (`0x25BE`, `0x88` stride)
 
-Six records in the capture, matching rcadm's controller list.  Partial
-layout, read off the capture and correlated with rcadm's own columns:
+Six records in the capture, matching rcadm's controller list.  Layout
+from the DWARF type `RC_ControllerDevice` (`rc_config.h`, 136 bytes —
+the `0x88` stride), confirmed against all six captured records:
 
-| Offset | Field |
-|---|---|
-| `+0x00` | tag `0x25BE` |
-| `+0x04` | 64-bit SAS address (`0x00001022b0000000`, shown verbatim) |
-| `+0x34` | type string (`"NVMe"` / `"AMD-RAID"`) |
-| `+0x39` | port-type string (`"ATAPIPort"`) |
-| `+0x60` | PCI vendor id (`0x1022`) |
-| `+0x6C` | device id packed with vendor (`0xb0001022`) |
-| `+0x74` | subsystem vendor/device (`0x50121987` = `1987:5012`) |
+| Offset | Size | Field | Capture |
+|---|---|---|---|
+| `+0x00` | 4 | `StructureType` | `0x25BE` |
+| `+0x04` | 16 | `ControllerID` (`RC_DeviceIdentifier_LE`) | u64 id at `+0x04`, handle at `+0x0C` |
+| `+0x14` | 16 | `ControllerInfo` | zero |
+| `+0x24` | 16 | `ControllerName` | `"NVMe ATAPIPort "` / `"AMD-RAID …"` |
+| `+0x34` | 2 | `ControllerFeature` | `0x01FF` |
+| `+0x36` | 2 | `CablePresent` | 0 |
+| `+0x38` | 32 | `BiosBuildNumber` | zero |
+| `+0x58` | 8 | `MaxArraySize` | `0x001FFFFFFFFFFFFF` |
+| `+0x60` | 8 | `SerialNumber` | 0 |
+| `+0x68` | 4 | `TotalPorts` | `1` NVMe, `6` AMD-RAID |
+| `+0x6C` | 2 | `VendorID` | `0x1022` |
+| `+0x6E` | 2 | `DeviceID` | `0xB000` |
+| `+0x70` | 4 | `ControllerNumber` | record ordinal |
+| `+0x74` | 2 | `SubVendorID` | `0x1987` |
+| `+0x76` | 2 | `SubDeviceID` | `0x5012` |
+| `+0x78` | 8 | `ID` | same as `ControllerID` id |
+| `+0x80` | 2 | `OrigVendorID` | `0x1022` |
+| `+0x82` | 2 | `OrigDeviceID` | `0xB000` |
+| `+0x84` | 4 | `PCILocation` | `0x00160000`, `0x00150000`, … |
 
-The remainder (bus/slot/function, license, firmware) is not decoded, so
-the shim emits an empty controller section rather than guessing.
+`ControllerID`'s u64 is the key rcadm matches on:
+`RC_Core::RC_GetControllerDeviceIndex` walks the controller array
+comparing it to a device's `DeviceID` and treats 0 as "not found".  In
+the capture it is `0x00001022B0000000 | ordinal` for the NVMe members
+and `0x0000102243BD0003` for the two AMD-RAID records.  `ControllerName`
+packs two NUL-terminated strings into 16 bytes; rcadm prints the first.
+An earlier partial reading put those strings at `+0x34`/`+0x39` — that
+was `ControllerFeature` plus the tail of `ControllerName`, corrected
+here from the type definition.
+
+`RC_C_ControllerDevice` (`RC_C_ControllerDevice.h`, 152 bytes) mirrors
+the record behind a vptr; its constructor copies `ControllerID`,
+`ControllerInfo[16]`, `ControllerName[16]`, `BiosBuildNumber[32]`,
+`MaxArraySize`, `TotalPorts`, the PCI ids, `ID`, `PCILocation`,
+`SerialNumber` and `ControllerNumber`.
+
+The shim still emits an empty controller section: everything except
+`PCILocation`'s encoding (appears bus/device shifted left 16) is known,
+and guessing a BDF would put a wrong location in rcadm's list.
+
+### SEPDevice records (`0x25BF`, `0x40` stride)
+
+Firmware sends `SEPSize = 0` in the capture, so there is no emitted
+record to correlate with a screen column.  The DWARF type
+`RC_SEPDevice` (`rc_config.h`, 64 bytes) gives the layout the parser
+expects:
+
+| Offset | Size | Field |
+|---|---|---|
+| `+0x00` | 4 | `StructureType` (`0x25BF`) |
+| `+0x04` | 16 | `ID` (`RC_DeviceIdentifier_LE`) |
+| `+0x14` | 8 | `VendorID` |
+| `+0x1C` | 16 | `ProductID` |
+| `+0x2C` | 4 | `Revision` |
+| `+0x30` | 8 | `SerialNumber` |
+| `+0x38` | 8 | `Reserved` |
+
+`RC_C_SEPDevice` (168 bytes) surfaces the same data as `Name[80]`,
+`VendorID[12]`, `ProductID[20]`, `Revision[8]`, `SerialNumber[12]`.
+Since the firmware itself sends none, the shim keeps `SEPSize = 0`
+rather than inventing enclosure data.
 
 ### Implementation status (`src/rc_api.c`, 2026-11-09)
 
@@ -734,7 +786,7 @@ a 64 KiB
 packet built from the live member registry plus the verbatim
 `RC_LogicalDevice` record parsed off disk.  Emitted sections: header,
 `PD` (controller/version record + one per member), `LD` (byte copy, so
-the Id and element table are the firmware's).  `CTRL`/`SEP` are empty.
+the Id and element table are the firmware's).  `CTRL`/`SEP` are empty: the controller record layout is decoded above, but `PCILocation` encoding is unverified and firmware itself sends `SEPSize = 0`.
 Only mailbox command 1 (window prepare) is accepted on write; anything
 else is refused with `CHECK CONDITION`/ILLEGAL REQUEST, because this
 driver never writes firmware metadata.
