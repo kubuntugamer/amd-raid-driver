@@ -218,9 +218,13 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
       (`src/rc_meta_build.h`: per-member block, config generation,
       commit block) and `make test-metabuild` diffs its output byte for
       byte against `scripts/qemu-test/mkmeta.py`, so a writer cannot
-      drift from the layout the driver and rig already parse.  Still
-      missing: writing the images to the members, choosing the free
-      devices, and the hot gendisk create/teardown.
+      drift from the layout the driver and rig already parse.  The
+      driver also re-encodes each member's RC_MetaData block at
+      assembly and logs whether it matches the bytes on media
+      (`rc_nvme_verify_meta_encoding`), which is true on rig-written
+      RAID0/RAID1 images.  Still missing: writing the images to the
+      members, choosing the free devices, and the hot gendisk
+      create/teardown.
 
 - [x] **Replace / rebuild a failed drive** — moot for RAID0; needed
       for RAID1/5/10. Background rebuild kthread, progress in

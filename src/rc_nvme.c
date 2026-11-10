@@ -36,6 +36,7 @@
 
 #include "rc_linux.h"
 #include "amd_raid_uapi.h"
+#include "rc_meta_build.h"
 #include <linux/unaligned.h>
 #include <linux/blkdev.h>
 #include <linux/blk-mq.h>
@@ -2023,6 +2024,53 @@ static u64 rc_raidcore_checksum(const void *data, size_t bytes)
 	return acc;
 }
 
+/* Encoder self-check: rebuild the RC_MetaData block this member carries
+ * from its parsed DeviceId and compare against the bytes just read from
+ * media.  Read-only — nothing is written.  A match means the encoder in
+ * rc_meta_build.h reproduces the firmware block field for field (it also
+ * covers the checksum, since the encoder computes its own and the parser
+ * has already validated the media's).  A mismatch names the first
+ * differing byte so the encoder can be corrected; it must match before
+ * any code is allowed to stamp a member with it. */
+static void rc_nvme_verify_meta_encoding(struct rc_adapter *adapter,
+					 const u8 *on_disk)
+{
+	u8 built[RC_MB_SECTOR];
+	u32 i, first = 0;
+
+	rc_mb_metadata_block(built, adapter->ctx.nvme.md_device_id);
+
+	/* Search the payload (everything but the checksum word) so a bad
+	 * field is named directly; the checksum is reported separately,
+	 * since any payload change also changes it. */
+	for (i = sizeof(u64); i < RC_MB_SECTOR; i++) {
+		if (built[i] != on_disk[i]) {
+			first = i;
+			break;
+		}
+	}
+
+	if (!first) {
+		if (!memcmp(built, on_disk, sizeof(u64))) {
+			rc_printk(RC_NOTE,
+				  "rc_nvme_verify_meta_encoding: %s encoder reproduces the on-media RC_MetaData block exactly\n",
+				  pci_name(adapter->pdev));
+			return;
+		}
+		rc_printk(RC_NOTE,
+			  "rc_nvme_verify_meta_encoding: %s payload matches on media but the checksum differs (encoder 0x%016llx, media 0x%016llx) — metadata writer stays disabled for this member\n",
+			  pci_name(adapter->pdev),
+			  (unsigned long long)rc_mb_get64(built),
+			  (unsigned long long)rc_mb_get64(on_disk));
+		return;
+	}
+
+	rc_printk(RC_NOTE,
+		  "rc_nvme_verify_meta_encoding: %s re-encoded RC_MetaData differs at +0x%x (encoder 0x%02x, media 0x%02x, checksum %s) — metadata writer stays disabled for this member\n",
+		  pci_name(adapter->pdev), first, built[first], on_disk[first],
+		  memcmp(built, on_disk, sizeof(u64)) ? "also differs" : "matches");
+}
+
 /* Read LBA 0x5000 (the RAIDCore metadata block), verify magic / version /
  * checksum, and stash the shared and per-member fields in adapter state.
  * Returns 0 on success, negative errno on failure. */
@@ -2100,6 +2148,8 @@ static int rc_nvme_read_validate_metadata(struct rc_adapter *adapter)
 		  (unsigned long long)nvme->md_config_ring_lba,
 		  nvme->md_features,
 		  (unsigned long long)nvme->md_mbr_checksum);
+
+	rc_nvme_verify_meta_encoding(adapter, buf);
 
 	/* Walk the config ring to find the active RC_LogicalDevice record;
 	 * gives us the real member count, per-member position, and
