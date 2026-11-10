@@ -46,6 +46,9 @@ struct rc_api_member {
 	u8  _pad[3];
 	u16 vid;
 	u16 ssvid;
+	u16 sub_vid;		/* PCI subsystem vendor id */
+	u16 sub_dev;		/* PCI subsystem device id */
+	u32 pci_location;	/* bus << 16 | device << 8 | function */
 	u8  firmware[8];	/* Identify Controller FR, space-padded */
 	u8  model[40];		/* Identify Controller MN, space-padded */
 	u8  serial[24];		/* Identify Controller SN (20) + pad */

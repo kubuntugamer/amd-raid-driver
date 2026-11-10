@@ -66,6 +66,23 @@
 #define RC_API_PD_MODEL		0x88
 #define RC_API_PD_SERIAL	0xB0
 
+/* ControllerDevice record (tag 0x25BE, 0x88 bytes) field offsets. */
+#define RC_API_CTRL_ID		0x04	/* RC_DeviceIdentifier_LE */
+#define RC_API_CTRL_HANDLE	0x0C
+#define RC_API_CTRL_NAME	0x24
+#define RC_API_CTRL_FEATURE	0x34
+#define RC_API_CTRL_PORTS	0x68
+#define RC_API_CTRL_VID		0x6C
+#define RC_API_CTRL_DID		0x6E
+#define RC_API_CTRL_NUMBER	0x70
+#define RC_API_CTRL_SUBVID	0x74
+#define RC_API_CTRL_SUBDID	0x76
+#define RC_API_CTRL_REGION_ID	0x78
+#define RC_API_CTRL_ORIGVID	0x80
+#define RC_API_CTRL_ORIGDID	0x82
+#define RC_API_CTRL_PCILOC	0x84
+#define RC_API_CTRL_STRIDE	0x88
+
 /* DeviceType / state values observed in the vendor's own packet. */
 #define RC_API_PD_TYPE_DISK	0x1200	/* NVMe member */
 #define RC_API_PD_TYPE_CONTROLLER 0x1201	/* controller/version record */
@@ -102,6 +119,12 @@ static void rc_api_put_le32(u8 *p, u32 v)
 	p[1] = (u8)(v >> 8);
 	p[2] = (u8)(v >> 16);
 	p[3] = (u8)(v >> 24);
+}
+
+static void rc_api_put_le16(u8 *p, u16 v)
+{
+	p[0] = (u8)v;
+	p[1] = (u8)(v >> 8);
 }
 
 static void rc_api_put_le64(u8 *p, u64 v)
@@ -143,6 +166,9 @@ static void rc_api_build_packet(u8 *pkt, const struct rc_api_snapshot *s)
 	u32 pd_bytes = nr_pd * RC_API_PD_STRIDE;
 	u32 ld_off = RC_API_PD_BASE + pd_bytes;
 	u32 ld_len = s->have_ld ? min_t(u32, s->ld_len, RC_API_LD_MAX) : 0;
+	u32 nr_ctrl = s->nr_members;
+	u32 ctrl_off = ld_off + ld_len;
+	u32 ctrl_len = nr_ctrl * RC_API_CTRL_STRIDE;
 	u32 i;
 
 	rc_api_put_le32(pkt + RC_API_HDR_VERSION, 1);
@@ -152,9 +178,9 @@ static void rc_api_build_packet(u8 *pkt, const struct rc_api_snapshot *s)
 	rc_api_put_le32(pkt + RC_API_HDR_PD_SIZE, pd_bytes);
 	rc_api_put_le32(pkt + RC_API_HDR_LD_OFFSET, ld_off);
 	rc_api_put_le32(pkt + RC_API_HDR_LD_SIZE, ld_len);
-	rc_api_put_le32(pkt + RC_API_HDR_CTRL_OFFSET, ld_off + ld_len);
-	rc_api_put_le32(pkt + RC_API_HDR_CTRL_SIZE, 0);
-	rc_api_put_le32(pkt + RC_API_HDR_SEP_OFFSET, ld_off + ld_len);
+	rc_api_put_le32(pkt + RC_API_HDR_CTRL_OFFSET, ctrl_off);
+	rc_api_put_le32(pkt + RC_API_HDR_CTRL_SIZE, ctrl_len);
+	rc_api_put_le32(pkt + RC_API_HDR_SEP_OFFSET, ctrl_off + ctrl_len);
 	rc_api_put_le32(pkt + RC_API_HDR_SEP_SIZE, 0);
 
 	if (!nr_pd)
@@ -198,6 +224,34 @@ static void rc_api_build_packet(u8 *pkt, const struct rc_api_snapshot *s)
 	 * firmware's, so rcadm correlates members the same way we do. */
 	if (ld_len)
 		memcpy(pkt + ld_off, s->ld_raw, ld_len);
+
+	/*
+	 * ControllerDevice records, one per member.  ControllerID is
+	 * (vendor << 32) | (device << 16) | ordinal, matching the vendor's
+	 * packets, and PCILocation is the member's real BDF so rcadm's
+	 * controller list points at a device that exists.
+	 */
+	for (i = 0; i < nr_ctrl; i++) {
+		const struct rc_api_member *m = &s->member[i];
+		u8 *c = pkt + ctrl_off + i * RC_API_CTRL_STRIDE;
+		u64 id = ((u64)0x1022 << 32) | ((u64)0xb000 << 16) | i;
+
+		rc_api_put_le32(c, RC_DST_CONTROLLER_DEVICE);
+		rc_api_put_le64(c + RC_API_CTRL_ID, id);
+		rc_api_put_le32(c + RC_API_CTRL_HANDLE, 0x10000u | i);
+		memcpy(c + RC_API_CTRL_NAME, "NVMe", 5);
+		rc_api_put_le16(c + RC_API_CTRL_FEATURE, 0x01ff);
+		rc_api_put_le32(c + RC_API_CTRL_PORTS, 1);
+		rc_api_put_le16(c + RC_API_CTRL_VID, 0x1022);
+		rc_api_put_le16(c + RC_API_CTRL_DID, 0xb000);
+		rc_api_put_le32(c + RC_API_CTRL_NUMBER, i);
+		rc_api_put_le16(c + RC_API_CTRL_SUBVID, m->sub_vid);
+		rc_api_put_le16(c + RC_API_CTRL_SUBDID, m->sub_dev);
+		rc_api_put_le64(c + RC_API_CTRL_REGION_ID, id);
+		rc_api_put_le16(c + RC_API_CTRL_ORIGVID, 0x1022);
+		rc_api_put_le16(c + RC_API_CTRL_ORIGDID, 0xb000);
+		rc_api_put_le32(c + RC_API_CTRL_PCILOC, m->pci_location);
+	}
 }
 
 /* Fixed-format sense data + CHECK CONDITION, the SG_IO way of failing a

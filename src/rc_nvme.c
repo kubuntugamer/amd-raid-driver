@@ -6589,6 +6589,11 @@ int rc_api_snapshot_get(struct rc_api_snapshot *out)
 			RC_MEMBER_LIVE;
 		m->vid = nvme->id_vid;
 		m->ssvid = nvme->id_ssvid;
+		m->sub_vid = a->pdev->subsystem_vendor;
+		m->sub_dev = a->pdev->subsystem_device;
+		m->pci_location = ((u32)a->pdev->bus->number << 16) |
+				  ((u32)PCI_SLOT(a->pdev->devfn) << 8) |
+				  (u32)PCI_FUNC(a->pdev->devfn);
 		memcpy(m->firmware, nvme->id_firmware, sizeof(m->firmware));
 		memcpy(m->model, nvme->id_model, sizeof(m->model));
 		memcpy(m->serial, nvme->id_serial,

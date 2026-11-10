@@ -752,9 +752,14 @@ the record behind a vptr; its constructor copies `ControllerID`,
 `MaxArraySize`, `TotalPorts`, the PCI ids, `ID`, `PCILocation`,
 `SerialNumber` and `ControllerNumber`.
 
-The shim still emits an empty controller section: everything except
-`PCILocation`'s encoding (appears bus/device shifted left 16) is known,
-and guessing a BDF would put a wrong location in rcadm's list.
+`PCILocation` is `bus << 16 | device << 8 | function`: the six capture
+values (`0x030000`, `0x060000`, `0x0A0000`, `0x110000`, `0x150000`,
+`0x160000`) match this box's `lspci` — RAID bottom devices at `03:00.0`,
+`11:00.0`, `15:00.0`, `16:00.0` and the `43bd` controllers at `06:00.0`,
+`0a:00.0`.  The shim emits one record per member from the member's live
+`pci_dev`, and rcadm renders the section as *Number / Type / License Key
+/ Port Count / PCI ids / Bus-Slot-Function / SAS Address / BIOS
+Version*.
 
 ### SEPDevice records (`0x25BF`, `0x40` stride)
 
@@ -786,7 +791,7 @@ a 64 KiB
 packet built from the live member registry plus the verbatim
 `RC_LogicalDevice` record parsed off disk.  Emitted sections: header,
 `PD` (controller/version record + one per member), `LD` (byte copy, so
-the Id and element table are the firmware's).  `CTRL`/`SEP` are empty: the controller record layout is decoded above, but `PCILocation` encoding is unverified and firmware itself sends `SEPSize = 0`.
+the Id and element table are the firmware's).  `CTRL` carries one `0x25BE` record per member (real BDF from the member's `pci_dev`); `SEP` stays empty because firmware itself sends `SEPSize = 0`.
 Only mailbox command 1 (window prepare) is accepted on write; anything
 else is refused with `CHECK CONDITION`/ILLEGAL REQUEST, because this
 driver never writes firmware metadata.
