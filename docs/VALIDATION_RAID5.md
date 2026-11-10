@@ -11,7 +11,10 @@ above all, the write path itself.
 ## What is already confirmed on hardware
 
 A RAIDXpert2 BIOS-created **3-disk RAID 5** (3× Sabrent Rocket Q 3.7 TB,
-`1022:B000`) produced this committed `RC_LogicalDevice` record:
+`1022:B000`) produced this committed `RC_LogicalDevice` record. That array
+was removed on 2026-11-09, so the record below is the surviving evidence and
+the runbook has no current fixture to run against — re-running it requires
+creating a new array in the RAIDXpert2 UEFI utility first:
 
 | Field | Observed value |
 |---|---|

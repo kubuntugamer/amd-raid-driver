@@ -507,9 +507,12 @@ rather than code.
    gap between "the installer creates parity arrays" being true and it
    being a documented dead end.
 2. **Corroborate the RAID5/6 on-disk placement** (issue #6) — the read-only
-   parity path assembles and reads, and a real 3-disk RAID 5 exists on the
-   test box (`0x1BF5`, N=3, `(N-1)` × user size), but the array was zeroed at
-   creation. The dedicated-parity placement in `src/patch_parity_math.c` is
+   parity path assembles and reads: a firmware-created 3-disk RAID 5 was
+   parsed, assembled and read on 2026-11-08 (`0x1BF5`, N=3, `(N-1)` × user
+   size). That array no longer exists, so there is currently no
+   firmware-written parity array to re-read — and it was zeroed at creation
+   anyway, so even while it existed it carried no vendor-written data to
+   check the placement against. The dedicated-parity placement in `src/patch_parity_math.c` is
    taken from the vendor core rather than inferred, and the RAID6 Q generator
    is now the vendor's EVENODD (issue #10) — though nothing calls it, because
    there is no parity write path yet. A staged fixture can only show that the

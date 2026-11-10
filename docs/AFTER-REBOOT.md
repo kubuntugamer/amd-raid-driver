@@ -14,6 +14,13 @@ bottom before touching anything in the UEFI.
 > for the recorded geometry and `docs/VALIDATION_RAID5.md` for the layout
 > check that is still open (issue #6).
 
+> **Correction 2026-11-09: that array no longer exists.** The 3-disk RAID 5
+> has been removed, so nothing below can be re-run against it. The
+> observations recorded here and in `docs/VALIDATION_RAID5.md` are the only
+> record of it; re-running the read-only checks needs a freshly created
+> firmware/RAIDXpert2 array. Keep this file's history, but do not treat the
+> array as present.
+
 **Why:** the firmware array can only be created in the RAIDXpert2 UEFI
 utility. That is the only reason — on the installed OS the module signing key
 (`CN=minerva Secure Boot Module Signature key`) is **already enrolled** in MOK

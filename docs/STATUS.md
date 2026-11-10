@@ -59,10 +59,10 @@ Not yet: **persistent degraded state** (in-memory only — a reload
 re-assembles as if in sync; needs config-ring writer RE), **RAID10 hardware
 validation** (the level is feature-complete; the array-box run in
 [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) is what's missing), RAID5/6
-**write** dispatch (parity volumes assemble and read today, read-only; the
-first firmware-created 3-disk RAID 5 is now on the test box, its metadata
-parses as `0x1BF5`, and the module load/read run is done — the volume
-assembles `optimal`, serves reads and is forced read-only),
+**write** dispatch (parity volumes assemble and read today, read-only; a
+firmware-created 3-disk RAID 5 was parsed, assembled and read on 2026-11-08
+— `0x1BF5`, volume `optimal`, reads served, forced read-only — but that
+array no longer exists, so it cannot be re-read),
 hot-plug/rebuild, SMART pass-through,
 multi-volume, array creation from Linux
 beyond RAID0/RAID1 (the live installer now stamps real RAIDCore metadata for
