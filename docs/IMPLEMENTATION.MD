@@ -214,6 +214,13 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
       an array is BIOS / RAIDXpert. Add an ioctl + userspace tool
       (`rcraid-create`) that writes RAIDCore metadata + LD record.
       Would let us live without rebooting for every array change.
+      *Progress (2026-11-09):* the metadata encoder exists
+      (`src/rc_meta_build.h`: per-member block, config generation,
+      commit block) and `make test-metabuild` diffs its output byte for
+      byte against `scripts/qemu-test/mkmeta.py`, so a writer cannot
+      drift from the layout the driver and rig already parse.  Still
+      missing: writing the images to the members, choosing the free
+      devices, and the hot gendisk create/teardown.
 
 - [x] **Replace / rebuild a failed drive** — moot for RAID0; needed
       for RAID1/5/10. Background rebuild kthread, progress in

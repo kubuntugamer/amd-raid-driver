@@ -34,6 +34,9 @@ Module.symvers
 # Userspace RC_CfgWrite decoder harness build dir (make test-cfgwrite)
 .cfgwrite-test/
 
+# Userspace metadata encoder harness build dir (make test-metabuild)
+.metabuild-test/
+
 # Python bytecode from scripts/qemu-test (mkmeta.py)
 __pycache__/
 *.pyc

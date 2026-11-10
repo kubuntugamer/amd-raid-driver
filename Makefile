@@ -68,6 +68,7 @@ clean:
 	@rm -rf .tmp_versions
 	@rm -rf $(ASYNC_TEST_BIN) $(dir $(ASYNC_TEST_BIN))
 	@rm -rf $(CFGWRITE_TEST_BIN) $(dir $(CFGWRITE_TEST_BIN))
+	@rm -rf $(METABUILD_TEST_BIN) $(dir $(METABUILD_TEST_BIN))
 	@echo "Clean completed"
 
 # Lenient build target: extra warnings suppressed via KCFLAGS (the
@@ -164,6 +165,33 @@ $(CFGWRITE_TEST_BIN): $(CFGWRITE_TEST_DEPS)
 	$(CC) -O1 -g -Wall -Wextra -Werror -o $(CFGWRITE_TEST_BIN) \
 		$(CFGWRITE_TEST_SRC) -Isrc
 
+# ------------------------------------------------------------------------------
+# Metadata encoder parity harness.
+#
+# Emits the images src/rc_meta_build.h builds and diffs them against
+# scripts/qemu-test/mkmeta.py, byte for byte.  A metadata writer that disagrees
+# with the generator the QEMU rig validates would produce arrays the driver
+# cannot read back, so this is the gate before any write path is wired up.
+# ------------------------------------------------------------------------------
+METABUILD_TEST_BIN ?= $(CURDIR)/.metabuild-test/metabuild_test
+METABUILD_TEST_OUT  = $(dir $(METABUILD_TEST_BIN))out
+METABUILD_TEST_SRC := src/test_metabuild_userspace.c
+METABUILD_TEST_DEPS := $(METABUILD_TEST_SRC) src/rc_meta_build.h \
+                       scripts/qemu-test/mkmeta.py \
+                       scripts/qemu-test/check-metabuild.py
+
+test-metabuild: $(METABUILD_TEST_BIN)
+	@rm -rf $(METABUILD_TEST_OUT)
+	@mkdir -p $(METABUILD_TEST_OUT)
+	@$(METABUILD_TEST_BIN) $(METABUILD_TEST_OUT)
+	@python3 scripts/qemu-test/check-metabuild.py $(METABUILD_TEST_OUT)
+
+$(METABUILD_TEST_BIN): $(METABUILD_TEST_DEPS)
+	@mkdir -p $(dir $(METABUILD_TEST_BIN))
+	@echo "Building RAIDCore metadata encoder harness (userspace, no kernel headers)..."
+	$(CC) -O1 -g -Wall -Wextra -Werror -o $(METABUILD_TEST_BIN) \
+		$(METABUILD_TEST_SRC) -Isrc
+
 # Help target
 help:
 	@echo "AMD RAID Driver for Linux"
@@ -175,7 +203,8 @@ help:
 	@echo "  test-async-asan - Same, under AddressSanitizer + UBSan + LeakSanitizer"
 	@echo "  test-async-tsan - Same, under ThreadSanitizer"
 	@echo "  test-cfgwrite   - Build and run the RC_CfgWrite decoder harness (userspace)"
+	@echo "  test-metabuild  - Diff the metadata encoder against mkmeta.py (userspace)"
 	@echo "  help            - Show this help"
 
 .PHONY: all clean install help test-async test-async-asan test-async-tsan \
-	test-cfgwrite
+	test-cfgwrite test-metabuild
