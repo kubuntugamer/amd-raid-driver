@@ -792,9 +792,15 @@ packet built from the live member registry plus the verbatim
 `RC_LogicalDevice` record parsed off disk.  Emitted sections: header,
 `PD` (controller/version record + one per member), `LD` (byte copy, so
 the Id and element table are the firmware's).  `CTRL` carries one `0x25BE` record per member (real BDF from the member's `pci_dev`); `SEP` stays empty because firmware itself sends `SEPSize = 0`.
-Only mailbox command 1 (window prepare) is accepted on write; anything
-else is refused with `CHECK CONDITION`/ILLEGAL REQUEST, because this
-driver never writes firmware metadata.
+Only mailbox command 1 (window prepare) is accepted on write.  Mutation
+frames (`CREATE` 2, `DELETE` 3, `TRANSFORM` 8) are decoded by
+`src/rc_cfgwrite.h` — the layout below, field for field — and then
+refused with `CHECK CONDITION`/ILLEGAL REQUEST, because this driver
+never writes firmware metadata: a success reply for a change it cannot
+persist would leave rcadm believing in a volume that does not exist on
+disk.  The refusal log names the level, geometry, member count, size and
+first member, so a failing verb is diagnosable without re-running it
+under a capture shim.
 
 ### PhysicalDevice record fields read by `RC_C_PhysicalDevice`
 
@@ -1017,6 +1023,35 @@ Consequences for Phase 2, and for anything that claims to replace `rcadm`:
   mutation it did not persist.
 - Member stamps use the 128-byte packed `RC_PhysicalDeviceOnDisk` record, not
   the 256-byte userspace PD variant the read path emits.
+
+#### Checksum algorithm (`RC_GenerateChecksum`)
+
+`RC_CheckMetaData` (0x93200) and the config-commit check both funnel into
+`RC_GenerateChecksum(void *, unsigned int)` (0x931b0) and its callee
+`RCS_GenerateChecksum(void *, const u64 &, u64 *)` (0xb2b0). It is not a CRC:
+it is an order-dependent XOR of the 64-bit words, with a data-dependent swap
+of two 16-bit halves inside each word before the XOR.
+
+```
+acc = 0
+for i in 0 .. len/8 - 1:
+    q = word[i]                       /* little-endian u64, memory order */
+    a = acc & 3
+    b = q & 3
+    if a == b:                        /* same half-word selected twice */
+        a = (i + 1) & 3
+        b = i & 3
+    swap the 16-bit half-words a and b of q
+    acc ^= q                          /* also stored out on every step */
+```
+
+`len` is consumed as `len / 8` words (a trailing remainder is ignored); the
+word count is 16-bit, so a single call covers at most 512 KiB, which the 0x1F8
+(`RC_MetaData`) and packet-sized (`RC_ConfigCommit`) inputs both fit. Which
+byte range each caller passes over is caller-specific and **not** established
+here. This comes from the blob's `.text` only — it has not been round-tripped
+against a `Checksum` read off a vendor-written member, so treat it as
+unconfirmed until a metadata writer can recompute a known-good value.
 
 ---
 
