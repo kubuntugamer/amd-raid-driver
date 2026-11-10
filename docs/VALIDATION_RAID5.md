@@ -3,8 +3,10 @@
 This is the checklist for the **read-only** RAID 5 path. Unlike
 [VALIDATION_RAID10.md](VALIDATION_RAID10.md), there is no destructive write
 phase to run: the driver has no parity write path, no rebuild, and refuses
-every write and discard. The remaining open question is the **parity
-placement** (issue #6), not whether the volume can be written.
+every write and discard. The parity **placement** is no longer the open
+question — it is settled against the vendor core (§3) and the driver's map
+already follows it. What remains is corroboration on vendor-written bytes and,
+above all, the write path itself.
 
 ## What is already confirmed on hardware
 
