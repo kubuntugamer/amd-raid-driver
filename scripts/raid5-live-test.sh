@@ -3,10 +3,11 @@
 # raid5-live-test.sh — load rcraid against the real 1022:B000 RAID 5 array and
 # verify the staged read-path fixture.
 #
-# This is the post-reboot companion to docs/VALIDATION_RAID5.md.  It signs the
-# module if needed, unbinds the 1022:B000 controllers from nvme (never the disk
-# backing /), loads rcraid, runs validate-raid5.sh, then compares the first
-# 64 MiB of /dev/rcraid0 against .freebuff/raid5-test-manifest.txt.
+# This is the post-reboot companion to docs/VALIDATION_RAID5.md.  It checks
+# Secure Boot before touching anything, unbinds the 1022:B000 controllers from
+# nvme (never the disk backing /), loads rcraid, runs validate-raid5.sh, then
+# compares the first 64 MiB of /dev/rcraid0 against
+# .freebuff/raid5-test-manifest.txt.
 #
 # It never writes to the array.  If the staged fixture is absent it only runs
 # the read-only validation checks.
@@ -18,14 +19,12 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$REPO_DIR"
+cd "$REPO_DIR" || exit 1
 
 if [ "$(id -u)" -ne 0 ]; then
     exec sudo "$0" "$@"
 fi
 
-MOK_PRIV=/var/lib/shim-signed/mok/MOK.priv
-MOK_DER=/var/lib/shim-signed/mok/MOK.der
 MANIFEST="$REPO_DIR/.freebuff/raid5-test-manifest.txt"
 DEV=/dev/rcraid0
 FAILED=0
@@ -34,6 +33,40 @@ ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; FAILED=1; }
 note() { printf '  ....  %s\n' "$*"; }
 hdr()  { printf '\n== %s ==\n' "$*"; }
+
+# ------------------------------------------------------- Secure Boot preflight
+hdr "Secure Boot"
+# The rule install-livecd.sh enforces, for the same reason: enrolment only
+# takes effect at the NEXT boot, because shim's MOK manager runs before the
+# kernel.  In a live session that reboot is the end of the session, so a signed
+# module is not more loadable than an unsigned one — signing here would only
+# produce a file the kernel still refuses.  Decide before the members are
+# taken away from nvme, and never pretend a local key is enough by itself.
+. "$SCRIPT_DIR/lib/secure-boot.sh"
+mok_state_reset
+SB_SIGN_KEY=""
+SB_SIGN_CERT=""
+if secure_boot_enforcing; then
+    if mok_find_enrolled_pair; then
+        note "enforcing, but this key is already trusted: $MOK_CERT"
+        SB_SIGN_KEY="$MOK_KEY"
+        SB_SIGN_CERT="$MOK_CERT"
+    else
+        cat >&2 <<'EOF'
+ERROR: Secure Boot is enforcing and no key it trusts signs rcraid.ko.
+
+Signing does not get around this inside a live session: a MOK enrolment only
+becomes trusted at the next boot (shim runs the MOK manager before the
+kernel), and that reboot ends the session along with the key it just made.
+
+Either boot the live session with Secure Boot off, or enrol the key from an
+installed system and re-run this after that reboot.
+EOF
+        exit 1
+    fi
+else
+    note "off — the module loads unsigned, so no signing is needed"
+fi
 
 # ---------------------------------------------------------------- build/sign
 hdr "Module"
@@ -45,14 +78,10 @@ fi
 # NOTE: `writer | grep -q` is unusable here — grep exits on the first match,
 # the writer takes SIGPIPE, and `set -o pipefail` reports 141, so the test is
 # always false.  Test the value directly instead.
-if [ -z "$(modinfo -F signer ./rcraid.ko 2>/dev/null)" ]; then
-    if [ -r "$MOK_PRIV" ] && [ -r "$MOK_DER" ]; then
-        note "signing rcraid.ko with the local MOK key"
-        /usr/src/linux-headers-$(uname -r)/scripts/sign-file sha256 \
-            "$MOK_PRIV" "$MOK_DER" ./rcraid.ko || { bad "sign-file failed"; exit 1; }
-    else
-        note "module is unsigned and no local MOK key is present"
-    fi
+if [ -n "$SB_SIGN_KEY" ] && [ -z "$(modinfo -F signer ./rcraid.ko 2>/dev/null)" ]; then
+    note "signing rcraid.ko with the already-enrolled key $SB_SIGN_CERT"
+    "/usr/src/linux-headers-$(uname -r)/scripts/sign-file" sha256 \
+        "$SB_SIGN_KEY" "$SB_SIGN_CERT" ./rcraid.ko || { bad "sign-file failed"; exit 1; }
 fi
 modinfo -F signer ./rcraid.ko 2>/dev/null | sed 's/^/        signer: /' || true
 
@@ -109,7 +138,9 @@ else
     if insmod ./rcraid.ko; then
         ok "insmod succeeded"
     else
-        bad "insmod failed — if this is 'Key was rejected by service', the MOK key is not enrolled yet"
+        bad "insmod failed — 'Key was rejected by service' means the firmware does not trust this module"
+        note "an enrolment is only trusted after a reboot; a live session cannot answer that"
+        note "prompt, so switch Secure Boot off and boot the live media again"
         note "restoring the unbound controllers to nvme"
         rebind_unbound
         exit 1
