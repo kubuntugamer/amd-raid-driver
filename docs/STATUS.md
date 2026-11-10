@@ -75,6 +75,27 @@ The sections below are the dated implementation log — how each piece was built
 kept for forensics. Where an early "Not started" / "Next steps" note has since
 been implemented, it's marked.
 
+## 2026-11-10 — Signing after the fact, from the installed system
+
+- **`install-dkms.sh` now accepts `RCRAID_MOK_ENROLL=1`**, which is the answer
+  for a machine that was installed with Secure Boot off: `mok_setup_signing`
+  uses it where enforcement used to be the only reason to act — create a key
+  when none exists, point DKMS at it, sign, and queue the enrolment — while an
+  enforcing kernel still has to succeed. Without the variable nothing changes:
+  with Secure Boot off and no key on disk the installer stays a no-op instead
+  of growing a key and a MOK prompt nobody asked for.
+- **README's install section gained Phase 3**, the post-boot half of signing:
+  answer the MOK prompt if the live installer queued one, or run
+  `sudo RCRAID_MOK_ENROLL=1 ./install-dkms.sh` from a checkout inside the
+  installed system, reboot and enrol, and only then switch Secure Boot on.
+  `docs/INSTALL.md`'s knob table and "signing by hand" note follow the new
+  semantics. The README is the place that says it, because it is the install
+  path users read.
+- **`scripts/raid5-live-test.sh` refuses an enforcing live session before it
+  unbinds the members**, mirroring `install-livecd.sh`: a key enrolled in a
+  live session is only trusted at the next boot, so signing there produces a
+  module the live kernel still rejects.
+
 ## 2026-11-08 — Installer side: module signing moved to the post-install reboot
 
 - **Both installers now split key signing across the reboot instead of

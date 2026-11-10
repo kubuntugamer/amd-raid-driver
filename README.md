@@ -127,6 +127,35 @@ This is the recommended deployment path for setting up a fresh Linux environment
 4. Once the message flashes `🎉 DONE!`, run **`sudo reboot`** to launch your fresh system straight from the array!
 5. With a signing key enrolled, that first boot stops at shim's **MOK management** screen: **Enroll MOK → Continue → Yes**, type the one-time password the installer printed, and let it reboot. (The live session itself has to run with Secure Boot **off** — the installer refuses to start otherwise, because the live kernel rejects the unsigned module and the key it needs cannot be enrolled without rebooting the session. See `docs/INSTALL.md`, "Secure Boot".)
 
+### Phase 3 — Module Signing and Secure Boot (After the First Boot)
+
+Signing is only what lets Secure Boot be switched back **on**; the array boots with Secure Boot still off from the moment the install finishes. The key and its enrolment are handled from inside the installed system, because an enrolment only becomes trusted at the *next* boot — shim's MOK manager runs before the kernel — and a live session cannot reboot into itself. If you never intend to enable Secure Boot, this phase is optional: leave firmware Secure Boot off and nothing needs signing.
+
+**If you accepted the signing key during `install-livecd.sh`** (the default), the key is already on the target and its enrolment is queued. Skip to step 2 below.
+
+**If you skipped it** (answered no, or set `RCRAID_MOK_ENROLL=0`), boot the installed system with Secure Boot still off and create, use and queue the key in one step:
+
+```bash
+cd ~
+git clone https://github.com/kubuntugamer/amd-raid-driver.git
+cd amd-raid-driver
+sudo RCRAID_MOK_ENROLL=1 ./install-dkms.sh
+```
+
+Re-running the installer is safe and is the supported way to do this: it reuses an existing key or creates one, points DKMS at it so kernel-update rebuilds stay signed, rebuilds `rcraid.ko` signed, and queues the enrolment — printing the one-time password and the key it used. Then:
+
+1. From the repo checkout, run `sudo ./scripts/verify-boot-safety.sh`. The pending-enrolment notice it prints is the expected one here; anything it reports as a missing or unsigned module is not.
+2. `sudo reboot`. At shim's **MOK management** screen: **Enroll MOK → Continue → Yes**, type the password, let it reboot. The system comes back with Secure Boot still off.
+3. Enable **Secure Boot** in firmware and reboot once more.
+4. Confirm the driver survived it:
+   ```bash
+   mokutil --sb-state                                    # SecureBoot enabled
+   modinfo -F signer "/lib/modules/$(uname -r)/updates/dkms/rcraid.ko"
+   lsblk /dev/rcraid0                                    # volume + partitions
+   ```
+
+Skipping the MOK prompt leaves the key untrusted: with Secure Boot on, the kernel then rejects `rcraid.ko` and the array is missing at that boot — which cannot complete at all when `/` lives on the array. The prompt returns on the next boot until it is answered, and `sudo mokutil --import <the certificate the installer printed>` re-queues it if it was dropped. This whole flow needs the boot chain to go through shim (the default on Ubuntu, Debian and Fedora); a kernel started directly by firmware through its own EFI stub never runs MOK manager, so there Secure Boot has to stay off.
+
 ---
 
 ## ⚖️ License & Cleanroom Verification

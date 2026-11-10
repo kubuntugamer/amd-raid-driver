@@ -274,7 +274,7 @@ boot. The knobs:
 |---|---|
 | `RCRAID_MOK_KEY` / `RCRAID_MOK_CERT` | sign with this pair instead of the discovered one (DER certificate) |
 | `RCRAID_MOK_PASSWORD` | use this one-time enrolment password instead of a generated one |
-| `RCRAID_MOK_ENROLL=0` / `1` | live-USB installer: skip / force the target's key enrolment without asking |
+| `RCRAID_MOK_ENROLL=0` / `1` | skip / force the key enrolment without asking: in `install-livecd.sh` for the target system, in `install-dkms.sh` for the machine it runs on — the latter is how a system installed with Secure Boot off arranges signing afterwards (`README.md`, phase 3) |
 | `RCRAID_ALLOW_SECURE_BOOT=1` | install anyway, unsigned — you sign by hand |
 
 ### Live USB and Secure Boot
@@ -319,7 +319,8 @@ sudo mokutil --import MOK.der  # one-time password; answer it at the next boot
 ```
 
 To create a pair yourself — only needed when you want a key of your own, since
-`install-dkms.sh` creates one when Secure Boot is on and nothing is enrolled:
+`install-dkms.sh` creates one when Secure Boot is on and nothing is enrolled,
+or when run as `sudo RCRAID_MOK_ENROLL=1 ./install-dkms.sh`:
 
 ```bash
 openssl req -new -x509 -newkey rsa:2048 -nodes -days 36500 \

@@ -29,8 +29,10 @@
 #
 # RCRAID_ALLOW_SECURE_BOOT=1 tells the callers "I sign the modules myself";
 # RCRAID_MOK_KEY / RCRAID_MOK_CERT override key discovery; RCRAID_MOK_PASSWORD
-# sets the enrolment password instead of generating one; RCRAID_EFIVARS_DIR
-# overrides the efivarfs path (for tests only).
+# sets the enrolment password instead of generating one; RCRAID_MOK_ENROLL=1
+# asks for a key even with Secure Boot off (the post-boot signing path, see
+# mok_setup_signing); RCRAID_EFIVARS_DIR overrides the efivarfs path (for tests
+# only).
 
 # ---------------------------------------------------------------------------
 # Firmware state
@@ -371,8 +373,11 @@ EOF
 # With Secure Boot off this stays best-effort: a key already on disk is used if
 # the firmware trusts it, nothing is created, and nothing is queued — no
 # installer should add a MOK prompt to a machine that never asked for one.
+# RCRAID_MOK_ENROLL=1 is that machine asking: create the key, sign with it and
+# queue the enrolment even though nothing is enforcing yet, so Secure Boot can
+# be switched on afterwards.
 mok_setup_signing() {
-    local enforcing=0
+    local enforcing=0 requested=0
 
     mok_state_reset
     MOK_KEY="${RCRAID_MOK_KEY:-}"
@@ -380,6 +385,13 @@ mok_setup_signing() {
 
     if secure_boot_enforcing; then
         enforcing=1
+    fi
+    # RCRAID_MOK_ENROLL=1 asks for signing even while the firmware is not
+    # enforcing.  That is the post-boot path: the machine was installed with
+    # Secure Boot off, and this run has to create the key, sign with it and
+    # queue the enrolment that lets Secure Boot be switched on later.
+    if [ "${RCRAID_MOK_ENROLL:-0}" = 1 ]; then
+        requested=1
     fi
 
     if [ -n "$MOK_KEY" ] || [ -n "$MOK_CERT" ]; then
@@ -390,7 +402,9 @@ mok_setup_signing() {
             return 1
         fi
     elif ! mok_find_enrolled_pair && ! mok_find_pair; then
-        [ "$enforcing" = 1 ] || return 0
+        if [ "$enforcing" = 0 ] && [ "$requested" = 0 ]; then
+            return 0
+        fi
         if ! mok_create_pair; then
             echo "ERROR: could not create a module signing key pair (openssl missing?)." >&2
             return 1
@@ -398,16 +412,17 @@ mok_setup_signing() {
         echo "==> generated module signing key: $MOK_KEY"
     fi
 
-    if [ "$enforcing" = 0 ] && ! mok_is_enrolled "$MOK_CERT"; then
+    if [ "$enforcing" = 0 ] && [ "$requested" = 0 ] && ! mok_is_enrolled "$MOK_CERT"; then
         echo "WARN: found a signing key at $MOK_CERT but it is not enrolled in MOK." >&2
         echo "      Modules signed with it will still be rejected under Secure Boot." >&2
         echo "      Enrol it: sudo mokutil --import $MOK_CERT   (set a one-time" >&2
-        echo "      password, reboot, complete the MOK manager prompt)." >&2
+        echo "      password, reboot, complete the MOK manager prompt), or re-run" >&2
+        echo "      this installer with RCRAID_MOK_ENROLL=1 to do all three steps." >&2
         return 0
     fi
 
     if ! mok_write_dkms_conf; then
-        if [ "$enforcing" = 1 ]; then
+        if [ "$enforcing" = 1 ] || [ "$requested" = 1 ]; then
             echo "ERROR: DKMS cannot be pointed at $MOK_CERT, so the module this" >&2
             echo "       install builds would be signed by the wrong key." >&2
             return 1
