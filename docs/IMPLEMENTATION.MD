@@ -359,8 +359,11 @@ replacement CLI, so this subsection is the entire userspace-parity budget. The
 read half is done (`src/rc_api.c`, `src/rc_cfgwrite.h`): `INQUIRY` EVPD page
 `0xD7`, the mailbox-window handshake, and a 64 KiB config packet synthesized
 from the volume this driver actually assembled. `--version`, `--show` and
-`--list` are answered from that packet (exercised with the shipped `rcadm`
-9.3.3-00302 in the QEMU rig); other read verbs are untested, not claimed.
+`--list` are answered from that packet, exercised by hand against a QEMU
+guest running this module with the shipped `rcadm` 9.3.3-00302. The committed
+rig does not bundle `rcadm`, so that run is not reproducible from the tree and
+none of these verbs has an automated test; other read verbs are untested, not
+claimed.
 Every mutation frame is decoded field by field and refused, because there is
 no metadata writer to persist it — the refusal is the correct behaviour, not a
 gap to paper over.
