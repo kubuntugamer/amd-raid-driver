@@ -16,7 +16,8 @@
 #
 # Usage:
 #   run-qemu-raid-test.sh [--kernel <vmlinuz>] [--kver <version>]
-#                         [--level raid0|raid1]
+#                         [--level raid0|raid1|raid5|raid10]
+#                         [--parity-writes] [--create-test]
 #                         [--members N] [--size-mib M] [--workdir DIR]
 #                         [--writer mkmeta|encoder]
 #
@@ -43,6 +44,8 @@ WORKDIR=""
 WRITER=mkmeta
 FAIL_MEMBER=0
 OMIT_MEMBER=0
+PARITY_WRITES=0
+CREATE_TEST=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -55,7 +58,7 @@ while [ $# -gt 0 ]; do
         # Which encoder writes the images: mkmeta.py (Python, default) or
         # "encoder" for src/stamp_meta_userspace.c, the driver's own C
         # encoder via rc_meta_build.h.  The latter proves the writer
-        # primitive that rcadm CREATE will be built on actually assembles.
+        # primitive that rxp2adm CREATE will be built on actually assembles.
         --writer)   WRITER="$2"; shift 2 ;;
         --fail-member) FAIL_MEMBER=1; shift ;;
         # Degraded BOOT: write metadata for the full member set but attach
@@ -63,12 +66,27 @@ while [ $# -gt 0 ]; do
         # allow_degraded=1 and asserts the volume assembles degraded after
         # the fallback delay.
         --omit-member) OMIT_MEMBER=1; shift ;;
+        # Exercise the opt-in RAID 5 full-row write path
+        # (parity_writes=1): one complete row must write and read back,
+        # a partial row must be refused.
+        --parity-writes) PARITY_WRITES=1; shift ;;
+        # Delete the synthetic RAID 5 through our own CLI, then create it
+        # again through the driver's metadata writer and verify reassembly.
+        --create-test) CREATE_TEST=1; shift ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
 
 if { [ "$FAIL_MEMBER" = 1 ] || [ "$OMIT_MEMBER" = 1 ]; } && [ "$LEVEL" != raid1 ]; then
     echo "--fail-member/--omit-member require --level raid1 (RAID0 has no degraded mode)" >&2
+    exit 2
+fi
+if [ "$PARITY_WRITES" = 1 ] && [ "$LEVEL" != raid5 ]; then
+    echo "--parity-writes requires --level raid5" >&2
+    exit 2
+fi
+if [ "$CREATE_TEST" = 1 ] && [ "$LEVEL" != raid5 ]; then
+    echo "--create-test requires --level raid5" >&2
     exit 2
 fi
 [ -n "$KERNEL" ] || KERNEL="/boot/vmlinuz-$KVER"
@@ -161,6 +179,20 @@ echo "$MKMETA_OUT" | sed 's/^/    /'
 EXPECTED_SECTORS="$(echo "$MKMETA_OUT" | awk -F= '/^capacity_sectors=/ {print $2}')"
 [ -n "$EXPECTED_SECTORS" ] || { echo "mkmeta produced no capacity" >&2; exit 1; }
 
+# A full RAID 5 row is chunk x data members.  Pass it to the guest so the
+# parity-write scenario writes exactly one row: anything shorter is a
+# partial row and must be refused by the driver.
+PARITY_ROW_KIB=0
+if [ "$PARITY_WRITES" = 1 ]; then
+    CHUNK_SECTORS="$(printf '%s\n' "$MKMETA_OUT" | grep -o 'chunk_sectors=[0-9]*' | cut -d= -f2 | head -n1)"
+    [ -n "$CHUNK_SECTORS" ] || { echo "parity-writes: no chunk_sectors from the writer" >&2; exit 1; }
+    PARITY_ROW_KIB=$(( CHUNK_SECTORS * (MEMBERS - 1) / 2 ))
+    if [ "$PARITY_ROW_KIB" -le 0 ] || [ "$PARITY_ROW_KIB" -gt 1024 ]; then
+        echo "parity-writes: a row is ${PARITY_ROW_KIB} KiB; the driver writes at most 1024 KiB" >&2
+        exit 2
+    fi
+fi
+
 # ----------------------------------------------------------------------------
 # 3. Busybox initramfs: /init + the module.
 # ----------------------------------------------------------------------------
@@ -202,6 +234,27 @@ if [ -n "$MKE2FS" ]; then
 else
     echo "==> mke2fs not found on host — guest will skip the sub-page write test"
 fi
+# Aligned O_DIRECT helper for the RAID 5 full-row write test.  dd's
+# buffer is not page-aligned, so blk-mq's virt_boundary turns the write
+# into page-sized requests, which are (correctly) refused as partial rows.
+if [ "$PARITY_WRITES" = 1 ]; then
+    gcc -static -O2 -Wall -Wextra -Werror -o "$WORKDIR/rcparitytest" \
+        "$SCRIPT_DIR/parity-write-test.c" || {
+        echo "failed to build the RAID 5 parity-write helper" >&2
+        exit 1
+    }
+    install -m 0755 "$WORKDIR/rcparitytest" "$INITRD_DIR/rcparitytest"
+    echo "==> bundled rcparitytest for the RAID 5 full-row write test"
+fi
+if [ "$CREATE_TEST" = 1 ]; then
+    gcc -static -O2 -Wall -Wextra -Werror -o "$WORKDIR/rxp2adm" \
+        "$REPO_DIR/src/rxp2adm.c" -I"$REPO_DIR/src" || {
+        echo "failed to build the RAID 5 create/delete CLI" >&2
+        exit 1
+    }
+    install -m 0755 "$WORKDIR/rxp2adm" "$INITRD_DIR/rxp2adm"
+    echo "==> bundled rxp2adm for the RAID 5 create/delete test"
+fi
 install -m 0755 "$SCRIPT_DIR/guest-init.sh" "$INITRD_DIR/init"
 (cd "$INITRD_DIR" && find . | cpio -o -H newc --quiet | gzip -1) \
     > "$WORKDIR/initramfs.gz"
@@ -236,7 +289,7 @@ timeout --foreground "${RCRAID_QEMU_TIMEOUT:-300}" qemu-system-x86_64 \
     -M q35 -m 2048 -smp 4 "${ACCEL_ARGS[@]}" \
     -kernel "$KERNEL" \
     -initrd "$WORKDIR/initramfs.gz" \
-    -append "console=ttyS0 rdinit=/init expected_sectors=$EXPECTED_SECTORS expected_level=$LEVEL fail_member=$FAIL_MEMBER degraded_boot=$OMIT_MEMBER panic=-1" \
+    -append "console=ttyS0 rdinit=/init expected_sectors=$EXPECTED_SECTORS expected_level=$LEVEL fail_member=$FAIL_MEMBER degraded_boot=$OMIT_MEMBER parity_write_test=$PARITY_WRITES parity_row_kib=$PARITY_ROW_KIB create_test=$CREATE_TEST panic=-1" \
     "${DRIVE_ARGS[@]}" \
     -nographic -no-reboot \
     > "$CONSOLE_LOG" 2>&1 || true   # qemu exit code isn't the verdict

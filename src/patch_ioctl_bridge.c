@@ -132,6 +132,51 @@ static long amd_raid_ioctl_multiplexer(struct file *file, unsigned int cmd,
 				    cmd);
 		return -EOPNOTSUPP;
 
+	case AMD_IOCTL_CREATE_ARRAY: {
+		struct amd_array_create req;
+		int ret;
+
+		if (!capable(CAP_SYS_ADMIN)) {
+			pr_warn_ratelimited("rcraid_ctl: rejected array create from unprivileged process %s (pid %d)\n",
+					    current->comm, current->pid);
+			return -EPERM;
+		}
+		if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+			return -EFAULT;
+		if (req.member_count > AMD_ARRAY_MAX_MEMBERS)
+			return -EINVAL;
+
+		ret = rc_volume_create_array_indexed(req.level,
+						     req.member_indices,
+						     req.member_count,
+						     req.size_mb);
+		if (ret)
+			pr_err("rcraid_ctl: create level %u over %u member(s) failed: %d\n",
+			       req.level, req.member_count, ret);
+		return ret;
+	}
+
+	case AMD_IOCTL_DELETE_ARRAY: {
+		struct amd_array_delete req;
+		int ret;
+
+		if (!capable(CAP_SYS_ADMIN)) {
+			pr_warn_ratelimited("rcraid_ctl: rejected array delete from unprivileged process %s (pid %d)\n",
+					    current->comm, current->pid);
+			return -EPERM;
+		}
+		if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+			return -EFAULT;
+		if (req.array_id != 0)
+			return -ENOENT;
+
+		ret = rc_volume_delete_array();
+		if (ret)
+			pr_err("rcraid_ctl: delete array %u failed: %d\n",
+			       req.array_id, ret);
+		return ret;
+	}
+
 	default:
 		return -EINVAL;
 	}

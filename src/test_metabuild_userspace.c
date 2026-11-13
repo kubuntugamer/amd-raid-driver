@@ -95,8 +95,9 @@ static int emit_array(const char *dir, const char *tag, u32 members,
 	}
 
 	volume_id = (ids[0] ^ (ids[1] << 1)) | 1ULL;
-	rec_len = rc_mb_records(records, 4096, metas, members, first, second,
-				capacity, user, TEST_CHUNK_INDEX, volume_id);
+	rec_len = rc_mb_records(records, 4096, RC_MB_DEVTYPE_VOLUME, metas,
+				members, first, second, capacity, user,
+				TEST_CHUNK_INDEX, volume_id);
 	if (!rec_len) {
 		fprintf(stderr, "record build failed\n");
 		ret = -1;

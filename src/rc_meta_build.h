@@ -104,6 +104,17 @@
 #define RC_MB_DEVTYPE_VOLUME	0x1BF6u
 /* Raw-disk LD firmware publishes for a disk that is not an array. */
 #define RC_MB_DEVTYPE_SINGLE	0x1BF9u
+/* Parity levels carry an explicit DeviceType; the counts do not encode
+ * them (RAID 5 is FirstCount 1, SecondCount = members). */
+#define RC_MB_DEVTYPE_RAID5	0x1BF5u
+#define RC_MB_DEVTYPE_RAID6	0x1BFAu
+
+/* Any LD DeviceType that names an array volume (rather than a raw disk). */
+static inline int rc_mb_is_volume_type(u32 t)
+{
+	return t == RC_MB_DEVTYPE_VOLUME || t == RC_MB_DEVTYPE_RAID5 ||
+	       t == RC_MB_DEVTYPE_RAID6;
+}
 
 /* Largest this encoder emits per LD record (16 members + element table). */
 #define RC_MB_LD_MAX		(RC_MB_LD_ELEM_ARRAY + 16u * RC_MB_LE_BYTES)
@@ -402,7 +413,7 @@ static inline u32 rc_mb_ctrl_record(u8 *out, u32 cap, u64 id, u32 number,
  * carries the cosmetic fields rcadm renders (Id/State/ParentCount/cache).
  * Returns the byte length, 0 if it does not fit.
  */
-static inline u32 rc_mb_records(u8 *out, u32 cap,
+static inline u32 rc_mb_records(u8 *out, u32 cap, u32 device_type,
 				const struct rc_mb_member_meta *m, u32 members,
 				u32 first, u32 second, u64 capacity,
 				u64 user_size, u32 chunk_index, u64 volume_id)
@@ -430,7 +441,7 @@ static inline u32 rc_mb_records(u8 *out, u32 cap,
 	}
 
 	ld_off = off;
-	n = rc_mb_ld_record(out + off, cap - off, RC_MB_DEVTYPE_VOLUME, first,
+	n = rc_mb_ld_record(out + off, cap - off, device_type, first,
 			    second, members, ids, capacity, user_size,
 			    chunk_index);
 	if (!n)

@@ -90,6 +90,45 @@ struct AmdHardwarePayload {
 #define AMD_IOCTL_DESTROY_ARRAY \
 	_IOW(AMD_IOCTL_MAGIC, 0x32, struct AmdHardwarePayload)
 
+/* -------------------------------------------------------------------------
+ * Array management (magic 'a')
+ *
+ * CREATE/DELETE are privileged and mutate firmware metadata through the
+ * driver's writer.  Disks are addressed by the disk_index published by
+ * AMD_IOCTL_GET_HARDWARE_INVENTORY; the driver resolves each index to its
+ * DeviceID, so on-disk identifiers never cross this ABI.
+ * ------------------------------------------------------------------------- */
+
+/* Member count is capped at the driver's RC_VOLUME_MAX_MEMBERS (8); the
+ * metadata writer and the volume registry have no slot above that. */
+#define AMD_ARRAY_MAX_MEMBERS 8u
+/* disk_index is a position in the inventory's drives[] (64 entries), not a
+ * member slot; an 8-member array can still name indices above 7. */
+#define AMD_ARRAY_MAX_DISKS 64u
+
+/* UAPI level spellings, not the on-disk RC_LDT_* DeviceType tags. */
+#define AMD_ARRAY_LEVEL_RAID0  0u
+#define AMD_ARRAY_LEVEL_RAID1  1u
+#define AMD_ARRAY_LEVEL_RAID5  5u
+#define AMD_ARRAY_LEVEL_RAID6  6u
+#define AMD_ARRAY_LEVEL_RAID10 10u
+
+struct amd_array_create {
+	__u32 level;
+	__u32 member_count;
+	__u32 member_indices[AMD_ARRAY_MAX_MEMBERS];
+	__u32 size_mb;			/* 0 = writer derives it from the members */
+};
+
+struct amd_array_delete {
+	__u32 array_id;			/* only 0 exists today */
+};
+
+#define AMD_IOCTL_CREATE_ARRAY \
+	_IOW(AMD_IOCTL_MAGIC, 0x33, struct amd_array_create)
+#define AMD_IOCTL_DELETE_ARRAY \
+	_IOW(AMD_IOCTL_MAGIC, 0x34, struct amd_array_delete)
+
 #ifdef __cplusplus
 #define AMD_RAID_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
 #else
@@ -102,5 +141,9 @@ AMD_RAID_STATIC_ASSERT(sizeof(struct AmdArrayTelemetry) == 96,
 		       "AmdArrayTelemetry layout changed");
 AMD_RAID_STATIC_ASSERT(sizeof(struct AmdHardwarePayload) == 4616,
 		       "AmdHardwarePayload layout changed");
+AMD_RAID_STATIC_ASSERT(sizeof(struct amd_array_create) == 44,
+		       "amd_array_create layout changed");
+AMD_RAID_STATIC_ASSERT(sizeof(struct amd_array_delete) == 4,
+		       "amd_array_delete layout changed");
 
 #endif /* AMD_RAID_UAPI_H */

@@ -37,6 +37,9 @@ Module.symvers
 # Userspace metadata encoder harness build dir (make test-metabuild)
 .metabuild-test/
 
+# Clean-room rxp2adm CLI build dir (make rxp2adm)
+.rxp2adm/
+
 # Python bytecode from scripts/qemu-test (mkmeta.py)
 __pycache__/
 *.pyc

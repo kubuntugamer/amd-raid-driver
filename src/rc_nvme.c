@@ -45,6 +45,7 @@
 #include <linux/scatterlist.h>
 #include <linux/dma-mapping.h>
 #include <linux/seq_file.h>
+#include <linux/semaphore.h>
 
 /* Trivial global volume registry — assumes a single RAID0 volume.  Members
  * are inserted as their metadata validates.  Ordered by PCI BDF so the
@@ -408,6 +409,27 @@ module_param_named(enable_writes, rc_volume_enable_writes, int, 0444);
 MODULE_PARM_DESC(enable_writes,
 		 "If non-zero, expose /dev/rcraid0 as read-write (default 0). Verify the array contents look right via reads BEFORE enabling.");
 
+/* RAID 5 writes.  Off by default so the installer path keeps delivering a
+ * read-only volume until this path has had a hardware run.  A complete row
+ * generates P directly from the request; a partial row is read-modify-
+ * written.  Both are serialized by rc_volume_parity_lock. */
+static int rc_volume_parity_writes;
+module_param_named(parity_writes, rc_volume_parity_writes, int, 0444);
+MODULE_PARM_DESC(parity_writes,
+		 "If non-zero, allow RAID 5 writes: complete rows generate parity directly, partial rows read-modify-write the row (requires enable_writes=1).");
+
+/*
+ * RAID 5 CREATE writes a complete, firmware-shaped LD record, but it does
+ * NOT zero or rebuild the members' user-data regions: the new volume would
+ * expose whatever the disks held before, and parity would not describe it.
+ * Keep that behind an explicit opt-in so a plain CREATE cannot turn stale
+ * member bytes into a seemingly valid array.
+ */
+static int rc_volume_parity_create;
+module_param_named(parity_create, rc_volume_parity_create, int, 0444);
+MODULE_PARM_DESC(parity_create,
+		 "If non-zero, allow CREATE to stamp a RAID 5 array over zeroed members. The writer emits metadata only: the data/parity region is not initialised, so only use freshly erased disks and zero the volume before writing. RAID 6 stays refused.");
+
 /* Metadata write probe.  Off by default; the QEMU rig turns it on.  When
  * set, the driver rewrites a member's RC_MetaData block at LBA 0x5000
  * through its own NVMe queues, flushes, and reads it back — and refuses
@@ -471,6 +493,40 @@ static struct blk_mq_tag_set rc_volume_tagset;
  * For multi-member dispatch on a 2-member RAID0, a 1 MiB request maps
  * 512 KiB to each member, which is exactly 128 pages per member. */
 #define RC_VOLUME_MS_PAGES_PER_MEMBER	128
+
+/* RAID 5 full-row writes compute P into a driver-owned buffer before the
+ * parity member's WRITE command is submitted.  A fixed pool bounds that
+ * memory instead of allocating chunk-sized memory on the I/O path; a
+ * request that finds the pool empty is handed back to blk-mq as
+ * BLK_STS_DEV_RESOURCE and retried once a buffer comes free. */
+#define RC_VOLUME_PARITY_BUFS		8
+
+/* Bit i set while buffer i is owned by an in-flight request.  The bit
+ * operations are atomic, so acquire/release need no lock. */
+static void *rc_volume_parity_va[RC_VOLUME_PARITY_BUFS];
+static unsigned long rc_volume_parity_inuse;
+static u32 rc_volume_parity_buf_bytes;
+
+/* RAID 5 partial-row read-modify-write.  Every RAID 5 write is serialized
+ * by this semaphore: RMW reads the old row, patches and rewrites it, so a
+ * second write to the same row that read the old bytes too would be lost.
+ * One lock for the whole volume is coarse but trivially correct; the
+ * async full-row path takes it with down_trylock and requeues.
+ *
+ * One chunk buffer per member (plus a PRP list) is enough because only one
+ * RMW runs at a time.  Each buffer lives in its member's IOMMU domain.
+ * The semaphore is released from the completion path for async full-row
+ * writes; up() is legal there. */
+struct rc_volume_rmw_buf {
+	struct device *dev;
+	void          *va;
+	dma_addr_t     pa;
+	__le64        *prp;
+	dma_addr_t     prp_pa;
+};
+static struct rc_volume_rmw_buf rc_volume_rmw[RC_VOLUME_MAX_MEMBERS];
+static u32 rc_volume_rmw_bytes;
+static struct semaphore rc_volume_parity_lock;
 /* SQ headroom reserved for internal (non-blk-mq) commands: boot/reset-time
  * sync commands (1 per queue).  Internal submitters additionally reserve their
  * SQE slots explicitly via rc_nvme_sq_reserve() and back off when the SQ
@@ -606,6 +662,13 @@ struct rc_volume_pdu {
 	 * fields above are unused in this path. */
 	bool               ms_active;
 	int                ms_nents[RC_VOLUME_MAX_MEMBERS];
+	/* RAID 5 full-row write: index into rc_volume_parity_va[] owned by
+	 * this request, or -1.  Released by rc_volume_unmap_request_sg. */
+	int                parity_buf;
+	/* Set when this request owns rc_volume_parity_lock (every RAID 5
+	 * write is serialized so two writes cannot update one row's parity
+	 * from the same old bytes).  Released by the same unmap path. */
+	bool               parity_locked;
 	struct scatterlist sg[RC_VOLUME_DATA_PAGES];
 	struct scatterlist ms_sg[RC_VOLUME_MAX_MEMBERS][RC_VOLUME_MS_PAGES_PER_MEMBER];
 };
@@ -3233,22 +3296,24 @@ static void rc_volume_register_member(struct rc_adapter *adapter)
 			rc_volume_geometry_untrust_reason =
 				"the on-disk ChunkSize is not a plausible stripe size (power of two, 8 KiB..1 MiB) — the field is probably being misread, so the write path cannot trust the stripe math";
 		}
-		/* RAID5/6 is wired for ASSEMBLY and READS only.  The placement
-		 * is settled against the vendor core (dedicated parity on member
-		 * N-1, issue #6), but there is no write path at all: no P/Q
-		 * generation and no read-modify-write of a partial stripe.
-		 * Force read-only through the same veto every other
-		 * untrusted-geometry path uses — the volume still comes up and
-		 * its data can be inspected, which is the point of a read-only
-		 * assembly. */
-		if (nvme->ld_level == RC_LDT_RAID5 ||
-		    nvme->ld_level == RC_LDT_RAID6) {
+		/* RAID 5/6 write policy.  RAID 6 has no write path at all (the
+		 * dual P/Q write is not wired), so it stays read-only.  RAID 5
+		 * can write a complete row — every data chunk of the row is in
+		 * the request, so P is a plain XOR — but that path is opt-in
+		 * (parity_writes=1) and still useless for normal filesystem
+		 * traffic until read-modify-write exists.  create_disk makes the
+		 * final read-only call: it also requires trusted geometry and a
+		 * row that fits one request. */
+		if (nvme->ld_level == RC_LDT_RAID6) {
 			rc_printk(RC_WARN,
-				  "rc_volume_register_member: %s %s recognised — assembly and READS only (no parity write path yet; layout taken from the vendor core) — volume will be READ-ONLY\n",
-				  pci_name(adapter->pdev),
-				  rc_level_name(nvme->ld_level));
+				  "rc_volume_register_member: %s RAID 6 recognised — assembly and READS only (dual-parity writes are not implemented) — volume will be READ-ONLY\n",
+				  pci_name(adapter->pdev));
 			rc_volume_geometry_untrust_reason =
-				"RAID 5/6 is assembled READ-ONLY: there is no parity write path yet (no P/Q generation, no partial-stripe read-modify-write)";
+				"RAID 6 is assembled READ-ONLY: the dual-parity (P/Q) write path is not implemented";
+		} else if (nvme->ld_level == RC_LDT_RAID5) {
+			rc_printk(RC_NOTE,
+				  "rc_volume_register_member: %s RAID 5 recognised — reads always; full-row writes only with enable_writes=1 and parity_writes=1 (partial rows need read-modify-write and are refused)\n",
+				  pci_name(adapter->pdev));
 		}
 	} else {
 		/* A committed config generation with an LD record that does
@@ -3557,6 +3622,23 @@ static void rc_volume_unmap_request_sg(struct rc_volume_pdu *pdu)
 		atomic_dec(&rc_volume_wgen_count[pdu->wgen & 1]);
 	}
 
+	/* Return the parity buffer to the pool.  Idempotent: queue_rq sets
+	 * parity_buf to -1, the parity dispatch acquires it, and the first
+	 * completion (or an error unwind before submission) releases it. */
+	if (pdu->parity_buf >= 0) {
+		int slot = pdu->parity_buf;
+
+		pdu->parity_buf = -1;
+		if (slot < RC_VOLUME_PARITY_BUFS)
+			clear_bit(slot, &rc_volume_parity_inuse);
+	}
+	/* Released from the completion path (ISR for the async full-row
+	 * write), never from queue_rq once the request is in flight. */
+	if (pdu->parity_locked) {
+		pdu->parity_locked = false;
+		up(&rc_volume_parity_lock);
+	}
+
 	if (pdu->ms_active) {
 		for (m = 0; m < rc_volume_member_count &&
 			    m < RC_VOLUME_MAX_MEMBERS; m++) {
@@ -3833,13 +3915,624 @@ static u32 rc_volume_sg_append(struct scatterlist *sgl, u32 used, u32 max,
  * exceeds MDTS — combined with the per-member sg array sizing
  * (RC_VOLUME_MS_PAGES_PER_MEMBER), neither overflow is possible from
  * within these limits. */
+/* ---------------------------------------------------------------------
+ * RAID 5 full-row write path
+ *
+ * A complete row holds one chunk on every data member (0..N-2) plus the
+ * dedicated parity chunk on member N-1.  Because every data chunk of the
+ * row is present in the request, P is simply the XOR of them: no
+ * read-modify-write and no old-parity read is needed.  The row is written
+ * with one NVMe WRITE per member and the request completes when the last
+ * one acks, exactly like the RAID1/RAID10 fan-outs.
+ *
+ * A request that covers less than a full row goes through
+ * rc_volume_parity_rmw_write() instead: it reads the row's data chunks,
+ * overlays the request, regenerates P and rewrites the touched chunks plus
+ * parity.  Both paths take rc_volume_parity_lock, so two writes can never
+ * update one row's parity from different old bytes.  Discards are refused
+ * because they would leave parity stale.  There is no parity rebuild and
+ * no write-hole journal: a power cut between the data and parity commands
+ * can leave a row inconsistent, the same exposure mdadm has without PPL.
+ * --------------------------------------------------------------------- */
+
+static void rc_volume_rmw_free(void)
+{
+	u32 bytes = rc_volume_rmw_bytes;
+	int i;
+
+	for (i = 0; i < RC_VOLUME_MAX_MEMBERS; i++) {
+		struct rc_volume_rmw_buf *b = &rc_volume_rmw[i];
+
+		if (!b->dev)
+			continue;
+		if (b->va)
+			dma_free_coherent(b->dev, bytes, b->va, b->pa);
+		if (b->prp)
+			dma_free_coherent(b->dev, PAGE_SIZE, b->prp,
+					  b->prp_pa);
+		memset(b, 0, sizeof(*b));
+	}
+	rc_volume_rmw_bytes = 0;
+}
+
+static int rc_volume_rmw_alloc(u32 chunk_bytes)
+{
+	int i;
+
+	rc_volume_rmw_free();
+	for (i = 0; i < rc_volume_member_count &&
+		    i < RC_VOLUME_MAX_MEMBERS; i++) {
+		struct rc_volume_rmw_buf *b = &rc_volume_rmw[i];
+		struct device *dev;
+
+		if (!rc_volume_members[i])
+			continue;
+		dev = &rc_volume_members[i]->pdev->dev;
+		b->dev = dev;
+		b->va = dma_alloc_coherent(dev, chunk_bytes, &b->pa,
+					   GFP_KERNEL);
+		b->prp = dma_alloc_coherent(dev, PAGE_SIZE, &b->prp_pa,
+					    GFP_KERNEL);
+		if (!b->va || !b->prp) {
+			rc_printk(RC_WARN,
+				  "rc_volume_rmw_alloc: cannot allocate RMW buffers for member %d — partial-stripe writes stay disabled\n",
+				  i);
+			rc_volume_rmw_free();
+			return -ENOMEM;
+		}
+	}
+	rc_volume_rmw_bytes = chunk_bytes;
+	return 0;
+}
+
+static void rc_volume_parity_pool_free(void)
+{
+	int i;
+
+	for (i = 0; i < RC_VOLUME_PARITY_BUFS; i++) {
+		kfree(rc_volume_parity_va[i]);
+		rc_volume_parity_va[i] = NULL;
+	}
+	rc_volume_parity_inuse = 0;
+	rc_volume_parity_buf_bytes = 0;
+	rc_volume_rmw_free();
+}
+
+static int rc_volume_parity_pool_alloc(u32 chunk_bytes)
+{
+	int i;
+
+	rc_volume_parity_pool_free();
+	for (i = 0; i < RC_VOLUME_PARITY_BUFS; i++) {
+		rc_volume_parity_va[i] = kzalloc(chunk_bytes, GFP_KERNEL);
+		if (!rc_volume_parity_va[i]) {
+			rc_printk(RC_WARN,
+				  "rc_volume_parity_pool_alloc: cannot allocate %u-byte parity buffers — RAID 5 writes stay disabled\n",
+				  chunk_bytes);
+			rc_volume_parity_pool_free();
+			return -ENOMEM;
+		}
+	}
+	rc_volume_parity_buf_bytes = chunk_bytes;
+	return 0;
+}
+
+/* Allocate the pool when this is a RAID 5 volume with parity writes
+ * requested and a chunk that fits one per-member scatterlist.  Failure is
+ * not fatal: rc_volume_parity_write_ready() then reports false and the
+ * volume comes up read-only, the same as before this path existed. */
+static void rc_volume_parity_pool_prepare(void)
+{
+	u32 bytes;
+
+	if (rc_volume_raid_level != RC_LDT_RAID5 || !rc_volume_parity_writes)
+		return;
+	bytes = rc_volume_stripe_sectors * 512u;
+	if (!bytes || bytes > RC_VOLUME_MS_PAGES_PER_MEMBER * PAGE_SIZE)
+		return;
+	if (rc_volume_parity_pool_alloc(bytes))
+		return;
+	rc_volume_rmw_alloc(bytes);
+}
+
+static int rc_volume_parity_buf_acquire(void)
+{
+	int i;
+
+	if (!rc_volume_parity_buf_bytes)
+		return -ENOSPC;
+	for (i = 0; i < RC_VOLUME_PARITY_BUFS; i++) {
+		if (!rc_volume_parity_va[i])
+			continue;
+		if (!test_and_set_bit(i, &rc_volume_parity_inuse))
+			return i;
+	}
+	return -ENOSPC;
+}
+
+/* May this volume accept the RAID 5 full-row write path at all?  True for
+ * every non-parity level (they have their own write paths), false for
+ * RAID 6 (no dual-parity writes), and for RAID 5 only when the operator
+ * opted in, the pool exists, the chunk fits one per-member sg array and a
+ * whole row fits one request. */
+static bool rc_volume_parity_write_ready(void)
+{
+	u32 row;
+
+	if (rc_volume_raid_level != RC_LDT_RAID5)
+		return rc_volume_raid_level != RC_LDT_RAID6;
+	if (!rc_volume_parity_writes || !rc_volume_parity_buf_bytes ||
+	    !rc_volume_rmw_bytes)
+		return false;
+	if (rc_volume_member_count < 3)
+		return false;
+	if (rc_volume_stripe_sectors * 512u >
+	    RC_VOLUME_MS_PAGES_PER_MEMBER * PAGE_SIZE)
+		return false;
+	row = rc_volume_stripe_sectors * (u32)(rc_volume_member_count - 1);
+	return row && row <= (RC_VOLUME_DATA_BYTES / 512);
+}
+
+/* Does [pos, pos + nr_sectors) cover exactly one complete RAID 5 row? */
+static bool rc_volume_parity_full_row(sector_t pos, u32 nr_sectors)
+{
+	u32 row;
+
+	if (!rc_volume_parity_write_ready())
+		return false;
+	row = rc_volume_stripe_sectors * (u32)(rc_volume_member_count - 1);
+	return row && nr_sectors == row && !(pos % row);
+}
+
+/* Synchronous chunk I/O for the read-modify-write path, out of the
+ * member's coherent chunk buffer.  The SQE is built here rather than via
+ * rc_nvme_read_lba/write_lba because those cap a transfer at two pages;
+ * a chunk can be 512 KiB, so this uses the buffer's PRP list. */
+static int rc_volume_rmw_io(int member, u8 opc, u64 slba, u32 sectors)
+{
+	struct rc_volume_rmw_buf *b;
+	struct rc_nvme_sqe cmd;
+	u32 bytes, pages, i;
+	int ret = -ENODEV;
+	int retry;
+
+	if (member < 0 || member >= rc_volume_member_count ||
+	    member >= RC_VOLUME_MAX_MEMBERS || !rc_volume_members[member])
+		return -ENODEV;
+	b = &rc_volume_rmw[member];
+	if (!b->va || !b->prp || !rc_volume_rmw_bytes)
+		return -ENODEV;
+	bytes = sectors * 512u;
+	if (!bytes || bytes > rc_volume_rmw_bytes || (bytes % PAGE_SIZE) ||
+	    (b->pa & (PAGE_SIZE - 1)))
+		return -EINVAL;
+	pages = bytes / PAGE_SIZE;
+	if (pages > 1 + (u32)(PAGE_SIZE / sizeof(__le64)))
+		return -E2BIG;
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.opc   = opc;
+	cmd.nsid  = cpu_to_le32(1);
+	cmd.prp1  = cpu_to_le64(b->pa);
+	if (pages == 2) {
+		cmd.prp2 = cpu_to_le64(b->pa + PAGE_SIZE);
+	} else if (pages > 2) {
+		for (i = 1; i < pages; i++)
+			b->prp[i - 1] = cpu_to_le64(b->pa +
+						   (dma_addr_t)i * PAGE_SIZE);
+		cmd.prp2 = cpu_to_le64(b->prp_pa);
+	}
+	cmd.cdw10 = cpu_to_le32((u32)(slba & 0xffffffff));
+	cmd.cdw11 = cpu_to_le32((u32)(slba >> 32));
+	cmd.cdw12 = cpu_to_le32(sectors - 1);
+
+	/* The sync helper borrows io_queues[0], which live READ traffic also
+	 * uses.  A full queue is transient; the blocking path can wait. */
+	for (retry = 0; retry < 1000; retry++) {
+		ret = rc_nvme_io_cmd_sync(rc_volume_members[member], &cmd);
+		if (ret != -EBUSY)
+			break;
+		usleep_range(1000, 2000);
+	}
+	return ret;
+}
+
+/* Partial-row RAID 5 write.  Only the chunks the slice touches are read,
+ * plus the old parity, and P becomes P_old ^ D_old ^ D_new (XORing the
+ * whole rewritten chunk is safe: bytes outside the slice are unchanged, so
+ * their old and new values cancel).  Runs synchronously under
+ * rc_volume_parity_lock, which serializes it against every other RAID 5
+ * write (a second write that read the same old row would be lost).
+ *
+ * A request may cross a row boundary; each row is handled in turn.  The
+ * write hole remains: a power cut between the data and parity commands
+ * leaves that row's P stale, exactly as mdadm without a journal. */
+static blk_status_t rc_volume_parity_rmw_write(struct request *req,
+					       sector_t pos, u32 nr_sectors)
+{
+	const u32 chunk = rc_volume_stripe_sectors;
+	const int nm = rc_volume_member_count;
+	const int parity = nm - 1;
+	const u32 row_sectors = chunk * (u32)parity;
+	const u32 chunk_bytes = chunk * 512u;
+	sector_t cur = pos;
+	u32 remaining = nr_sectors;
+	blk_status_t st = BLK_STS_OK;
+
+	if (nm < 3 || nm > RC_VOLUME_MAX_MEMBERS || !chunk || !row_sectors ||
+	    !chunk_bytes)
+		return BLK_STS_IOERR;
+
+	down(&rc_volume_parity_lock);
+	if (rc_volume_fatal()) {
+		rc_printk(RC_ERROR,
+			  "rc_volume_parity_rmw_write: volume can no longer serve — rejected\n");
+		st = BLK_STS_IOERR;
+		goto out;
+	}
+
+	while (remaining) {
+		const u64 row = div_u64(cur, row_sectors);
+		const u32 row_off = (u32)(cur - row * row_sectors);
+		const u32 nsec = min(remaining, row_sectors - row_off);
+		struct req_iterator iter;
+		struct bio_vec bv;
+		sector_t lba = pos;
+		u64 *pd;
+		u32 words, i;
+		int first, last, m, rc;
+
+		/* Classic read-modify-write: only the chunks this slice
+		 * touches are read, plus the old parity.
+		 *   P_new = P_old ^ D_old ^ D_new
+		 */
+		first = (int)(row_off / chunk);
+		last = (int)((row_off + nsec - 1) / chunk);
+
+		rc = rc_volume_rmw_io(parity, RC_NVME_NVM_OP_READ,
+				      row * chunk +
+				      rc_volume_member_phys_offset[parity], chunk);
+		if (rc) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_parity_rmw_write: read row %llu parity failed (%d) — pos=%llu len=%u\n",
+				  row, rc, (u64)pos, nr_sectors);
+			st = BLK_STS_IOERR;
+			goto out;
+		}
+		pd = (u64 *)(void *)rc_volume_rmw[parity].va;
+		words = chunk_bytes / sizeof(u64);
+
+		for (m = first; m <= last; m++) {
+			const u64 *sd;
+
+			rc = rc_volume_rmw_io(m, RC_NVME_NVM_OP_READ,
+					      row * chunk +
+					      rc_volume_member_phys_offset[m],
+					      chunk);
+			if (rc) {
+				rc_printk(RC_ERROR,
+					  "rc_volume_parity_rmw_write: read row %llu member %d failed (%d) — pos=%llu len=%u\n",
+					  row, m, rc, (u64)pos, nr_sectors);
+				st = BLK_STS_IOERR;
+				goto out;
+			}
+			sd = (const u64 *)(void *)rc_volume_rmw[m].va;
+			for (i = 0; i < words; i++)
+				pd[i] ^= sd[i];	/* P_old ^= D_old */
+		}
+
+		/* Overlay the part of the request that falls in this row. */
+		rq_for_each_segment(bv, req, iter) {
+			sector_t seg_start = lba;
+			sector_t seg_end = lba + bv.bv_len / 512;
+			sector_t from = max_t(sector_t, seg_start, cur);
+			sector_t to = min_t(sector_t, seg_end, cur + nsec);
+
+			if (from < to) {
+				u32 rel = (u32)(from - cur);
+				u32 skip = (u32)(from - seg_start);
+				u32 len = (u32)(to - from) * 512u;
+				u32 mbr = (row_off + rel) / chunk;
+				u32 coff = (row_off + rel) % chunk;
+				u8 *src = kmap_local_page(bv.bv_page);
+
+				if (mbr < (u32)parity)
+					memcpy((u8 *)rc_volume_rmw[mbr].va +
+					       (size_t)coff * 512u,
+					       src + bv.bv_offset +
+					       (size_t)skip * 512u, len);
+				kunmap_local(src);
+			}
+			lba = seg_end;
+		}
+
+		/* P ^= D_new for every touched chunk. */
+		for (m = first; m <= last; m++) {
+			const u64 *sd =
+				(const u64 *)(void *)rc_volume_rmw[m].va;
+
+			for (i = 0; i < words; i++)
+				pd[i] ^= sd[i];
+		}
+
+		/* Rewrite only the chunks this row's slice touches, then P. */
+		for (m = first; m <= last; m++) {
+			rc = rc_volume_rmw_io(m, RC_NVME_NVM_OP_WRITE,
+					      row * chunk +
+					      rc_volume_member_phys_offset[m],
+					      chunk);
+			if (rc) {
+				rc_printk(RC_ERROR,
+					  "rc_volume_parity_rmw_write: write row %llu member %d failed (%d) — parity now stale for that row\n",
+					  row, m, rc);
+				st = BLK_STS_IOERR;
+				goto out;
+			}
+		}
+
+		rc = rc_volume_rmw_io(parity, RC_NVME_NVM_OP_WRITE,
+				      row * chunk +
+				      rc_volume_member_phys_offset[parity], chunk);
+		if (rc) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_parity_rmw_write: write row %llu parity failed (%d)\n",
+				  row, rc);
+			st = BLK_STS_IOERR;
+			goto out;
+		}
+
+		if (req->cmd_flags & REQ_FUA) {
+			for (m = 0; m < nm; m++) {
+				rc = rc_nvme_flush(rc_volume_members[m]);
+				if (rc) {
+					rc_printk(RC_ERROR,
+						  "rc_volume_parity_rmw_write: FUA flush member %d failed (%d)\n",
+						  m, rc);
+					st = BLK_STS_IOERR;
+					goto out;
+				}
+			}
+		}
+
+		cur += nsec;
+		remaining -= nsec;
+	}
+
+out:
+	up(&rc_volume_parity_lock);
+	return st;
+}
+
+/* XOR len bytes of src into dst.  The CPU cost is bounded by one chunk
+ * per row written; the parity path is an opt-in first step, not the
+ * tuned hot path. */
+static void rc_volume_xor_bytes(u8 *dst, const u8 *src, u32 len)
+{
+	u32 i;
+
+	for (i = 0; i < len; i++)
+		dst[i] ^= src[i];
+}
+
+static blk_status_t rc_volume_dispatch_parity_write(
+		struct blk_mq_hw_ctx *hctx, struct request *req,
+		struct rc_volume_pdu *pdu, sector_t pos, u32 nr_sectors)
+{
+	const u32 chunk = rc_volume_stripe_sectors;
+	const int nm = rc_volume_member_count;
+	const int parity = nm - 1;
+	const u32 row_sectors = chunk * (u32)parity;
+	const u32 chunk_bytes = chunk * 512u;
+	const u64 row = div_u64(pos, row_sectors);
+	struct req_iterator iter;
+	struct bio_vec bv;
+	sector_t cur = pos;
+	u32 sg_used[RC_VOLUME_MAX_MEMBERS] = {0};
+	u32 pages, i;
+	int slot, m;
+	u8 *parity_va;
+
+	if (nm < 3 || nm > RC_VOLUME_MAX_MEMBERS || !chunk ||
+	    !row_sectors || nr_sectors != row_sectors || (pos % row_sectors) ||
+	    chunk_bytes > RC_VOLUME_MS_PAGES_PER_MEMBER * PAGE_SIZE) {
+		rc_printk(RC_ERROR,
+			  "rc_volume_dispatch_parity_write: bad geometry (members=%d chunk=%u row=%u len=%u pos=%llu) — rejected\n",
+			  nm, chunk, row_sectors, nr_sectors, (u64)pos);
+		return BLK_STS_IOERR;
+	}
+
+	/* Every RAID 5 write is serialized so a partial-row RMW and a
+	 * full-row write can never update one row's P from different old
+	 * bytes.  A busy lock is a clean requeue, not an error. */
+	if (down_trylock(&rc_volume_parity_lock))
+		return BLK_STS_DEV_RESOURCE;
+	pdu->parity_locked = true;
+
+	slot = rc_volume_parity_buf_acquire();
+	if (slot < 0) {
+		rc_volume_unmap_request_sg(pdu);
+		return BLK_STS_DEV_RESOURCE;
+	}
+	parity_va = rc_volume_parity_va[slot];
+	pdu->parity_buf = slot;
+	memset(parity_va, 0, chunk_bytes);
+
+	for (m = 0; m < nm; m++)
+		sg_init_table(pdu->ms_sg[m], RC_VOLUME_MS_PAGES_PER_MEMBER);
+
+	/* Walk the row once: place each fragment on its data member's sg and
+	 * XOR the same bytes into the parity buffer.  A fragment never spans
+	 * a chunk boundary on a full row, so the member is
+	 * (offset / chunk) and the parity offset is (offset % chunk). */
+	rq_for_each_segment(bv, req, iter) {
+		u32 seg_off = bv.bv_offset;
+		u32 seg_len_sectors = bv.bv_len / 512;
+		struct page *seg_page = bv.bv_page;
+		u32 seg_remaining = bv.bv_len;
+
+		if (bv.bv_len & 511u) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_dispatch_parity_write: non-sector-aligned segment (%u bytes) — rejected\n",
+				  bv.bv_len);
+			goto err_unmap;
+		}
+
+		while (seg_remaining) {
+			u32 off_sectors = (u32)(cur - pos);
+			u32 mbr = off_sectors / chunk;
+			u32 chunk_off = off_sectors - mbr * chunk;
+			u32 nsec = min(seg_len_sectors, chunk - chunk_off);
+			u32 nbytes = nsec * 512u;
+			u8 *src;
+
+			if (!nbytes || nbytes > seg_remaining ||
+			    mbr >= (u32)parity) {
+				rc_printk(RC_ERROR,
+					  "rc_volume_dispatch_parity_write: row split failed (member=%u off=%u nbytes=%u remaining=%u) — rejected\n",
+					  mbr, chunk_off, nbytes, seg_remaining);
+				goto err_unmap;
+			}
+
+			sg_used[mbr] = rc_volume_sg_append(pdu->ms_sg[mbr],
+						sg_used[mbr],
+						RC_VOLUME_MS_PAGES_PER_MEMBER,
+						seg_page, nbytes, seg_off);
+			if (!sg_used[mbr]) {
+				rc_printk(RC_ERROR,
+					  "rc_volume_dispatch_parity_write: member %u sg overflow (>%u entries) — rejected\n",
+					  mbr, RC_VOLUME_MS_PAGES_PER_MEMBER);
+				goto err_unmap;
+			}
+
+			src = kmap_local_page(seg_page);
+			rc_volume_xor_bytes(parity_va + (size_t)chunk_off * 512u,
+					    src + seg_off, nbytes);
+			kunmap_local(src);
+
+			seg_off         += nbytes;
+			seg_remaining   -= nbytes;
+			seg_len_sectors -= nsec;
+			cur             += nsec;
+		}
+	}
+
+	if (cur != pos + row_sectors) {
+		rc_printk(RC_ERROR,
+			  "rc_volume_dispatch_parity_write: short request (covered %llu of %u sectors) — rejected\n",
+			  (unsigned long long)(cur - pos), row_sectors);
+		goto err_unmap;
+	}
+
+	/* The parity chunk is written straight out of its pool buffer.  Each
+	 * page is page-aligned, which is what rc_volume_build_prp requires
+	 * after the first entry. */
+	pages = chunk_bytes / PAGE_SIZE;
+	if ((chunk_bytes % PAGE_SIZE) ||
+	    pages > RC_VOLUME_MS_PAGES_PER_MEMBER) {
+		rc_printk(RC_ERROR,
+			  "rc_volume_dispatch_parity_write: %u-byte parity chunk is not page-expressible — rejected\n",
+			  chunk_bytes);
+		goto err_unmap;
+	}
+	for (i = 0; i < pages; i++)
+		sg_set_page(&pdu->ms_sg[parity][i],
+			    virt_to_page(parity_va + (size_t)i * PAGE_SIZE),
+			    PAGE_SIZE, 0);
+	sg_used[parity] = pages;
+
+	for (m = 0; m < nm; m++) {
+		if (!sg_used[m]) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_dispatch_parity_write: member %d has no data in the row — rejected\n",
+				  m);
+			goto err_unmap;
+		}
+		sg_mark_end(&pdu->ms_sg[m][sg_used[m] - 1]);
+	}
+
+	pdu->ms_active = true;
+	for (m = 0; m < nm; m++) {
+		int mapped;
+
+		if (!rc_volume_members[m]) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_dispatch_parity_write: member %d absent — rejected\n",
+				  m);
+			goto err_unmap;
+		}
+		mapped = dma_map_sg(&rc_volume_members[m]->pdev->dev,
+				    pdu->ms_sg[m], sg_used[m], DMA_TO_DEVICE);
+		if (!mapped) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_dispatch_parity_write: dma_map_sg failed (member %d, %u entries) — pos=%llu len=%u rejected\n",
+				  m, sg_used[m], (u64)pos, nr_sectors);
+			goto err_unmap;
+		}
+		pdu->ms_nents[m] = mapped;
+	}
+
+	for (m = 0; m < nm; m++) {
+		if (!rc_nvme_sq_reserve(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num], 1)) {
+			while (m-- > 0)
+				rc_nvme_sq_unreserve(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num], 1);
+			rc_volume_unmap_request_sg(pdu);
+			return BLK_STS_DEV_RESOURCE;
+		}
+	}
+
+	pdu->member_idx = -1;	/* fan-out — see member_mask */
+	pdu->member_mask = (1u << nm) - 1u;
+	atomic_set(&pdu->members_pending, nm);
+
+	{
+		struct rc_nvme_sqe cmds[RC_VOLUME_MAX_MEMBERS];
+		u32 tag = req->tag;
+
+		/* Build every SQE before starting/submitting, so a PRP
+		 * expressibility failure can still reject the request. */
+		for (m = 0; m < nm; m++) {
+			if (rc_volume_build_io_sqe(&cmds[m], hctx->queue_num, m,
+					tag, RC_NVME_NVM_OP_WRITE,
+					row * chunk +
+						rc_volume_member_phys_offset[m],
+					(u16)(chunk - 1),
+					(req->cmd_flags & REQ_FUA) != 0,
+					pdu->ms_sg[m], pdu->ms_nents[m])) {
+				int u;
+
+				for (u = 0; u < nm; u++)
+					rc_nvme_sq_unreserve(rc_volume_members[u]->ctx.nvme.io_queues[hctx->queue_num], 1);
+				rc_volume_unmap_request_sg(pdu);
+				return BLK_STS_IOERR;
+			}
+		}
+
+		blk_mq_start_request(req);
+		for (m = 0; m < nm; m++)
+			rc_nvme_io_submit(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num],
+					  &cmds[m]);
+	}
+
+	return BLK_STS_OK;
+
+err_unmap:
+	rc_volume_unmap_request_sg(pdu);
+	return BLK_STS_IOERR;
+}
+
 static blk_status_t rc_volume_dispatch_multi_stripe(
 		struct blk_mq_hw_ctx *hctx, struct request *req,
 		struct rc_volume_pdu *pdu, sector_t pos, u32 nr_sectors,
-		enum req_op op)
+		enum req_op op, bool parity_read)
 {
 	const u32 stripe = rc_volume_stripe_sectors;
 	const int nm = rc_volume_member_count;
+	/* RAID0 uses every member as a stripe column.  A parity READ uses
+	 * only the data members 0..N-2: the parity member holds no logical
+	 * data, and rc_volume_map_lba already routes a read to a data
+	 * member, so the modulus is the only difference. */
+	const int slots = parity_read ?
+		(rc_volume_raid_level == RC_LDT_RAID6 ? nm - 2 : nm - 1) : nm;
 	struct req_iterator iter;
 	struct bio_vec bv;
 	sector_t cur_lba = pos;
@@ -3850,10 +4543,10 @@ static blk_status_t rc_volume_dispatch_multi_stripe(
 	int members_with_data = 0;
 	int m;
 
-	if (nm <= 0 || nm > RC_VOLUME_MAX_MEMBERS || !stripe) {
+	if (nm <= 0 || nm > RC_VOLUME_MAX_MEMBERS || slots <= 0 || !stripe) {
 		rc_printk(RC_ERROR,
-			  "rc_volume_dispatch_multi_stripe: bad volume state (members=%d stripe=%u) — pos=%llu len=%u rejected\n",
-			  nm, stripe, (u64)pos, nr_sectors);
+			  "rc_volume_dispatch_multi_stripe: bad volume state (members=%d slots=%d stripe=%u) — pos=%llu len=%u rejected\n",
+			  nm, slots, stripe, (u64)pos, nr_sectors);
 		return BLK_STS_IOERR;
 	}
 
@@ -3878,7 +4571,7 @@ static blk_status_t rc_volume_dispatch_multi_stripe(
 			u32 chunk_sectors = min(seg_len_sectors,
 						sectors_to_boundary);
 			u32 chunk_bytes = chunk_sectors * 512u;
-			int mbr = (int)(stripe_idx % nm);
+			int mbr = (int)(stripe_idx % (u64)slots);
 
 			if (chunk_bytes == 0 || chunk_bytes > seg_remaining) {
 				rc_printk(RC_ERROR,
@@ -4830,6 +5523,8 @@ static blk_status_t rc_volume_queue_rq(struct blk_mq_hw_ctx *hctx,
 	pdu->sc_sct = 0;
 	pdu->nents = 0;
 	pdu->ms_active = false;
+	pdu->parity_buf = -1;
+	pdu->parity_locked = false;
 	memset(pdu->ms_nents, 0, sizeof(pdu->ms_nents));
 	atomic_set(&pdu->completed, 0);
 	pdu->member_mask = 0;
@@ -4959,19 +5654,75 @@ static blk_status_t rc_volume_queue_rq(struct blk_mq_hw_ctx *hctx,
 		return BLK_STS_OK;
 	}
 
-	/* RAID5/6: READS only.  The volume is forced read-only at
-	 * create_disk (untrusted geometry), so this is the safety net for a
-	 * submitter that ignores the RO flag (a resync/format tool, a raw
-	 * write).  Refuse it here instead of letting the single-member path
-	 * below write one data chunk and leave its stripe's parity stale —
-	 * that would report success and corrupt the array on the next
-	 * degraded read. */
+	/* A RAID 5/6 read that crosses a chunk boundary now fans out one
+	 * READ per data member (chunk_sectors is 0 in parity-write mode; a
+	 * row is not a power of two, so it cannot be the split unit).
+	 * Single-chunk reads fall through to the exact single-member path
+	 * below.  The parity member is never read: a healthy array serves
+	 * data from its data members alone. */
+	if ((rc_volume_raid_level == RC_LDT_RAID5 ||
+	     rc_volume_raid_level == RC_LDT_RAID6) && op == REQ_OP_READ &&
+	    rc_volume_stripe_sectors && nr_sectors > 0 &&
+	    (pos / rc_volume_stripe_sectors) !=
+		((pos + nr_sectors - 1) / rc_volume_stripe_sectors)) {
+		st = rc_volume_dispatch_multi_stripe(hctx, req, pdu, pos,
+						     nr_sectors, op, true);
+		if (st == BLK_STS_DEV_RESOURCE)
+			return st;
+		if (st != BLK_STS_OK) {
+			blk_mq_start_request(req);
+			if (rc_volume_claim_completion(pdu))
+				blk_mq_end_request(req, st);
+		}
+		return BLK_STS_OK;
+	}
+
+	/* RAID5/6: reads for both; writes only for RAID 5.  A complete row
+	 * carries every data chunk, so P is a plain XOR of the request's own
+	 * bytes (async fan-out below).  A partial row takes the blocking
+	 * read-modify-write path: read the row, overlay the request, then
+	 * rewrite the touched chunks and parity.  Discards are refused because
+	 * they would leave parity stale; RAID 6 has no write path at all.
+	 * Everything refused here is refused with a reason and an error —
+	 * never silently accepted. */
 	if ((rc_volume_raid_level == RC_LDT_RAID5 ||
 	     rc_volume_raid_level == RC_LDT_RAID6) && op != REQ_OP_READ) {
-		printk_ratelimited(KERN_ERR
-			"rcraid: %s: op=%u rejected — %s volume is READ-ONLY (parity write path not implemented; issue #6)\n",
-			rc_volume_disk ? rc_volume_disk->disk_name : "?",
-			op, rc_level_name(rc_volume_raid_level));
+		if (op == REQ_OP_WRITE &&
+		    rc_volume_parity_full_row(pos, nr_sectors)) {
+			st = rc_volume_dispatch_parity_write(hctx, req, pdu,
+							     pos, nr_sectors);
+			if (st == BLK_STS_DEV_RESOURCE)
+				return st;
+			if (st != BLK_STS_OK) {
+				blk_mq_start_request(req);
+				if (rc_volume_claim_completion(pdu))
+					blk_mq_end_request(req, st);
+			}
+			return BLK_STS_OK;
+		}
+
+		if (op == REQ_OP_WRITE && rc_volume_parity_writes &&
+		    rc_volume_parity_write_ready()) {
+			/* Partial row: read the row, overlay this request,
+			 * regenerate P, rewrite the touched chunks + parity.
+			 * Blocking, so the tagset is BLK_MQ_F_BLOCKING for
+			 * this mode. */
+			st = rc_volume_parity_rmw_write(req, pos, nr_sectors);
+			blk_mq_start_request(req);
+			blk_mq_end_request(req, st);
+			return BLK_STS_OK;
+		}
+
+		if (rc_volume_raid_level == RC_LDT_RAID6)
+			printk_ratelimited(KERN_ERR
+				"rcraid: %s: op=%u pos=%llu len=%u rejected — RAID 6 writes are not implemented (dual-parity P/Q); volume is READ-ONLY (issue #6)\n",
+				rc_volume_disk ? rc_volume_disk->disk_name : "?",
+				op, (unsigned long long)pos, nr_sectors);
+		else
+			printk_ratelimited(KERN_ERR
+				"rcraid: %s: op=%u pos=%llu len=%u rejected — RAID 5 discards are refused (they would leave parity stale; issue #6)\n",
+				rc_volume_disk ? rc_volume_disk->disk_name : "?",
+				op, (unsigned long long)pos, nr_sectors);
 		blk_mq_start_request(req);
 		if (rc_volume_claim_completion(pdu))
 			blk_mq_end_request(req, BLK_STS_IOERR);
@@ -5058,7 +5809,7 @@ static blk_status_t rc_volume_queue_rq(struct blk_mq_hw_ctx *hctx,
 		blk_status_t st = rc_volume_dispatch_multi_stripe(hctx, req,
 								  pdu, pos,
 								  nr_sectors,
-								  op);
+								  op, false);
 		if (st == BLK_STS_DEV_RESOURCE) {
 			/* SQ full — requeue; request never started. */
 			return st;
@@ -5730,9 +6481,9 @@ int rc_volume_delete_array(void)
 				if (pkt < RC_MB_LD_ELEM_ARRAY ||
 				    off + pkt > gen_bytes)
 					break;
-				if (get_unaligned_le32(gen + off +
-							RC_MB_LD_DEVICE_TYPE) ==
-						RC_MB_DEVTYPE_VOLUME &&
+				if (rc_mb_is_volume_type(
+						get_unaligned_le32(gen + off +
+							RC_MB_LD_DEVICE_TYPE)) &&
 				    get_unaligned_le32(gen + off +
 							RC_MB_LD_DEVICES) == members) {
 					memmove(gen + off, gen + off + pkt,
@@ -5884,12 +6635,19 @@ out_unlock:
  * record for it.  Mirrors repeat data, so they add no capacity: RAID 1 is
  * one column and RAID 10 is FirstCount columns, which is exactly what
  * rc_ld_level_from() reconstructs from the record when it is read back.
- * DeviceType 0x1BF7 (single-disk volume) and the parity levels stay
- * unwritten (0x1BF5/0x1BFA are assemble-and-read-only by policy).
+ * RAID 5 adds SecondCount - 1 data columns and needs the parity_create
+ * opt-in (metadata only: the data/parity region is not initialised).
+ * DeviceType 0x1BF7 (single-disk volume) and RAID 6 stay unwritten.
  */
 static u32 rc_create_data_cols(u32 raid_type, u32 first, u32 second,
 			       u32 count)
 {
+	if (raid_type == RC_MB_DEVTYPE_RAID5) {
+		if (!rc_volume_parity_create || count < 3u ||
+		    first != 1u || second != count)
+			return 0;
+		return count - 1u;
+	}
 	if (raid_type != RC_MB_DEVTYPE_VOLUME)
 		return 0;
 	if (second == 1u && first >= 2u && first == count)
@@ -6048,8 +6806,8 @@ int rc_volume_create_array(u32 raid_type, u32 first, u32 second,
 	 */
 	volume_id = requested_id ? requested_id :
 		    ((ids[0] ^ (ids[n > 1 ? 1 : 0] << 1)) | 1ULL);
-	rec_len = rc_mb_records(rec, PAGE_SIZE, metas, n, first, second, cap,
-				element, 3, volume_id);
+	rec_len = rc_mb_records(rec, PAGE_SIZE, raid_type, metas, n, first,
+				second, cap, element, 3, volume_id);
 	if (!rec_len || RC_MB_GEN_HEADER + rec_len > PAGE_SIZE) {
 		rc_printk(RC_ERROR,
 			  "rc_volume_create_array: record set does not fit (%u bytes)\n",
@@ -6125,6 +6883,114 @@ out_free:
 	return ret;
 }
 
+/*
+ * Map a disk_index (the enumeration rc_volume_get_inventory() publishes) to
+ * an adapter.  Caller holds rc_state.lock.
+ */
+static struct rc_adapter *rc_adapter_by_disk_index(u32 index)
+{
+	u32 n = 0;
+	int i;
+
+	for (i = 0; i < RC_MAX_ADAPTERS; i++) {
+		struct rc_adapter *a = rc_state.adapters[i];
+
+		if (!a)
+			continue;
+		if (n++ == index)
+			return a;
+	}
+	return NULL;
+}
+
+/*
+ * CREATE entry point for the control plane (/dev/amd_ctl0).  Builds the
+ * DeviceID list from disk indices under rc_state.lock, then hands it to the
+ * ordinary writer, which resolves each ID and takes the locks itself.
+ *
+ * RAID 5 is metadata-only and behind the parity_create opt-in: the writer
+ * emits a firmware-shaped 0x1BF5 record, but it does not zero the members'
+ * user areas, so the caller must supply erased disks and zero the volume
+ * before use.  RAID 6 is refused (no Q write path).  See docs/STATUS.md.
+ */
+int rc_volume_create_array_indexed(u32 level, const u32 *indices,
+				   u32 count, u32 size_mb)
+{
+	u64 ids[RC_VOLUME_MAX_MEMBERS];
+	u32 first, second, devtype, i, j;
+	int ret;
+
+	if (!indices || count < 2 || count > RC_VOLUME_MAX_MEMBERS)
+		return -EINVAL;
+	for (i = 0; i < count; i++)
+		for (j = i + 1; j < count; j++)
+			if (indices[i] == indices[j])
+				return -EINVAL;
+
+	switch (level) {
+	case AMD_ARRAY_LEVEL_RAID0:
+		devtype = RC_MB_DEVTYPE_VOLUME;
+		first = count;
+		second = 1;
+		break;
+	case AMD_ARRAY_LEVEL_RAID1:
+		if (count != 2)
+			return -EINVAL;
+		devtype = RC_MB_DEVTYPE_VOLUME;
+		first = 1;
+		second = 2;
+		break;
+	case AMD_ARRAY_LEVEL_RAID10:
+		if (count < 4 || (count & 1))
+			return -EINVAL;
+		devtype = RC_MB_DEVTYPE_VOLUME;
+		first = count / 2;
+		second = 2;
+		break;
+	case AMD_ARRAY_LEVEL_RAID5:
+		if (!rc_volume_parity_create) {
+			rc_printk(RC_WARN,
+				  "rxp2adm: RAID 5 CREATE refused: the metadata writer does not initialise data/parity, so CREATE needs parity_create=1 and members with an empty user area\n");
+			return -EOPNOTSUPP;
+		}
+		if (count < 3)
+			return -EINVAL;
+		devtype = RC_MB_DEVTYPE_RAID5;
+		first = 1;
+		second = count;
+		break;
+	case AMD_ARRAY_LEVEL_RAID6:
+		rc_printk(RC_WARN,
+			  "rxp2adm: RAID 6 CREATE refused: there is no Q write or initialisation path\n");
+		return -EOPNOTSUPP;
+	default:
+		return -EINVAL;
+	}
+
+	mutex_lock(&rc_state.lock);
+	for (i = 0; i < count; i++) {
+		struct rc_adapter *a = rc_adapter_by_disk_index(indices[i]);
+
+		if (!a || !a->ctx.nvme.md_valid || !a->ctx.nvme.ns1_nsze) {
+			mutex_unlock(&rc_state.lock);
+			rc_printk(RC_WARN,
+				  "rxp2adm: disk %u is not a bound, initialised member\n",
+				  indices[i]);
+			return -ENODEV;
+		}
+		ids[i] = a->ctx.nvme.md_device_id;
+	}
+	mutex_unlock(&rc_state.lock);
+
+	ret = rc_volume_create_array(devtype, first, second,
+				     count, size_mb, 0, ids, count);
+	if (ret)
+		rc_printk(RC_WARN,
+			  "rxp2adm: CREATE level %u over %u disk(s) failed (%d)\n",
+			  level, count, ret);
+	return ret;
+}
+
 static int rc_volume_create_disk(void)
 {
 	struct rc_adapter *m0 = NULL;
@@ -6141,6 +7007,12 @@ static int rc_volume_create_disk(void)
 	}
 	if (!m0)
 		return -ENODEV;
+
+	/* Allocate the parity-write resources before the tagset: the tagset
+	 * flag and the queue limits both depend on whether the path is
+	 * usable. */
+	rc_volume_parity_pool_prepare();
+	sema_init(&rc_volume_parity_lock, 1);
 
 	/* nr_hw_queues = min(member->nr_io_queues) across present members.
 	 * Each hctx i routes to io_queues[i] on every member, so we can't
@@ -6216,11 +7088,13 @@ static int rc_volume_create_disk(void)
 		rc_volume_tagset.queue_depth  = depth;
 		rc_volume_tagset.numa_node    = NUMA_NO_NODE;
 		rc_volume_tagset.cmd_size     = sizeof(struct rc_volume_pdu);
-		/* Async dispatch — queue_rq returns BLK_STS_OK immediately
-		 * and completion lands via the per-queue ISR → blk_mq_complete
-		 * → rc_volume_complete.  No sleeping on the dispatch path → no
-		 * BLK_MQ_F_BLOCKING required. */
-		rc_volume_tagset.flags        = 0;
+		/* Full-row writes are async (completed by the ISR), but the
+		 * partial-row read-modify-write path runs synchronous NVMe
+		 * commands in queue_rq under the parity-write lock.  BLOCKING
+		 * tells blk-mq that queue_rq may sleep; it is only set when
+		 * that path is actually enabled. */
+		rc_volume_tagset.flags        = rc_volume_parity_write_ready() ?
+						 BLK_MQ_F_BLOCKING : 0;
 
 		rc_printk(RC_NOTE,
 			  "rc_volume_create_disk: blk-mq nr_hw_queues=%u (queue_depth=%u → %u total outstanding, %u SQEs/queue reserved for internal cmds)\n",
@@ -6292,14 +7166,24 @@ static int rc_volume_create_disk(void)
 			.max_discard_segments    = 1,
 		};
 
-		/* RAID5/6: one stripe per request.  The parity member moves
-		 * from stripe to stripe, so a request that straddled a boundary
-		 * would need several commands from ONE logical range — cap the
-		 * queue at the stripe size and the single-member read path below
-		 * is exact.  (chunk_sectors also bounds discards, which are
-		 * rejected for these levels anyway.) */
-		if (rc_volume_raid_level == RC_LDT_RAID5 ||
-		    rc_volume_raid_level == RC_LDT_RAID6) {
+		/* RAID5/6 reads place one data chunk on one member.  By default
+		 * the queue is split at the chunk, which makes every read exactly
+		 * one member's worth.  With parity writes enabled the write split
+		 * must be the ROW (a whole row is one WRITE per member plus the
+		 * parity write), and one row is rarely a power of two, which
+		 * chunk_sectors requires — so the split is disabled and queue_rq
+		 * fans multi-chunk READS out per member
+		 * (rc_volume_dispatch_multi_stripe with parity_read).  A partial
+		 * row is refused in queue_rq.  If a row cannot fit one request
+		 * the chunk split stays and writes remain off —
+		 * rc_volume_parity_write_ready(). */
+		if (rc_volume_raid_level == RC_LDT_RAID5 &&
+		    rc_volume_parity_write_ready()) {
+			lim.max_hw_sectors = rc_volume_stripe_sectors *
+					     (u32)(rc_volume_member_count - 1);
+			lim.chunk_sectors  = 0;
+		} else if (rc_volume_raid_level == RC_LDT_RAID5 ||
+			   rc_volume_raid_level == RC_LDT_RAID6) {
 			lim.max_hw_sectors = rc_volume_stripe_sectors;
 			lim.chunk_sectors  = rc_volume_stripe_sectors;
 		}
@@ -6350,7 +7234,14 @@ static int rc_volume_create_disk(void)
 	{
 		bool geom_trusted = (rc_volume_geometry_untrust_reason == NULL);
 
-		if (!rc_volume_enable_writes || !geom_trusted)
+		if ((rc_volume_raid_level == RC_LDT_RAID5 ||
+		     rc_volume_raid_level == RC_LDT_RAID6) &&
+		    !rc_volume_parity_write_ready())
+			rc_printk(RC_NOTE,
+				  "rc_volume_create_disk: RAID 5/6 is assembled READ-ONLY: parity writes need enable_writes=1, parity_writes=1 and a full-row-capable geometry (issue #6)\n");
+
+		if (!rc_volume_enable_writes || !geom_trusted ||
+		    !rc_volume_parity_write_ready())
 			set_disk_ro(rc_volume_disk, 1);
 
 		if (!geom_trusted && rc_volume_enable_writes)
@@ -6364,6 +7255,9 @@ static int rc_volume_create_disk(void)
 		else if (!rc_volume_enable_writes)
 			rc_printk(RC_NOTE,
 				  "rc_volume_create_disk: writes disabled (load with enable_writes=1 to allow)\n");
+		else if (!rc_volume_parity_write_ready())
+			rc_printk(RC_WARN,
+				  "rc_volume_create_disk: writes stay READ-ONLY for this level — see the RAID 5/6 note above\n");
 		else
 			rc_printk(RC_NOTE,
 				  "rc_volume_create_disk: writes ENABLED\n");
@@ -6381,7 +7275,8 @@ static int rc_volume_create_disk(void)
 		  (unsigned long long)total_sectors,
 		  (unsigned long long)(total_sectors >> 11),
 		  (rc_volume_enable_writes &&
-		   rc_volume_geometry_untrust_reason == NULL) ?
+		   rc_volume_geometry_untrust_reason == NULL &&
+		   rc_volume_parity_write_ready()) ?
 			"read-write" : "read-only");
 	return 0;
 
@@ -6391,6 +7286,7 @@ err_put_disk:
 err_free_tagset:
 	blk_mq_free_tag_set(&rc_volume_tagset);
 err_free_dma:
+	rc_volume_parity_pool_free();
 	for (i = 0; i < rc_volume_member_count; i++)
 		if (rc_volume_members[i])
 			rc_volume_free_member_dma(i,
@@ -7059,6 +7955,7 @@ void rc_volume_teardown(void)
 	rc_volume_member_count = 0;
 	rc_volume_stripe_sectors = 0;
 	rc_volume_raid10_cols = 0;
+	rc_volume_parity_pool_free();
 	/* Re-open resyncs: this path also runs for a mid-runtime last-member
 	 * removal, and a later re-probe must be able to rebuild. */
 	rc_volume_tearing_down = false;

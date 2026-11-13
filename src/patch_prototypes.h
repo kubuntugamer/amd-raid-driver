@@ -136,6 +136,12 @@ int rc_volume_get_inventory(struct AmdHardwarePayload *out);
 int rc_volume_fail_member_slot(int slot);
 int rc_volume_request_resync(void);
 
+/* Indexed CREATE for /dev/amd_ctl0.  Indices are the disk_index values
+ * rc_volume_get_inventory() publishes; the driver resolves them itself. */
+int rc_volume_create_array_indexed(u32 level, const u32 *indices,
+				   u32 count, u32 size_mb);
+int rc_volume_delete_array(void);
+
 int rc_amd_init_ioctl_bridge(void);
 void rc_amd_exit_ioctl_bridge(void);
 
