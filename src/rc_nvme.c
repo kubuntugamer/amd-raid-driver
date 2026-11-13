@@ -4434,6 +4434,10 @@ static blk_status_t rc_volume_dispatch_raid10(
 	u64 member_start_lba[RC_VOLUME_MAX_MEMBERS] = {0};
 	bool member_has_data[RC_VOLUME_MAX_MEMBERS] = {0};
 	int members_with_data = 0;
+	/* READ copy choice is per logical stripe, not per bvec chunk — see
+	 * the READ branch below for why. */
+	sector_t cur_read_stripe = (sector_t)-1;
+	int cur_read_member = -1;
 	unsigned int live =
 		(unsigned int)atomic_read(&rc_volume_live_mask);
 	unsigned int wmask =
@@ -4487,21 +4491,36 @@ static blk_status_t rc_volume_dispatch_raid10(
 				if (wmask & BIT(c1))
 					targets[ntargets++] = c1;
 			} else {
-				bool l0 = (live & BIT(c0)) != 0;
-				bool l1 = (live & BIT(c1)) != 0;
-				int chosen;
+				/* Pick ONE copy per logical stripe, not per bvec
+				 * chunk.  The walk splits a stripe into several
+				 * chunks (bvec boundaries, sub-page lengths);
+				 * re-rolling the round-robin each time would
+				 * scatter that stripe across BOTH copies of the
+				 * pair.  Each member command then covers a
+				 * contiguous physical run but a non-contiguous
+				 * scatterlist, so every chunk after the first
+				 * lands in the wrong pages — observed in the QEMU
+				 * rig as duplicated pages from the second page
+				 * of each stripe on (D0,D1,D1,D2,D2,…). */
+				if (stripe_idx != cur_read_stripe) {
+					bool l0 = (live & BIT(c0)) != 0;
+					bool l1 = (live & BIT(c1)) != 0;
 
-				if (l0 && l1)
-					chosen = (atomic_inc_return(&rc_volume_rr_next) & 1)
-						 ? c1 : c0;
-				else if (l0)
-					chosen = c0;
-				else if (l1)
-					chosen = c1;
-				else
-					chosen = -1;	/* fatal catches first */
-				if (chosen >= 0)
-					targets[ntargets++] = chosen;
+					cur_read_stripe = stripe_idx;
+					if (l0 && l1)
+						cur_read_member =
+							(atomic_inc_return(&rc_volume_rr_next) & 1)
+							? c1 : c0;
+					else if (l0)
+						cur_read_member = c0;
+					else if (l1)
+						cur_read_member = c1;
+					else
+						/* fatal catches first */
+						cur_read_member = -1;
+				}
+				if (cur_read_member >= 0)
+					targets[ntargets++] = cur_read_member;
 			}
 
 			if (!ntargets) {

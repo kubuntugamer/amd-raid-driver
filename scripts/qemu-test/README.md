@@ -25,7 +25,7 @@ Exit 0 iff the guest prints `RCRAID-TEST-PASS`. On failure the workdir
 | Piece | Job |
 |---|---|
 | `mkmeta.py` | Writes what the driver's parser validates onto blank images: the RC_MetaData block at LBA 0x5000 (magic, version, ported XOR-lane-shuffle checksum) and an RC_LogicalDevice record + element array at the config ring (LBA 0x5800). |
-| `src/stamp_meta_userspace.c` | The same layout stamped by the driver's own encoder (`rc_meta_build.h`): `make stamp-tool` builds `rcstamp`, selected with `--writer encoder`. This is the writer path `rcadm` CREATE will call, so the rig proves the C encoder — not just the Python stand-in — produces an array the driver assembles. |
+| `src/stamp_meta_userspace.c` | The same layout stamped by the driver's own encoder (`rc_meta_build.h`) for RAID 0, 1 and 10 sets: `make stamp-tool` builds `rcstamp`, selected with `--writer encoder`. This is the writer path `rcadm` CREATE will call, so the rig proves the C encoder — not just the Python stand-in — produces an array the driver assembles. |
 | `guest-init.sh` | The VM's `/init` (busybox): insmods rcraid, binds every NVMe-class PCI function to rcbottom via sysfs `new_id`, verifies `/dev/rcraid0` capacity, round-trips data at start/middle/end with dropped caches, then re-checks after a module reload cycle. |
 | `run-qemu-raid-test.sh` | Host driver: builds the module against the running kernel, makes the images, packs the initramfs, boots the **host's own kernel** in QEMU (module always matches), greps the verdict. |
 

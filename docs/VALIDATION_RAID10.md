@@ -31,6 +31,29 @@ the standalone write torture. The rebuild wait auto-sizes from the device
 full output for sign-off. The fatal whole-pair boundary, the rebuild-sourcing
 proof, and steps 5–6 stay manual.
 
+## Read-only smoke test on a RAID 0 array
+
+While the box still carries a firmware RAID 0, `scripts/hw-test-array.sh`
+proves the read-only path end to end without mounting or writing anything:
+
+```
+sudo ./scripts/hw-test-array.sh --dry-run   # preconditions and metadata parse
+sudo ./scripts/hw-test-array.sh             # binds read-only and compares stripes
+```
+
+It takes capacity, chunk size and element order from the committed LD record
+and reads reference chunks from every member **before** unbinding `nvme`. It
+then binds the members to `rcbottom` with writes disabled and checks that
+logical stripe `i` equals member `i`'s bytes at its `UserDataOffset` for two
+stripe rounds, reads the last 4 MiB, and proves a write is refused. A trap
+restores the controllers on every exit path, then re-verifies both checksummed
+metadata blocks with `scripts/qemu-test/verify-checksums.py`.
+
+The script models **RAID 0 only** (one chunk per member per stripe round) and
+refuses a record whose `FirstCount × SecondCount` is not `members × 1`. A
+RAID 10 array interleaves logical stripes across mirror columns, so use
+`validate-raid10.sh` there instead.
+
 ## Preconditions
 
 - [ ] 4 (or any even number of) NVMe members in a **firmware-created RAID 10**.

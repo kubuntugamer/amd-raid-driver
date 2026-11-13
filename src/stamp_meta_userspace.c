@@ -12,6 +12,11 @@
  *
  *   make stamp-tool
  *   ./.metabuild-test/rcstamp --level raid0 member0.img member1.img
+ *   ./.metabuild-test/rcstamp --level raid10 m0.img m1.img m2.img m3.img
+ *
+ * RAID10 is encoded the way firmware and the driver agree on: FirstCount =
+ * columns (members / 2), SecondCount = 2, and members are in column order —
+ * slots 2c and 2c+1 are column c's mirror pair (rc_volume_phys_for_member).
  *
  * Prints the same key=value lines mkmeta.py does, so the QEMU rig can drive
  * either generator with --writer encoder.
@@ -91,7 +96,8 @@ int main(int argc, char **argv)
 	u8 *md = NULL;
 	u32 raw_len, ld_len, gen_len, decoy_len;
 	const char *images[STAMP_MAX_MEMBERS];
-	u32 nr = 0, first, second, i;
+	const char *decoy_level;
+	u32 nr = 0, first, second, decoy_first, decoy_second, i;
 	int argi, ret = 1;
 
 	for (argi = 1; argi < argc; argi++) {
@@ -112,7 +118,8 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (strcmp(level, "raid0") && strcmp(level, "raid1")) {
+	if (strcmp(level, "raid0") && strcmp(level, "raid1") &&
+	    strcmp(level, "raid10")) {
 		fprintf(stderr, "level %s: the driver has no dispatch for it\n",
 			level);
 		return 2;
@@ -123,6 +130,12 @@ int main(int argc, char **argv)
 	}
 	if (!strcmp(level, "raid1") && nr != 2) {
 		fprintf(stderr, "raid1 wants exactly 2 members\n");
+		return 2;
+	}
+	/* A 2-member raid10 record is the (1,2) RAID1 encoding, so 10
+	 * starts at two columns.  Odd counts cannot form whole pairs. */
+	if (!strcmp(level, "raid10") && (nr < 4 || (nr & 1))) {
+		fprintf(stderr, "raid10 wants an even number of members, at least 4\n");
 		return 2;
 	}
 	if (chunk_index > 3) {
@@ -156,9 +169,36 @@ int main(int argc, char **argv)
 		fprintf(stderr, "images too small for a member metadata reserve\n");
 		goto out;
 	}
-	capacity = strcmp(level, "raid1") ? user * nr : user;
-	first = strcmp(level, "raid1") ? nr : 1;
-	second = strcmp(level, "raid1") ? 1 : 2;
+	if (!strcmp(level, "raid0")) {
+		/* Striped across every member: capacity adds up. */
+		first = nr;
+		second = 1;
+		capacity = user * nr;
+		decoy_level = "raid1";
+		decoy_first = 1;
+		decoy_second = 2;
+		decoy_capacity = user;
+	} else if (!strcmp(level, "raid1")) {
+		/* Mirrored: capacity is one member's. */
+		first = 1;
+		second = 2;
+		capacity = user;
+		decoy_level = "raid0";
+		decoy_first = nr;
+		decoy_second = 1;
+		decoy_capacity = user * nr;
+	} else {
+		/* RAID10: FirstCount columns x SecondCount mirror copies.
+		 * Members are positional: 2c and 2c+1 hold column c, so
+		 * capacity is the columns' worth, not every member. */
+		first = nr / 2;
+		second = 2;
+		capacity = user * (nr / 2);
+		decoy_level = "raid0";
+		decoy_first = nr;
+		decoy_second = 1;
+		decoy_capacity = user * nr;
+	}
 
 	/* Active generation: the raw-disk LD first (firmware does), then the
 	 * array LD the driver must assemble. */
@@ -181,10 +221,8 @@ int main(int argc, char **argv)
 	/* Decoy at the ring head: a dead config for the opposite level with
 	 * the same device IDs, so a first-match parser assembles the wrong
 	 * volume.  Not referenced by the commit block. */
-	decoy_capacity = strcmp(level, "raid1") ? user : user * nr;
 	ld_len = rc_mb_ld_record(records, RC_MB_LD_MAX, RC_MB_DEVTYPE_VOLUME,
-				 strcmp(level, "raid1") ? 1 : nr,
-				 strcmp(level, "raid1") ? 2 : 1, nr,
+				 decoy_first, decoy_second, nr,
 				 ids, decoy_capacity, user, chunk_index);
 	if (!ld_len) {
 		fprintf(stderr, "decoy record build failed\n");
@@ -225,8 +263,7 @@ int main(int argc, char **argv)
 
 	printf("level=%s members=%u chunk_sectors=%u user_size=%llu "
 	       "decoy_level=%s\n", level, nr, chunk_sectors,
-	       (unsigned long long)user, strcmp(level, "raid1") ? "raid1"
-							       : "raid0");
+	       (unsigned long long)user, decoy_level);
 	printf("capacity_sectors=%llu\n", (unsigned long long)capacity);
 	printf("userdata_offset_sectors=%u\n", RC_MB_USERDATA_LBA);
 	ret = 0;

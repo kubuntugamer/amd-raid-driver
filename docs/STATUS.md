@@ -101,6 +101,19 @@ generation.
   covers, and the 128-byte `RC_PhysicalDeviceOnDisk` member stamp. Neither
   appears in these dumps. RAID 5/6 create stays blocked on the parity write
   path, and TRANSFORM/SPLIT/COPY remain OCE/ORLM work.
+- **A stamped RAID10 set reached the RAID10 data path, found a read defect,
+  and now passes the full battery.** `rcstamp --level raid10` on four members
+  assembles as RAID10 at the expected capacity (`FirstCount` 2 × `SecondCount`
+  2), and both copies of each pair hold identical data at the expected physical
+  stripes. Its first run failed readback because
+  `rc_volume_dispatch_raid10` re-rolled the read copy per bvec chunk: one
+  logical stripe was split across BOTH copies of its pair, and each member
+  command then read a contiguous physical run into a non-contiguous
+  scatterlist, so pages after the first came back duplicated
+  (`D0, D1, D1, D2, D2, …`). Choosing one copy per logical stripe fixes it; the
+  write/readback, reload, discard and mke2fs battery now passes on the stamped
+  RAID10 set. The QEMU matrix has never included RAID10, which is why the path
+  had no coverage. Still no array-box run.
 
 ## 2026-11-10 — Signing after the fact, from the installed system
 

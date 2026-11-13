@@ -229,10 +229,13 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
       RAID0, RAID1 and degraded RAID1.  The encoder's output is now booted
       end to end: `make stamp-tool`
       writes a complete image set (metadata, commit, generation) from
-      `rc_meta_build.h`, and the QEMU rig assembles it with
-      `--writer encoder` — RAID0 up at the expected capacity, full guest
-      battery.  Still missing: doing that from inside the kernel, choosing
-      the free devices, and the hot gendisk create/teardown.
+      `rc_meta_build.h` for RAID 0, RAID 1 and RAID 10 sets, and the QEMU
+      rig assembles it with `--writer encoder` — RAID0 up at the expected
+      capacity, full guest battery.  A stamped 4-member RAID10 set also
+      assembles at the right level and capacity, and the full guest battery
+      passes on it after fixing the per-chunk read copy roll (see STATUS);
+      still no array-box run.  Still missing: doing that from inside the
+      kernel, choosing the free devices, and the hot gendisk create/teardown.
       The `rcadm`/`/dev/rc_api` side of the same writer — which verbs need
       it and what still blocks them — is inventoried under "Management &
       monitoring plane" → "`rcadm` parity on `/dev/rc_api`".

@@ -60,8 +60,16 @@ fail() {
 }
 
 secure_boot_enforcing() {
+    local sb
+
     command -v mokutil >/dev/null 2>&1 || return 1
-    mokutil --sb-state 2>/dev/null | grep -q "SecureBoot enabled"
+    # Capture instead of piping into grep -q: with pipefail, grep -q
+    # exiting early SIGPIPEs mokutil and the pipeline reports 141.
+    sb=$(mokutil --sb-state 2>/dev/null || true)
+    case "$sb" in
+        *"SecureBoot enabled"*) return 0 ;;
+    esac
+    return 1
 }
 
 # --- preconditions -----------------------------------------------------------
@@ -105,10 +113,12 @@ log "members: ${MEMBER_DEV[*]}"
 
 KO=$REPO_DIR/rcraid.ko
 [ -f "$KO" ] || fail "rcraid.ko missing — run 'make' in $REPO_DIR first"
-if ! modinfo -F vermagic "$KO" 2>/dev/null | grep -q "^$(uname -r) "; then
-    fail "rcraid.ko was not built for $(uname -r)"
-fi
-log "module: $KO ($(modinfo -F vermagic "$KO" 2>/dev/null))"
+KO_VERMAGIC=$(modinfo -F vermagic "$KO" 2>/dev/null || true)
+case "$KO_VERMAGIC" in
+    "$(uname -r) "*) : ;;
+    *) fail "rcraid.ko was not built for $(uname -r)" ;;
+esac
+log "module: $KO ($KO_VERMAGIC)"
 
 SUBSYS=$(cat "/sys/bus/pci/devices/${MEMBER_BDF[0]}/subsystem_vendor" 2>/dev/null)
 log "subsystem vendor: ${SUBSYS:-unknown}"
@@ -173,6 +183,17 @@ for path in paths:
         break
     if vol is None:
         sys.exit(f"ERROR={path}: no volume LD record in the active generation")
+    # This test models RAID 0 only: every logical chunk round-robins
+    # across all members.  A mirror or a parity array maps stripes onto
+    # columns/redundancy instead, so the per-member compare below would
+    # report a false failure.  FirstCount=members, SecondCount=1 is the
+    # RAID 0 encoding (rc_ld_level_from in rc_nvme.c).
+    first_c = u32(gen, vol + 0x6C)
+    second_c = u32(gen, vol + 0x70)
+    if first_c != devices or second_c != 1:
+        sys.exit(f"ERROR={path}: not a RAID 0 record (FirstCount={first_c} "
+                 f"SecondCount={second_c} devices={devices}) — this test "
+                 f"checks whole-member striping only")
     cap = u64(gen, vol + 0x50)
     chunk = CHUNK.get(u32(gen, vol + 0x110), 128)
     elem_off = vol + u32(gen, vol + 0x04)
@@ -256,14 +277,17 @@ restore() {
         return 0
     fi
     log "== restore =="
-    if lsmod | grep -q '^rcraid'; then
+    if [ -d /sys/module/rcraid ]; then
         rmmod rcraid 2>>"$LOG" || log "WARN: rmmod rcraid failed"
     fi
     for bdf in "${MEMBER_BDF[@]}"; do
         if [ -e "/sys/bus/pci/devices/$bdf/driver_override" ]; then
             echo "" > "/sys/bus/pci/devices/$bdf/driver_override" 2>/dev/null
         fi
-        echo "$bdf" > /sys/bus/pci/drivers/rcbottom/unbind 2>/dev/null
+        if [ -d /sys/bus/pci/drivers/rcbottom ] &&
+           [ "$(basename "$(readlink -f "/sys/bus/pci/devices/$bdf/driver")")" = rcbottom ]; then
+            echo "$bdf" > /sys/bus/pci/drivers/rcbottom/unbind 2>>"$LOG"
+        fi
     done
     if ! grep -qs "1022 b000" /sys/bus/pci/drivers/nvme/new_id; then
         echo "1022 b000" > /sys/bus/pci/drivers/nvme/new_id 2>>"$LOG"
@@ -314,7 +338,7 @@ TOUCHED=1
 DMESG_MARK=$(dmesg | wc -l)
 log "== loading rcraid (writes disabled) =="
 insmod "$KO" "safe_subsys_vendor=$SUBSYS" 2>&1 | tee -a "$LOG"
-lsmod | grep -q '^rcraid' || fail "module load refused (see $LOG)"
+[ -d /sys/module/rcraid ] || fail "module load refused (see $LOG)"
 
 for bdf in "${MEMBER_BDF[@]}"; do
     log "  binding $bdf -> rcbottom"
