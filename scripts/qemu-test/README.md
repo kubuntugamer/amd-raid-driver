@@ -15,6 +15,12 @@ sudo install -m 644 /boot/vmlinuz-$(uname -r) ~/vmlinuz
 # Same, but with the images stamped by the driver's own encoder
 # (rc_meta_build.h) instead of mkmeta.py:
 ./scripts/qemu-test/run-qemu-raid-test.sh --kernel ~/vmlinuz --writer encoder
+
+# Exercise the opt-in RAID 5 write path: a complete row, an in-row and
+# boundary read-modify-write, and a write straddling two rows:
+./scripts/qemu-test/run-qemu-raid-test.sh --kernel ~/vmlinuz \
+    --level raid5 --members 4 --parity-writes
+    --level raid5 --members 4 --create-test   # delete → create → reassemble
 ```
 
 Exit 0 iff the guest prints `RCRAID-TEST-PASS`. On failure the workdir
