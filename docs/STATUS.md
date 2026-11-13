@@ -75,6 +75,33 @@ The sections below are the dated implementation log — how each piece was built
 kept for forensics. Where an early "Not started" / "Next steps" note has since
 been implemented, it's marked.
 
+## 2026-11-13 — RAIDCore checksums corroborated on vendor-written members
+
+The checksum algorithm was the top blocker on every `rcadm` mutation verb:
+`RC_GenerateChecksum` had been documented from the vendor blob but never
+round-tripped against a `Checksum` read off a member the firmware wrote, so a
+writer could satisfy this driver and `mkmeta.py` while BIOS rejected the
+generation.
+
+- Both checksummed blocks store `Checksum` at `+0x00` over `[0x08, 0x200)`:
+  `RC_MetaData` at LBA `0x5000` and `RC_ConfigCommit` at `0x5001`. The
+  algorithm in `rc_meta_build.h` / `rc_raidcore_checksum()` reproduces the
+  stored value on **all four** members of the X399 fixture set
+  (`PlaidPiper/x399-raidcore-fixtures`, `sha256sum -c` clean).
+- The check is in the tree rather than a throwaway harness:
+  `scripts/qemu-test/verify-checksums.py <dump>...` prints per-block
+  stored/computed values and exits non-zero on any mismatch; a dump with one
+  byte changed is rejected.
+- Both encoders were writing a generation timestamp where the vendor keeps
+  this commit checksum (`src/rc_meta_build.h`, `mkmeta.py`). They now compute
+  it over `[0x08, 0x200)`. The parser never read that word, so assembly is
+  unchanged, but metadata stamped from this tree now matches the firmware's
+  layout; `make test-metabuild` still diffs the two encoders byte for byte.
+- Still open for a writer: the byte range the 16 KiB config packet's checksum
+  covers, and the 128-byte `RC_PhysicalDeviceOnDisk` member stamp. Neither
+  appears in these dumps. RAID 5/6 create stays blocked on the parity write
+  path, and TRANSFORM/SPLIT/COPY remain OCE/ORLM work.
+
 ## 2026-11-10 — Signing after the fact, from the installed system
 
 - **`install-dkms.sh` now accepts `RCRAID_MOK_ENROLL=1`**, which is the answer

@@ -985,6 +985,14 @@ whose first 8 bytes are the array `Id` (`4e1f33065b470000` =
 | `0x38` | 4 | `CommittedBy` |
 | `0x3C` | 452 | `Reserved[113]` |
 
+`Checksum` at `+0x00` covers `[0x08, 0x200)`, confirmed against all four X399
+fixtures (2026-11-13; see the checksum section below) — the encoders in
+`src/rc_meta_build.h` and `mkmeta.py` compute it. The driver treats `+0x10`
+as the committed generation's timestamp and requires it to equal the
+generation header's `+0x00` word; that equality is the two-phase-commit
+linkage it validates (`RC_GEN_HEADER_TS_OFFSET`), independent of the
+`CommittedChecksum` field name above.
+
 ### On-disk member record: `RC_PhysicalDeviceOnDisk` (128 B, packed)
 
 | Offset | Size | Field |
@@ -1048,10 +1056,20 @@ for i in 0 .. len/8 - 1:
 `len` is consumed as `len / 8` words (a trailing remainder is ignored); the
 word count is 16-bit, so a single call covers at most 512 KiB, which the 0x1F8
 (`RC_MetaData`) and packet-sized (`RC_ConfigCommit`) inputs both fit. Which
-byte range each caller passes over is caller-specific and **not** established
-here. This comes from the blob's `.text` only — it has not been round-tripped
-against a `Checksum` read off a vendor-written member, so treat it as
-unconfirmed until a metadata writer can recompute a known-good value.
+byte range each caller passes over is caller-specific; for the two blocks seen
+on disk it is now established (below).
+
+Corroborated on vendor-written bytes (2026-11-13): `RC_MetaData` (sector
+`0x5000`) and `RC_ConfigCommit` (sector `0x5001`) both keep `Checksum` at
+`+0x00` over `[0x08, 0x200)`, and this algorithm reproduces each stored value
+on all four members of the X399 fixture set
+([`PlaidPiper/x399-raidcore-fixtures`](https://github.com/PlaidPiper/x399-raidcore-fixtures),
+CC0). The commit checksum is therefore no longer an open question. Re-run the
+check with `scripts/qemu-test/verify-checksums.py member*.meta.bin`.
+
+Still unestablished: which range the 16 KiB config packet's own checksum
+covers, and the 128-byte `RC_PhysicalDeviceOnDisk` member stamp — neither
+record appears in these dumps.
 
 ---
 

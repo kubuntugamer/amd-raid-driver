@@ -785,7 +785,10 @@ struct rc_raidcore_md {
  * assembles a DEAD array (that exact bug shipped: a deleted RAID0's record
  * shadowed the live RAID1 and presented a 2x-size striped volume).
  *
- *   +0x00 u64 — commit-block write timestamp (not consumed)
+ *   +0x00 u64 — checksum over [0x08, 0x200): the same XOR-lane-shuffle
+ *               algorithm the metadata block uses (RC_GenerateChecksum).
+ *               Vendor-written commit blocks carry it; this driver does
+ *               not validate it, but a metadata writer must compute it.
  *   +0x08 u32 — active generation start LBA (absolute, inside the ring)
  *   +0x0C u32 — active generation length in BYTES
  *   +0x10 u64 — active generation's timestamp; must equal the u64 at
@@ -793,10 +796,12 @@ struct rc_raidcore_md {
  *               commit linkage the driver validates)
  *   +0x30 u32 — generation sequence number (logged for forensics)
  *
- * The generation header sector carries the same timestamp at +0x00 plus
- * intra-generation table offsets the driver doesn't need (records are
- * located by tag scan within the generation extent). */
-#define RC_COMMIT_TS_OFFSET		0x00u
+ * The generation header sector carries the generation's own timestamp at
+ * +0x00 plus intra-generation table offsets the driver doesn't need
+ * (records are located by tag scan within the generation extent).  That
+ * shared offset is why the two-phase-commit linkage check below reads the
+ * header through RC_GEN_HEADER_TS_OFFSET, not the commit block. */
+#define RC_GEN_HEADER_TS_OFFSET		0x00u
 #define RC_COMMIT_GEN_LBA_OFFSET	0x08u
 #define RC_COMMIT_GEN_LEN_OFFSET	0x0Cu
 #define RC_COMMIT_GEN_TS_OFFSET		0x10u

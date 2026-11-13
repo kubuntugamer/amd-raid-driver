@@ -58,8 +58,10 @@
 #define RC_MB_GEN_HEADER	0x200u
 #define RC_MB_GEN_TS		0x00
 
-/* RC_ConfigCommit field offsets (512-byte block). */
-#define RC_MB_COMMIT_TS		0x00
+/* RC_ConfigCommit field offsets (512-byte block).  Checksum at +0x00
+ * covers [0x08, 0x200), the layout vendor firmware writes (corroborated
+ * on the X399 fixtures — docs/REVERSE_ENGINEERING.md). */
+#define RC_MB_COMMIT_CHECKSUM	0x00
 #define RC_MB_COMMIT_GEN_LBA	0x08
 #define RC_MB_COMMIT_GEN_LEN	0x0C
 #define RC_MB_COMMIT_GEN_TS	0x10
@@ -299,17 +301,21 @@ static inline u32 rc_mb_generation(u8 *out, u32 cap, u64 ts,
  * Config-commit block (512 B): names the byte extent of the active
  * generation and its timestamp.  `seq` is the generation sequence
  * number; the parser does not read it, but firmware orders the journal
- * by it.
+ * by it.  +0x00 is the checksum over the rest of the block, not a stamp
+ * of its own: the vendor's commit blocks carry no separate timestamp
+ * there (X399 fixtures), and firmware validates that word.
  */
 static inline void rc_mb_commit_block(u8 *out, u32 gen_lba, u32 gen_len,
 				      u64 gen_ts, u32 seq)
 {
 	memset(out, 0, RC_MB_SECTOR);
-	rc_mb_put64(out + RC_MB_COMMIT_TS, gen_ts);
 	rc_mb_put32(out + RC_MB_COMMIT_GEN_LBA, gen_lba);
 	rc_mb_put32(out + RC_MB_COMMIT_GEN_LEN, gen_len);
 	rc_mb_put64(out + RC_MB_COMMIT_GEN_TS, gen_ts);
 	rc_mb_put32(out + RC_MB_COMMIT_GEN_SEQ, seq);
+	rc_mb_put64(out + RC_MB_COMMIT_CHECKSUM,
+		    rc_mb_checksum(out + RC_MB_COMMIT_GEN_LBA,
+				   RC_MB_SECTOR - RC_MB_COMMIT_GEN_LBA));
 }
 
 #endif /* _RC_META_BUILD_H_ */

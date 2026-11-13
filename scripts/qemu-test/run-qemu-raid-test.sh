@@ -18,6 +18,7 @@
 #   run-qemu-raid-test.sh [--kernel <vmlinuz>] [--kver <version>]
 #                         [--level raid0|raid1]
 #                         [--members N] [--size-mib M] [--workdir DIR]
+#                         [--writer mkmeta|encoder]
 #
 # The statically linked busybox packed into the initramfs is found
 # automatically; set BUSYBOX=/path/to/busybox to force a specific binary.
@@ -39,6 +40,7 @@ LEVEL=raid0
 MEMBERS=2
 SIZE_MIB=256
 WORKDIR=""
+WRITER=mkmeta
 FAIL_MEMBER=0
 OMIT_MEMBER=0
 
@@ -50,6 +52,11 @@ while [ $# -gt 0 ]; do
         --members)  MEMBERS="$2"; shift 2 ;;
         --size-mib) SIZE_MIB="$2"; shift 2 ;;
         --workdir)  WORKDIR="$2"; shift 2 ;;
+        # Which encoder writes the images: mkmeta.py (Python, default) or
+        # "encoder" for src/stamp_meta_userspace.c, the driver's own C
+        # encoder via rc_meta_build.h.  The latter proves the writer
+        # primitive that rcadm CREATE will be built on actually assembles.
+        --writer)   WRITER="$2"; shift 2 ;;
         --fail-member) FAIL_MEMBER=1; shift ;;
         # Degraded BOOT: write metadata for the full member set but attach
         # all-but-the-last drive to the VM; the guest loads with
@@ -135,7 +142,21 @@ for i in $(seq 0 $((MEMBERS - 1))); do
     IMAGES+=("$img")
 done
 
-MKMETA_OUT="$(python3 "$SCRIPT_DIR/mkmeta.py" --level "$LEVEL" "${IMAGES[@]}")"
+case "$WRITER" in
+    mkmeta)
+        MKMETA_OUT="$(python3 "$SCRIPT_DIR/mkmeta.py" --level "$LEVEL" \
+            "${IMAGES[@]}")" ;;
+    encoder)
+        make -s -C "$REPO_DIR" stamp-tool \
+            STAMP_TOOL_BIN="$WORKDIR/rcstamp" > /dev/null || {
+            echo "failed to build the encoder stamping tool" >&2
+            exit 1
+        }
+        MKMETA_OUT="$("$WORKDIR/rcstamp" --level "$LEVEL" "${IMAGES[@]}")" ;;
+    *)
+        echo "--writer must be mkmeta or encoder" >&2
+        exit 2 ;;
+esac
 echo "$MKMETA_OUT" | sed 's/^/    /'
 EXPECTED_SECTORS="$(echo "$MKMETA_OUT" | awk -F= '/^capacity_sectors=/ {print $2}')"
 [ -n "$EXPECTED_SECTORS" ] || { echo "mkmeta produced no capacity" >&2; exit 1; }

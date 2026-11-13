@@ -225,10 +225,14 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
       RAID0/RAID1 images.  The member block can also be written back
       through the driver's own NVMe queues and flushed
       (`meta_write_probe`, rig-only): the QEMU battery rewrites LBA
-      0x5000, proves the medium changed, and restores the      original on
-      RAID0, RAID1 and degraded RAID1.  Still missing: stamping a full
-      image set (generation + commit) onto members that have none,
-      choosing the free devices, and the hot gendisk create/teardown.
+      0x5000, proves the medium changed, and restores the original on
+      RAID0, RAID1 and degraded RAID1.  The encoder's output is now booted
+      end to end: `make stamp-tool`
+      writes a complete image set (metadata, commit, generation) from
+      `rc_meta_build.h`, and the QEMU rig assembles it with
+      `--writer encoder` — RAID0 up at the expected capacity, full guest
+      battery.  Still missing: doing that from inside the kernel, choosing
+      the free devices, and the hot gendisk create/teardown.
       The `rcadm`/`/dev/rc_api` side of the same writer — which verbs need
       it and what still blocks them — is inventoried under "Management &
       monitoring plane" → "`rcadm` parity on `/dev/rc_api`".
@@ -410,12 +414,15 @@ recorded, not that the command is trivial.
 
 Blockers, in the order they bite:
 
-- **The commit checksum is unconfirmed.** `RC_GenerateChecksum` is documented
-  as an order-dependent XOR with a half-word swap, but it has never been
-  round-tripped against a `Checksum` read off a vendor-written member. A writer
-  built on it can emit metadata this driver and `mkmeta.py` both accept while
-  the firmware rejects it — and no QEMU test can tell the difference, because
-  the rig has no vendor firmware to disagree.
+- **The commit checksum is confirmed (2026-11-13).** Both `RC_MetaData` and
+  `RC_ConfigCommit` store `Checksum` at `+0x00` over `[0x08, 0x200)`, and the
+  algorithm in `rc_meta_build.h` reproduces the stored value on all four
+  members of the X399 fixture set — vendor-written bytes, not inference.
+  Re-run it with `scripts/qemu-test/verify-checksums.py member*.meta.bin`.
+  Still unestablished: the byte range the 16 KiB config packet's checksum
+  covers, and the 128-byte `RC_PhysicalDeviceOnDisk` member stamp. Neither
+  appears in those dumps, so a writer must still get those two right on
+  hardware.
 - **No vendor-written bytes to validate against.** The vendor-created parity
   array was deleted; the array box's live RAID 0 cannot be written without
   unbinding the OS disk. The first real test of any writer is BIOS accepting a

@@ -2596,11 +2596,11 @@ static void rc_volume_parse_logical_device(struct rc_adapter *adapter)
 		/* First chunk carries the generation header: verify the
 		 * two-phase-commit linkage before trusting any record. */
 		if (pos == 0 &&
-		    get_unaligned_le64(buf + RC_COMMIT_TS_OFFSET) != gen_ts) {
+		    get_unaligned_le64(buf + RC_GEN_HEADER_TS_OFFSET) != gen_ts) {
 			rc_printk(RC_WARN,
 				  "rc_volume_parse_logical_device: %s generation header ts 0x%016llx != committed ts 0x%016llx — commit/journal mismatch, refusing to parse\n",
 				  pci_name(adapter->pdev),
-				  (unsigned long long)get_unaligned_le64(buf + RC_COMMIT_TS_OFFSET),
+				  (unsigned long long)get_unaligned_le64(buf + RC_GEN_HEADER_TS_OFFSET),
 				  (unsigned long long)gen_ts);
 			break;
 		}

@@ -180,6 +180,19 @@ METABUILD_TEST_DEPS := $(METABUILD_TEST_SRC) src/rc_meta_build.h \
                        scripts/qemu-test/mkmeta.py \
                        scripts/qemu-test/check-metabuild.py
 
+# Userspace stamping tool: writes a whole image set (metadata + commit +
+# generation) from the driver's own encoder, so the QEMU rig can boot an
+# array the C encoder produced rather than mkmeta.py's Python output.
+STAMP_TOOL_BIN ?= $(CURDIR)/.metabuild-test/rcstamp
+
+stamp-tool: $(STAMP_TOOL_BIN)
+
+$(STAMP_TOOL_BIN): src/stamp_meta_userspace.c src/rc_meta_build.h
+	@mkdir -p $(dir $(STAMP_TOOL_BIN))
+	@echo "Building RAIDCore metadata stamping tool (userspace, no kernel headers)..."
+	$(CC) -O2 -Wall -Wextra -Werror -o $(STAMP_TOOL_BIN) \
+		src/stamp_meta_userspace.c -Isrc
+
 test-metabuild: $(METABUILD_TEST_BIN)
 	@rm -rf $(METABUILD_TEST_OUT)
 	@mkdir -p $(METABUILD_TEST_OUT)
@@ -204,7 +217,8 @@ help:
 	@echo "  test-async-tsan - Same, under ThreadSanitizer"
 	@echo "  test-cfgwrite   - Build and run the RC_CfgWrite decoder harness (userspace)"
 	@echo "  test-metabuild  - Diff the metadata encoder against mkmeta.py (userspace)"
+	@echo "  stamp-tool      - Build the image-set stamping tool (userspace)"
 	@echo "  help            - Show this help"
 
 .PHONY: all clean install help test-async test-async-asan test-async-tsan \
-	test-cfgwrite test-metabuild
+	test-cfgwrite test-metabuild stamp-tool

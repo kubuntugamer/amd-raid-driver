@@ -105,8 +105,10 @@ LE_USERDATA_SIZE = 0x28
 
 ELEM_ARRAY_OFFSET = 0x130  # past every fixed LD field we set (max 0x110+4)
 
-# Commit-block field offsets (rc_linux.h RC_COMMIT_*_OFFSET)
-COMMIT_TS = 0x00
+# Commit-block field offsets (rc_linux.h RC_COMMIT_*_OFFSET).  The word at
+# +0x00 is the checksum over [0x08, 0x200), as vendor firmware writes it —
+# corroborated on the X399 fixtures, not a timestamp of its own.
+COMMIT_CHECKSUM = 0x00
 COMMIT_GEN_LBA = 0x08
 COMMIT_GEN_LEN = 0x0C
 COMMIT_GEN_TS = 0x10
@@ -251,11 +253,12 @@ def build_generation(ts: int, records: bytes) -> bytes:
 
 def build_commit_block(gen_lba: int, gen_bytes: int, gen_ts: int) -> bytes:
     c = bytearray(SECTOR)
-    struct.pack_into("<Q", c, COMMIT_TS, ACTIVE_GEN_TS)  # own stamp; unread
     struct.pack_into("<I", c, COMMIT_GEN_LBA, gen_lba)
     struct.pack_into("<I", c, COMMIT_GEN_LEN, gen_bytes)
     struct.pack_into("<Q", c, COMMIT_GEN_TS, gen_ts)
     struct.pack_into("<I", c, COMMIT_GEN_SEQ, 2)         # decoy was gen 1
+    struct.pack_into("<Q", c, COMMIT_CHECKSUM,
+                     rc_checksum(bytes(c[0x08:0x200])))
     return bytes(c)
 
 
