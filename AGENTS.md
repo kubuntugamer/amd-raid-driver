@@ -94,7 +94,7 @@ The repo's automated review prompt enforces these; write code that passes it:
 | Level | State |
 |---|---|
 | RAID 0 / RAID 1 | Hardware-validated baseline, production-supported |
-| RAID 10 | Feature-complete, **no array-box run yet** (`docs/VALIDATION_RAID10.md` still empty) |
+| RAID 10 | Feature-complete; driver-written 4-disk array created, assembled and read on real hardware 2026-11-13, **but no firmware-created array-box run yet** (`docs/VALIDATION_RAID10.md` still empty) |
 | RAID 5 / RAID 6 | Assemble and read only; **writes and discards refused**, volume forced read-only; layout settled against the vendor core, not yet corroborated on vendor-written data |
 
 - RAID 5 `DeviceType` is `0x1BF5`, RAID 6 is `0x1BFA`. Level comes from the LD

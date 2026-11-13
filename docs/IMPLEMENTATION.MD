@@ -381,8 +381,11 @@ mismatch is real, not masked.
 
 *Status 2026-11-13:* DELETE and CREATE execute. DELETE rewrites each member's
 active generation without the array LD and re-commits it. CREATE stamps
-`RC_MetaData`, a generation and the commit block on every enumerated member and
+`RC_MetaData`, a generation and the commit block on the selected members and
 hot-assembles the volume, so `rcadm` finds the array immediately after the verb.
+The 172-byte CREATE payload names only one device, so the disk list (`-d`)
+comes from the `GET_CREATE_INFO` query that precedes it; that is why a 2-disk
+RAID 0 over four bound disks works.
 The remaining mutation verbs are still decoded field by field and refused.
 
 The cost is dominated by three shared pieces, not by the verbs:
@@ -407,7 +410,7 @@ The cost is dominated by three shared pieces, not by the verbs:
 
 | Verb | Code | Payload | Blocked on |
 |---|---|---|---|
-| CREATE | 2 | 172 B, decoded | implemented for RAID 0; hardware-validated 2026-11-13 (16 GiB default size — full-size create blocked by rcadm's 17180 MB cap) |
+| CREATE | 2 | 172 B, decoded | implemented for RAID 0/1/10 over the disks named with `-d`; hardware-validated 2026-11-13 (RAID 0 ×4 = 16 TB, RAID 0 ×2-of-4 = 8 TB, RAID 1 = 4 TB, RAID 10 ×4 = 8 TB; all assemble `optimal`, read back, and `rcadm` still exits 1 on the missing completion reply — issue #16. The old 16 GiB default came from a misread `GET_CREATE_INFO` reply; max size now reports real free space) |
 | DELETE | 3 | 24 B, decoded | implemented; hardware-validated 2026-11-13 |
 | TRANSFORM | 8 | 140 B, decoded | OCE/ORLM data movement (phases 3–4) |
 | ACCEPT_CONFIG_CHANGES | 15 | — | persistence (two-phase commit) |
@@ -453,10 +456,14 @@ Blockers, in the order they bite:
   LD at `gen+0x480`; this driver and `rcadm` both accept it, `make` is
   warning-clean and `make test-metabuild` still matches `mkmeta.py`. `/dev/rc_api`
   now reports per-disk free space (PD `+0xC8`/`+0xD0`), so the CLI's disk list
-  shows 4.0TB per free disk instead of 0.0MB. Still open: `rcadm -C -ms` caps a
-  new array at 17180 MB regardless of disk count, so a full-size create is not
-  possible yet — the field it derives that from is not one of the free-space
-  words.
+  shows 4.0TB per free disk instead of 0.0MB. `rcadm`'s CREATE default and
+  `-C -ms` come from a separate `GET_CREATE_INFO` window read (read command
+  `0x100D`) whose reply is an `RC_WpGetCreateInfo`; the driver answered it with
+  the config packet, so the CLI read our `PacketSize` (`0x4000` = 16384 MiB) as
+  the maximum and printed 17180 decimal MB. `src/rc_api.c` now answers that
+  read with the struct and computes `SizeInMegabytes` from the selected
+  members' free space (15,259,703 MiB for RAID 0 over four 4 TB members, 0 for
+  disks inside an assembled volume), so the cap is gone.
 - **The encoder now reproduces a firmware block byte for byte (2026-11-13).**
   `rc_mb_metadata_block_ex()` carries the member's own `MBRChecksum` (`+0x38`)
   forward instead of zeroing it; that word is firmware-owned and cannot be

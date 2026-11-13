@@ -57,16 +57,18 @@ kill the original survivor → checksums intact) and `--omit-member`
 degraded-boot scenarios.
 Not yet: **persistent degraded state** (in-memory only — a reload
 re-assembles as if in sync; needs config-ring writer RE), **RAID10 hardware
-validation** (the level is feature-complete; the array-box run in
-[`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) is what's missing), RAID5/6
+validation** (the level is feature-complete; a driver-written 4-disk array was
+created, assembled and read on 2026-11-13, but the firmware-array run in
+[`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) is still missing), RAID5/6
 **write** dispatch (parity volumes assemble and read today, read-only; a
 firmware-created 3-disk RAID 5 was parsed, assembled and read on 2026-11-08
 — `0x1BF5`, volume `optimal`, reads served, forced read-only — but that
 array no longer exists, so it cannot be re-read),
 hot-plug/rebuild, SMART pass-through,
 multi-volume, array creation from Linux
-beyond RAID0/RAID1 (the live installer now stamps real RAIDCore metadata for
-the 0/1 layouts via `scripts/qemu-test/mkmeta.py`; 10/5/6 metadata, and the
+beyond RAID0/RAID1/RAID10 (`rcadm -C` now stamps all three levels; the live
+installer still stamps only 0/1 via `scripts/qemu-test/mkmeta.py`; 10/5/6
+firmware-compatible records, and the
 firmware-compatible records RAIDXpert2/Windows would accept, are still open).
 The prioritized roadmap is in [`IMPLEMENTATION.MD`](IMPLEMENTATION.MD); the
 RE ground truth is in [`REVERSE_ENGINEERING.md`](REVERSE_ENGINEERING.md).

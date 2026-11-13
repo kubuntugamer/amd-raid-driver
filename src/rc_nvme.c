@@ -5879,8 +5879,31 @@ out_unlock:
  * driver does not bind) is still not possible: the shim can only offer what
  * it probed.
  */
+/*
+ * Data columns a CREATE geometry contributes, or 0 when the writer has no
+ * record for it.  Mirrors repeat data, so they add no capacity: RAID 1 is
+ * one column and RAID 10 is FirstCount columns, which is exactly what
+ * rc_ld_level_from() reconstructs from the record when it is read back.
+ * DeviceType 0x1BF7 (single-disk volume) and the parity levels stay
+ * unwritten (0x1BF5/0x1BFA are assemble-and-read-only by policy).
+ */
+static u32 rc_create_data_cols(u32 raid_type, u32 first, u32 second,
+			       u32 count)
+{
+	if (raid_type != RC_MB_DEVTYPE_VOLUME)
+		return 0;
+	if (second == 1u && first >= 2u && first == count)
+		return first;			/* RAID 0 */
+	if (first == 1u && second == 2u && count == 2u)
+		return 1u;			/* RAID 1 */
+	if (first >= 2u && second == 2u && (u64)first * second == count)
+		return first;			/* RAID 10 */
+	return 0;
+}
+
 int rc_volume_create_array(u32 raid_type, u32 first, u32 second,
-			   u32 device_count, u32 size_mb)
+			   u32 device_count, u32 size_mb,
+			   const u64 *device_ids, u32 nr_ids)
 {
 	const u32 chunk_sectors = 512u;	/* chunk_index 3 = 256 KiB */
 	const u32 gen_lba = RC_MB_RING_LBA + 0x92u;
@@ -5888,13 +5911,17 @@ int rc_volume_create_array(u32 raid_type, u32 first, u32 second,
 	struct rc_mb_member_meta metas[RC_VOLUME_MAX_MEMBERS];
 	u64 ids[RC_VOLUME_MAX_MEMBERS], volume_id;
 	u8 *rec, *md, *commit;
-	u64 gen_ts, user_sz = ~0ULL, cap;
-	u32 rec_len, gen_len, i, n = 0;
+	u64 gen_ts, user_sz = ~0ULL, cap, element;
+	u32 rec_len, gen_len, i, j, n = 0, data_cols;
 	int ret = 0;
 
-	if (raid_type != RC_MB_DEVTYPE_VOLUME || second != 1u || first < 2u)
+	data_cols = rc_create_data_cols(raid_type, first, second,
+					device_count);
+	if (!data_cols)
 		return -EOPNOTSUPP;
 	if (!device_count || device_count > RC_VOLUME_MAX_MEMBERS)
+		return -EINVAL;
+	if (nr_ids && (nr_ids != device_count || !device_ids))
 		return -EINVAL;
 
 	rec = kzalloc(PAGE_SIZE, GFP_KERNEL);
@@ -5914,10 +5941,38 @@ int rc_volume_create_array(u32 raid_type, u32 first, u32 second,
 	}
 
 	for (i = 0; i < RC_MAX_ADAPTERS && n < RC_VOLUME_MAX_MEMBERS; i++) {
-		struct rc_adapter *a = rc_state.adapters[i];
+		struct rc_adapter *a = NULL;
 
-		if (!a || !a->ctx.nvme.md_valid || !a->ctx.nvme.ns1_nsze)
-			continue;
+		if (!nr_ids) {
+			/* No selection from the CLI: every usable member. */
+			struct rc_adapter *cand = rc_state.adapters[i];
+
+			if (!cand || !cand->ctx.nvme.md_valid ||
+			    !cand->ctx.nvme.ns1_nsze)
+				continue;
+			a = cand;
+		} else if (i < nr_ids) {
+			for (j = 0; j < RC_MAX_ADAPTERS; j++) {
+				struct rc_adapter *cand = rc_state.adapters[j];
+
+				if (cand && cand->ctx.nvme.md_valid &&
+				    cand->ctx.nvme.ns1_nsze &&
+				    cand->ctx.nvme.md_device_id == device_ids[i]) {
+					a = cand;
+					break;
+				}
+			}
+			if (!a) {
+				rc_printk(RC_ERROR,
+					  "rc_volume_create_array: member %u (DeviceID 0x%016llx) is not bound or has no metadata\n",
+					  i,
+					  (unsigned long long)device_ids[i]);
+				ret = -ENODEV;
+				goto out_unlock;
+			}
+		} else {
+			break;
+		}
 		list[n] = a;
 		ids[n] = a->ctx.nvme.md_device_id;
 		metas[n].device_id = a->ctx.nvme.md_device_id;
@@ -5951,7 +6006,7 @@ int rc_volume_create_array(u32 raid_type, u32 first, u32 second,
 		user_sz = min(user_sz, u);
 	}
 
-	cap = user_sz * n;
+	cap = user_sz * data_cols;
 	cap = cap / chunk_sectors * chunk_sectors;
 	if (size_mb) {
 		u64 want = (u64)size_mb << 11;
@@ -5959,7 +6014,9 @@ int rc_volume_create_array(u32 raid_type, u32 first, u32 second,
 		if (want < cap)
 			cap = want / chunk_sectors * chunk_sectors;
 	}
-	if (!cap) {
+	cap = cap / data_cols * data_cols;
+	element = cap / data_cols;
+	if (!cap || !element) {
 		ret = -EINVAL;
 		goto out_unlock;
 	}
@@ -5969,10 +6026,11 @@ int rc_volume_create_array(u32 raid_type, u32 first, u32 second,
 		gen_ts = 1;
 
 	/*
-	 * Every element covers cap/n sectors, not the member's whole user
-	 * area: the LD's total capacity must equal per-member slice x members
-	 * or the driver marks the geometry untrusted and forces the volume
-	 * read-only.  (The full user_sz is only the ceiling computed above.)
+	 * Every element covers cap/data_cols sectors, not the member's whole
+	 * user area: the LD's total capacity must equal per-member slice x
+	 * data columns (mirrors add none) or rc_volume_register_member() marks
+	 * the geometry untrusted and forces the volume read-only.  (The full
+	 * user_sz is only the ceiling computed above.)
 	 *
 	 * The record set is firmware-shaped: controller PD, one PD per member,
 	 * the array LD, the raw-disk LD, then one ControllerDevice record per
@@ -5981,7 +6039,7 @@ int rc_volume_create_array(u32 raid_type, u32 first, u32 second,
 	 */
 	volume_id = (ids[0] ^ (ids[n > 1 ? 1 : 0] << 1)) | 1ULL;
 	rec_len = rc_mb_records(rec, PAGE_SIZE, metas, n, first, second, cap,
-				cap / n, 3, volume_id);
+				element, 3, volume_id);
 	if (!rec_len || RC_MB_GEN_HEADER + rec_len > PAGE_SIZE) {
 		rc_printk(RC_ERROR,
 			  "rc_volume_create_array: record set does not fit (%u bytes)\n",

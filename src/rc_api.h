@@ -74,9 +74,11 @@ int  rc_api_snapshot_get(struct rc_api_snapshot *out);
 /* Persist a DELETE and tear the volume down (rc_nvme.c). */
 int  rc_volume_delete_array(void);
 
-/* Stamp a new array on every bound member (rc_nvme.c). */
+/* Stamp a new array on the selected members, in the order given (rc_nvme.c).
+ * device_ids == NULL means "every bound member". */
 int  rc_volume_create_array(u32 raid_type, u32 first, u32 second,
-			    u32 device_count, u32 size_mb);
+			    u32 device_count, u32 size_mb,
+			    const u64 *device_ids, u32 nr_ids);
 
 /* /dev/rc_api registration (rc_api.c). */
 int  rc_api_init(void);

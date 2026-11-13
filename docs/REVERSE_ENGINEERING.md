@@ -685,6 +685,111 @@ echoed (`+0x00` command `1`, `+0x04` window LBA, `+0x18` `2`, `+0x1C`
 `1`, `+0x20` `0x1000`; rest zero).  `rcadm --show` therefore does:
 INQUIRY, descriptor read, then per window: write request → read 64 KiB.
 
+### Size query: `RC_CMD_GET_CREATE_INFO` (settled 2026-11-13)
+
+`rcadm -C -ms`, and the size a bare `-C` defaults to, do **not** come from
+the config packet or from the PD free-space words.  `RC_ApiGetCreateInfo`
+(`bcapi.cpp:1362`) builds an `RC_WpGetCreateInfo` and calls
+`RC_Core::RC_ConfigRead(BufPtr, 8192, RC_CMD_GET_CREATE_INFO, 0)`
+(`0x5C610`), which writes an 8 KiB window request and reads 8 KiB back from
+the same window. The reply is parsed as an `RC_WpGetCreateInfo` **at offset
+0**, not as a config packet.
+
+Request (8 KiB, command word `+0x00` = 1):
+
+| Offset | Size | Field |
+|---|---|---|
+| `+0x00` | 4 | command 1 (window prepare) |
+| `+0x04` | 4 | channel |
+| `+0x08` | 8 | `GenerationNumber` |
+| `+0x18` | 8 | major/minor (`2`/`1`) |
+| `+0x20` | 4 | read command `0x100D` |
+| `+0x24` | 172 | `RC_WpGetCreateInfo` (`RaidType +0x00`, `DeviceCount +0x04`, `FirstCount +0x28`, `SecondCount +0x2C`) |
+| `+0xC0` | 16 × n | `DeviceList`: `DeviceID` u64, then handle `0x10000 \| slot` |
+
+Reply: `Flags` `+0x14`, `SizeInMegabytes` `+0x18`, `FirstCount` `+0x28`,
+`SecondCount` `+0x2C`.  Serving the config packet instead made
+`SizeInMegabytes` read our `PacketSize` (`0x4000` = 16384 MiB), which the
+CLI renders as `Maximum Possible Size: 17180 MB` (`×2^20/10^6`, rounded);
+the neighbouring fields decoded just as literally as `PreferDeviceID`
+`0x20000000000` (header `PhysicalDeviceOffset`), `FirstCount` 1280
+(`PhysicalDeviceSize`) and `SecondCount` 1792 (`LogicalDeviceOffset`).
+
+`src/rc_api.c` answers `0x100D` with that struct and computes
+`SizeInMegabytes` from the selected members' free space (RAID 0 sums, 1 and
+10 take the smallest member times the mirror count, 5/6 subtract parity).
+Observed on four 4 TB members: 15,259,703 MiB for RAID 0, 7,629,851 MiB for
+RAID 0 on two disks, 3,814,925 MiB for RAID 1; 0 MiB while the disks belong
+to an assembled volume.
+
+### Feature licensing: `CheckFeature` (settled 2026-11-13)
+
+RAIDXpert2 sells part of its feature set as licensed. `rcadm` enforces that
+itself, from the config packet, **before** it writes any mutation frame:
+
+| Item | Value |
+|---|---|
+| Predicate | `CheckFeature(RC_Config*, u16)` at `0x41BC0`, worker `0x35230` |
+| Short circuit | config's first word zero ⇒ predicate returns 0, "not licensed" |
+| Key material | `RC_LICENSE_KEY_SIZE_IN_BYTES` 16 |
+| Key location | `RC_CFE_LICENSE_KEY_ROM_START` `0x22000`, `RC_WILDCAT_LICENSE_KEY_ROM_START` `0x1c000` |
+| Status codes | `RC_STS_NO_SW_LICENSE`, `RC_IOC_NOLICENSE` `0x00004000`, `RC_MSGID_ARRAY_LICENSE_VIOLATION` |
+
+Gated features named in the binary: CACHING, DISTRIBUTED SPARE, SPANNING,
+RAID1n, RAID10, RAID10n, RAID5, RAID6, RAID50, RAID60, CREATE COPY, SPLIT,
+TRANSFORM and management operations. The controller list prints a `License`
+column (`?BC-UNLICENSED` when absent), and the vendor core gates the same
+levels on `RC_HW_OS_GetLicenseLevel`/`RC_CoreFeatureSet` (core table above).
+
+What the gate actually reads matters for this driver, and was settled on
+hardware (4 x 4 TB, MS-7E59, 2026-11-13):
+
+- **It reads our packet, not the controller ROM.** `src/rc_api.c` emits
+  `ControllerFeature` `0x01FF` and leaves `ControllerInfo` (`+0x14`, 16 B — the
+  licence key) and `MaxArraySize` (`+0x58`) zero, so every gated feature
+  resolves to unlicensed even on a board whose UEFI offers it. A shim that
+  wants to report the real state has to surface the controller's licence
+  level and key there; it must not fabricate one.
+- **Severity varies by verb.** `-r5`/`-r6` are hard stops — no `CREATE` frame
+  reaches the driver (no new `CREATE` line in dmesg, unlike RAID 1/10, which
+  do reach it and return `-EOPNOTSUPP`). `-ca` (caching) prints the same
+  message and still sends its frame.
+- **The delete path is unaffected**: licensing is evaluated on create and
+  transform, so a vendor-written array of any level can still be deleted
+  through the CLI.
+
+#### Platform caveat: X870E + Ryzen 9000
+
+On AM5, RAID 5 is NVMe-only and CPU-gated, which is why a board spec sheet can
+list RAID 5 while the same board's SATA ports cannot do it:
+
+| Platform | NVMe RAID | SATA RAID |
+|---|---|---|
+| X870E + Ryzen 9000 | 0, 1, 5, 10 | 0, 1, 10 |
+| X870E + Ryzen 8000/7000 | 0, 1, 10 | 0, 1, 10 |
+
+MSI's MAG X870E TOMAHAWK MAX WIFI (`MS-7E59`) specification states RAID 5 is
+"only supported by Ryzen 9000 series processors"; Gigabyte's X870E manuals say
+the same. AMD's X870 driver download page still says RAID 5 is "supported on
+3rd Gen AMD Ryzen Threadripper Processors", contradicting its own release
+notes, which list X870E among supported chipsets — the UEFI RAIDXpert2 screen
+is the practical ground truth, and only a Ryzen 9000 part unlocks it.
+`rcadm` 9.3.3 on this platform exposes `-v`, `-ra`, `-r0`, `-r1`, `-r10` and
+`-r5`, and no `-r6` verb, although the RAID6 licensing string is present.
+
+The platform side is confirmed on this board: a **3-disk RAID 5 array was
+created from the UEFI RAIDXpert2 utility and served normally** before this
+work. Its metadata was later overwritten when the OS was installed onto a
+RAID 0 array, so no vendor-written RAID 5 generation remains on these disks
+for the parser to be tested against; parity write support is tracked in
+upstream issue #68. Until such an array is recreated in the UEFI utility, a
+`not licensed` answer from `rcadm` says nothing about the platform.
+
+None of that unlocks a 5/6 create in this driver: `rc_volume_create_array()`
+accepts only DeviceType `0x1BF6` with `SecondCount == 1` (RAID 0), and RAID 5/6
+remain assemble-and-read-only. A vendor-created RAID 5 array from the UEFI
+utility is the supported way to exercise that path.
+
 ### INQUIRY: bare string, no EVPD page header
 
 EVPD page `0xD7` (`12 01 D7 00 14 00`) is answered with the 20 bytes
@@ -792,15 +897,28 @@ packet built from the live member registry plus the verbatim
 `RC_LogicalDevice` record parsed off disk.  Emitted sections: header,
 `PD` (controller/version record + one per member), `LD` (byte copy, so
 the Id and element table are the firmware's).  `CTRL` carries one `0x25BE` record per member (real BDF from the member's `pci_dev`); `SEP` stays empty because firmware itself sends `SEPSize = 0`.
-Only mailbox command 1 (window prepare) is accepted on write.  Mutation
-frames (`CREATE` 2, `DELETE` 3, `TRANSFORM` 8) are decoded by
-`src/rc_cfgwrite.h` — the layout below, field for field — and then
-refused with `CHECK CONDITION`/ILLEGAL REQUEST, because this driver
-never writes firmware metadata: a success reply for a change it cannot
-persist would leave rcadm believing in a volume that does not exist on
-disk.  The refusal log names the level, geometry, member count, size and
-first member, so a failing verb is diagnosable without re-running it
-under a capture shim.
+Mailbox command 1 is accepted on write: the window prepare, and the
+`GET_CREATE_INFO` read command (`0x100D`), answered with an
+`RC_WpGetCreateInfo`.  Mutation frames (`CREATE` 2, `DELETE` 3,
+`TRANSFORM` 8) are decoded by `src/rc_cfgwrite.h`, field for field.  DELETE
+and CREATE execute against the selected members (`rc_volume_delete_array()`,
+`rc_volume_create_array()`); the CREATE disk list comes from the preceding
+`GET_CREATE_INFO` because the 172-byte payload names only one device. TRANSFORM is refused with
+`CHECK CONDITION`/ILLEGAL REQUEST because it has no writer, and a success
+reply for a change that is not on disk would leave rcadm believing in a
+volume the next reboot exposes.  The log names the level, geometry, member
+count, size and first member, so a failing verb is diagnosable without
+re-running it under a capture shim.  CREATE persists and assembles correctly
+but still leaves rcadm printing its own generic error; the mutation
+completion reply is the open gap (issue #16).
+
+*Hardware matrix 2026-11-13 (4× 4 TB NVMe, X870E):* RAID 0 over 4 disks
+(31,251,871,744 sectors, 16 TB), RAID 0 over 2 of the 4 (15,625,934,848
+sectors, 8 TB), RAID 1 over 2 (7,812,966,400 sectors, 4 TB) and RAID 10 over
+4 (15,625,934,848 sectors, 8 TB) all assemble at the requested size, report
+`optimal`, serve reads and delete cleanly; no member reports an untrusted
+geometry. RAID 0/1/10 share the `0x1BF6` volume DeviceType with `(N,1)`,
+`(1,2)` and `(N,2)`.
 
 ### PhysicalDevice record fields read by `RC_C_PhysicalDevice`
 

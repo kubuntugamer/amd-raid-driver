@@ -17,8 +17,9 @@
  * Mutation frames (CREATE/DELETE/TRANSFORM) are decoded into named fields so
  * the log says exactly what was asked for.  DELETE is then handed to
  * rc_volume_delete_array(), which persists the change on every member before
- * the reply is sent; CREATE and TRANSFORM are refused with CHECK CONDITION
- * because their writers are still missing.
+ * the reply is sent; CREATE is handed to rc_volume_create_array() for RAID
+ * 0/1/10 over the members named by the preceding GET_CREATE_INFO, and
+ * TRANSFORM is refused with CHECK CONDITION because its writer is missing.
  *
  * Original work, independently authored from clean-room reverse
  * engineering of the AMD-RAID Windows driver binaries under DMCA
@@ -100,6 +101,35 @@
 #define RC_API_MAILBOX_CMD_CONFIG 1u
 
 /*
+ * GET_CREATE_INFO: the read rcadm uses to ask how large an array it may
+ * build.  It is not a config-packet field and not the PD free-space words:
+ * rcadm writes an 8 KiB window request whose read command word (+0x20) is
+ * 0x100D and parses the 8 KiB reply as an RC_WpGetCreateInfo at offset 0.
+ * Answering that read with the config packet made it take PacketSize (0x4000)
+ * for SizeInMegabytes, which is exactly the "Maximum Possible Size: 17180 MB"
+ * the CLI printed: 16384 MiB rendered in decimal MB.
+ */
+#define RC_API_CR_READCMD	0x20u
+#define RC_API_CR_GET_CREATE_INFO 0x100du
+#define RC_API_CR_REQ_BASE	0x24u	/* RC_WpGetCreateInfo in the request */
+#define RC_API_CR_RAID_TYPE	(RC_API_CR_REQ_BASE + 0x00u)
+#define RC_API_CR_DEVICE_COUNT	(RC_API_CR_REQ_BASE + 0x04u)
+#define RC_API_CR_FIRST_COUNT	(RC_API_CR_REQ_BASE + 0x28u)
+#define RC_API_CR_SECOND_COUNT	(RC_API_CR_REQ_BASE + 0x2cu)
+#define RC_API_CR_DEVICE_LIST	(RC_API_CR_REQ_BASE + 0x9cu)
+#define RC_API_CR_DEVICE_BYTES	16u
+#define RC_API_CR_HEAD_BYTES	0x180u	/* request bytes worth parsing */
+#define RC_API_CR_REPLY_BYTES	0x2000u	/* ByteCount rcadm reads back */
+
+/* Reply: RC_WpGetCreateInfo at offset 0, as rcadm parses it. */
+#define RC_API_CI_RAID_TYPE	0x00u
+#define RC_API_CI_DEVICE_COUNT	0x04u
+#define RC_API_CI_FLAGS		0x14u
+#define RC_API_CI_SIZE_MB	0x18u
+#define RC_API_CI_FIRST_COUNT	0x28u
+#define RC_API_CI_SECOND_COUNT	0x2cu
+
+/*
  * Largest mutation frame we decode.  The captures were 1536 bytes (the
  * 1 KiB RC_CfgWrite request plus a 512-byte tail); the header is all
  * that matters for command 1, which is handled before this limit.
@@ -132,9 +162,26 @@
 
 struct rc_api_session {
 	u32 next_window;
+	u32 cr_pending;		/* GET_CREATE_INFO reply owed to the next read */
+	u32 cr_type;
+	u32 cr_count;
+	u32 cr_first;
+	u32 cr_second;
+	u32 cr_selected;	/* bitmap of snapshot member slots */
+	u64 cr_size_mb;
 };
 
 static bool rc_api_registered;
+
+/*
+ * The 172-byte CREATE payload names only one device, and rcadm performs the
+ * GET_CREATE_INFO query and the mutation on different opens of the device
+ * (observed 2026-11-13), so file->private_data cannot carry the selection
+ * across.  Keep the last query's member set at module scope and use it only
+ * when the CREATE frame's DeviceCount agrees with it.
+ */
+static u32 rc_api_create_mask;
+static u32 rc_api_create_count;
 
 static void rc_api_put_le32(u8 *p, u32 v)
 {
@@ -154,6 +201,18 @@ static void rc_api_put_le64(u8 *p, u64 v)
 {
 	rc_api_put_le32(p, (u32)v);
 	rc_api_put_le32(p + 4, (u32)(v >> 32));
+}
+
+static u32 rc_api_get_le32(const u8 *p)
+{
+	return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) |
+	       ((u32)p[3] << 24);
+}
+
+static u64 rc_api_get_le64(const u8 *p)
+{
+	return (u64)rc_api_get_le32(p) |
+	       ((u64)rc_api_get_le32(p + 4) << 32);
 }
 
 /*
@@ -176,6 +235,67 @@ static void rc_api_version_string(u8 *dst, u32 len)
 	}
 	if (dots == 3 && last < len)
 		dst[last] = '-';
+}
+
+/*
+ * Largest array rcadm can build from the selected members, in MiB (it sizes
+ * a CREATE in MiB, so sectors are shifted by 11 at the end).  A disk inside
+ * the assembled volume offers nothing; a free disk offers its user area.
+ * Geometry decides RAID 0 from RAID 1/10 inside DeviceType 0x1BF6, the same
+ * way CREATE does.
+ */
+static u64 rc_api_max_create_mb(const struct rc_api_snapshot *s, u32 type,
+				u32 first, u32 second, u32 mask)
+{
+	u64 sum = 0, smallest = 0;
+	u32 n = 0, i;
+
+	for (i = 0; i < s->nr_members; i++) {
+		u64 free = s->member[i].free_sectors;
+
+		if (mask && !(mask & (1u << i)))
+			continue;
+		n++;
+		sum += free;
+		if (!smallest || free < smallest)
+			smallest = free;
+	}
+
+	if (!n || !smallest)
+		return 0;
+
+	if (type == RC_API_REQ_TYPE_VOLUME)
+		return smallest >> 11;
+	if (type == RC_LDT_RAID5)
+		return n > 1 ? (smallest * (n - 1)) >> 11 : 0;
+	if (type == RC_LDT_RAID6)
+		return n > 2 ? (smallest * (n - 2)) >> 11 : 0;
+	if (type == RC_LDT_RAID0) {
+		if (first == 1 && second == 2)
+			return smallest >> 11;		/* RAID 1 */
+		if (second <= 1)
+			return sum >> 11;		/* RAID 0 */
+		if (n / second)
+			return (smallest * (n / second)) >> 11;	/* RAID 10 */
+	}
+	/* RAIDable (0x1BFB) and the levels this driver does not create yet
+	 * are still sized by their smallest member, so rcadm asks for a real
+	 * number instead of failing with "insufficient free space (0MB)". */
+	return smallest >> 11;
+}
+
+/* The reply rcadm parses as RC_WpGetCreateInfo: SizeInMegabytes (+0x18)
+ * and Flags (+0x14) are what it prints or defaults from; the rest is echoed
+ * so a caller inspecting the reply sees what it asked for. */
+static void rc_api_build_create_info(u8 *pkt, const struct rc_api_session *s)
+{
+	memset(pkt, 0, RC_API_CR_REPLY_BYTES);
+	rc_api_put_le32(pkt + RC_API_CI_RAID_TYPE, s->cr_type);
+	rc_api_put_le32(pkt + RC_API_CI_DEVICE_COUNT, s->cr_count);
+	rc_api_put_le32(pkt + RC_API_CI_FLAGS, 1);
+	rc_api_put_le64(pkt + RC_API_CI_SIZE_MB, s->cr_size_mb);
+	rc_api_put_le32(pkt + RC_API_CI_FIRST_COUNT, s->cr_first);
+	rc_api_put_le32(pkt + RC_API_CI_SECOND_COUNT, s->cr_second);
 }
 
 /*
@@ -365,6 +485,26 @@ static long rc_api_read(struct file *file, struct sg_io_hdr *hdr,
 	if (want > hdr->dxfer_len)
 		want = hdr->dxfer_len;
 
+	{
+		struct rc_api_session *sess = file ? file->private_data : NULL;
+
+		/* The 8 KiB read back after a GET_CREATE_INFO request is the
+		 * reply struct, not the config packet. */
+		if (sess && sess->cr_pending && lba &&
+		    want <= RC_API_CR_REPLY_BYTES) {
+			rc_api_build_create_info(pkt, sess);
+			sess->cr_pending = 0;
+			n = min_t(u32, want, RC_API_CR_REPLY_BYTES);
+			rc_printk(RC_NOTE,
+				  "/dev/rc_api: GET_CREATE_INFO reply: %llu MiB available (%u bytes)\n",
+				  (unsigned long long)sess->cr_size_mb, n);
+			if (copy_to_user(hdr->dxferp, pkt, n))
+				return -EFAULT;
+			hdr->resid = (int)(hdr->dxfer_len - n);
+			return 0;
+		}
+	}
+
 	if (lba == 0 && want <= RC_API_DESCRIPTOR_BYTES) {
 		struct rc_api_session *sess = file ? file->private_data : NULL;
 		u32 win = sess ? sess->next_window : RC_API_WINDOW_FIRST;
@@ -434,13 +574,13 @@ static bool rc_api_req_geometry_ok(u32 type, u32 count, u32 first,
 	return false;
 }
 
-static void rc_api_log_create(const struct rc_cfgwrite *r)
+static void rc_api_log_create(const struct rc_cfgwrite *r, u32 selected)
 {
 	const struct rc_cfgwrite_create *c = &r->u.create;
 	u64 bytes = (u64)c->size_mb << 20;
 
 	rc_printk(RC_WARN,
-		  "/dev/rc_api: config-write CREATE (gen %llu, sync %u, %u B payload): %s type 0x%04x, %u device(s) %u x %u%s, %u spare, %u MiB (%llu B), cache flags 0x%08x tag %u, first device %16phN — stamping every member\n",
+		  "/dev/rc_api: config-write CREATE (gen %llu, sync %u, %u B payload): %s type 0x%04x, %u device(s) %u x %u%s, %u spare, %u MiB (%llu B), cache flags 0x%08x tag %u, first device %16phN — %u of %u member(s) selected\n",
 		  (unsigned long long)r->hdr.generation,
 		  r->hdr.sync_command, r->payload_bytes,
 		  rc_api_req_level(c->raid_type, c->first_count,
@@ -451,7 +591,8 @@ static void rc_api_log_create(const struct rc_cfgwrite *r)
 					 c->first_count, c->second_count) ?
 		  "" : " (INCONSISTENT)",
 		  c->spare_count, c->size_mb, (unsigned long long)bytes,
-		  c->cache_flags, c->cache_tag_size, c->device_id[0]);
+		  c->cache_flags, c->cache_tag_size, c->device_id[0],
+		  selected, c->device_count);
 }
 
 static void rc_api_log_delete(const struct rc_cfgwrite *r)
@@ -497,10 +638,13 @@ static void rc_api_log_transform(const struct rc_cfgwrite *r)
  * need free-member enumeration and the two-phase commit, and a success reply
  * for a change that is not on disk would be a lie the next reboot exposes.
  */
-static long rc_api_config_write(struct sg_io_hdr *hdr, u64 lba, u32 bytes)
+static long rc_api_config_write(struct sg_io_hdr *hdr, u64 lba, u32 bytes,
+				const struct rc_api_snapshot *snap)
 {
 	struct rc_cfgwrite req;
+	u64 ids[RC_API_PD_MAX];
 	u8 *frame;
+	u32 nr, i, sel;
 	int rc;
 
 	if (bytes > RC_API_WRITE_MAX) {
@@ -537,15 +681,30 @@ static long rc_api_config_write(struct sg_io_hdr *hdr, u64 lba, u32 bytes)
 
 	switch (req.hdr.command) {
 	case RC_CW_CREATE:
-		rc_api_log_create(&req);
+		/*
+		 * The 172-byte CREATE payload names only one device, so the disk
+		 * list rcadm was given on the command line is taken from the
+		 * GET_CREATE_INFO query that precedes it.  The writer stamps
+		 * exactly the selected members, in that order — no more, no
+		 * fewer — so a 2-disk RAID 0 over four bound disks works.
+		 */
+		nr = 0;
+		sel = READ_ONCE(rc_api_create_mask);
+		if (sel && READ_ONCE(rc_api_create_count) ==
+		    req.u.create.device_count)
+			for (i = 0; i < snap->nr_members && nr < RC_API_PD_MAX;
+			     i++)
+				if (sel & (1u << i))
+					ids[nr++] = snap->member[i].device_id;
+		rc_api_log_create(&req, nr);
 		rc = rc_volume_create_array(req.u.create.raid_type,
 					    req.u.create.first_count,
 					    req.u.create.second_count,
 					    req.u.create.device_count,
-					    req.u.create.size_mb);
+					    req.u.create.size_mb, ids, nr);
 		if (!rc) {
 			rc_printk(RC_NOTE,
-				  "/dev/rc_api: CREATE stamped on every member; volume appears on the next assembly\n");
+				  "/dev/rc_api: CREATE stamped on the selected member(s); volume appears on the next assembly\n");
 			kfree(frame);
 			return 0;
 		}
@@ -576,7 +735,65 @@ static long rc_api_config_write(struct sg_io_hdr *hdr, u64 lba, u32 bytes)
 	return rc_api_reject(hdr, RC_API_ASC_INVALID_OPCODE);
 }
 
-static long rc_api_write(struct sg_io_hdr *hdr, const u8 *cdb)
+static long rc_api_get_create_info(struct file *file, struct sg_io_hdr *hdr,
+				   u32 bytes,
+				   const struct rc_api_snapshot *snap)
+{
+	struct rc_api_session *sess = file ? file->private_data : NULL;
+	u8 head[RC_API_CR_HEAD_BYTES];
+	u32 n = min_t(u32, bytes, sizeof(head));
+	u32 type, count, first, second, mask = 0, matched = 0, i, j;
+
+	if (!sess)
+		return rc_api_reject(hdr, RC_API_ASC_INVALID_FIELD);
+	if (copy_from_user(head, hdr->dxferp, n))
+		return -EFAULT;
+	if (n < RC_API_CR_DEVICE_LIST)
+		return rc_api_reject(hdr, RC_API_ASC_INVALID_FIELD);
+
+	type = rc_api_get_le32(head + RC_API_CR_RAID_TYPE);
+	count = rc_api_get_le32(head + RC_API_CR_DEVICE_COUNT);
+	first = rc_api_get_le32(head + RC_API_CR_FIRST_COUNT);
+	second = rc_api_get_le32(head + RC_API_CR_SECOND_COUNT);
+
+	/* Match the request's device identifiers to snapshot slots, by
+	 * DeviceID first and handle (0x10000 | slot) second. */
+	for (i = 0; i < count && i < RC_API_PD_MAX; i++) {
+		const u8 *id = head + RC_API_CR_DEVICE_LIST +
+			       i * RC_API_CR_DEVICE_BYTES;
+		u64 device_id = rc_api_get_le64(id);
+		u32 handle = rc_api_get_le32(id + 8);
+
+		for (j = 0; j < snap->nr_members; j++)
+			if ((device_id &&
+			     device_id == snap->member[j].device_id) ||
+			    handle == 0x10000u + j)
+				mask |= 1u << j;
+	}
+	for (j = 0; j < snap->nr_members; j++)
+		if (mask & (1u << j))
+			matched++;
+
+	WRITE_ONCE(rc_api_create_mask, mask);
+	WRITE_ONCE(rc_api_create_count, count);
+	sess->cr_pending = 1;
+	sess->cr_type = type;
+	sess->cr_count = count;
+	sess->cr_first = first;
+	sess->cr_second = second;
+	sess->cr_selected = mask;
+	sess->cr_size_mb = rc_api_max_create_mb(snap, type, first, second,
+						mask);
+	rc_printk(RC_NOTE,
+		  "/dev/rc_api: GET_CREATE_INFO type 0x%04x, %u disk(s) %u x %u: %u matched member(s), %llu MiB available\n",
+		  type, count, first, second, matched,
+		  (unsigned long long)sess->cr_size_mb);
+	hdr->resid = (int)(hdr->dxfer_len - n);
+	return 0;
+}
+
+static long rc_api_write(struct file *file, struct sg_io_hdr *hdr,
+			 const u8 *cdb, const struct rc_api_snapshot *snap)
 {
 	u64 lba = ((u64)cdb[2] << 24) | ((u64)cdb[3] << 16) |
 		  ((u64)cdb[4] << 8) | (u64)cdb[5];
@@ -602,7 +819,19 @@ static long rc_api_write(struct sg_io_hdr *hdr, const u8 *cdb)
 		if (want < RC_CW_HDR_BYTES)
 			return rc_api_reject(hdr,
 					     RC_API_ASC_INVALID_FIELD);
-		return rc_api_config_write(hdr, lba, want);
+		return rc_api_config_write(hdr, lba, want, snap);
+	}
+
+	/* Command word 1 covers the window prepare and the create-info query;
+	 * the read command at +0x20 tells them apart. */
+	if (command == RC_API_MAILBOX_CMD_CONFIG &&
+	    want >= RC_API_CR_READCMD + 4) {
+		u32 readcmd = 0;
+
+		if (!get_user(readcmd, (u32 __user *)hdr->dxferp +
+			      RC_API_CR_READCMD / 4) &&
+		    readcmd == RC_API_CR_GET_CREATE_INFO)
+			return rc_api_get_create_info(file, hdr, want, snap);
 	}
 
 	if (get_user(window, (u32 __user *)hdr->dxferp + 1))
@@ -677,7 +906,7 @@ static long rc_api_ioctl(struct file *file, unsigned int cmd,
 		ret = rc_api_read(file, &hdr, cdb, snap, pkt);
 		break;
 	case RC_API_OP_WRITE_10:
-		ret = rc_api_write(&hdr, cdb);
+		ret = rc_api_write(file, &hdr, cdb, snap);
 		break;
 	default:
 		ret = rc_api_reject(&hdr, RC_API_ASC_INVALID_OPCODE);
