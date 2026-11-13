@@ -35,10 +35,10 @@ both levels, with FirstCount x SecondCount = stripe width x mirror count
 (RAID0: n x 1, RAID1: 1 x 2).  The driver derives the level from the
 counts.
 
-This does NOT reproduce every record AMD firmware writes (no
-PhysicalDevice/Controller records), so images made with this tool are
-for driver testing only — don't expect RAIDXpert or the Windows driver
-to accept them.
+The record set matches the order firmware writes — PhysicalDevice
+records, the array LD, the raw-disk LD, then ControllerDevice records —
+but the values inside those records are this tool's synthetic ones, so
+images made here are for driver testing, not a firmware-created array.
 
 Targets may be regular image files or real block devices (/dev/nvmeXn1);
 the latter lets the same metadata drive a bare-metal driver test.  Writing
@@ -84,6 +84,42 @@ DEVTYPE_VOLUME = 0x1BF6
 DEVTYPE_SINGLE = 0x1BF9
 LEVELS = ("raid0", "raid1", "raid5", "raid10")
 
+# RC_PhysicalDeviceOnDisk (tag 0x25BC) — 0x80 bytes.
+PD_TAG = 0x25BC
+PD_BYTES = 0x80
+PD_DEVICE_ID = 0x04
+PD_CHANNEL = 0x0C
+PD_PORT = 0x0E
+PD_CAPACITY = 0x1C
+PD_DEVICE_TYPE = 0x24
+PD_STATE = 0x2C
+PD_TYPE_CONTROLLER = 0x1201
+PD_TYPE_DISK = 0x1200
+PD_STATE_ONLINE = 0x3000
+PD_CONTROLLER_ID = 0x0000102285900000
+
+# RC_ControllerDevice (tag 0x25BE) — 0x88 bytes.
+CTRL_TAG = 0x25BE
+CTRL_BYTES = 0x88
+CTRL_ID = 0x04
+CTRL_HANDLE = 0x0C
+CTRL_NAME = 0x24
+CTRL_FEATURE = 0x34
+CTRL_PORTS = 0x68
+CTRL_VID = 0x6C
+CTRL_DID = 0x6E
+CTRL_NUMBER = 0x70
+CTRL_SUBVID = 0x74
+CTRL_SUBDID = 0x76
+CTRL_REGION_ID = 0x78
+CTRL_ORIGVID = 0x80
+CTRL_ORIGDID = 0x82
+CTRL_PCILOC = 0x84
+CTRL_FEATURE_VALUE = 0x01FF
+SUB_VENDOR = 0x1987
+SUB_DEVICE = 0x5012
+PCILOC_BASE = 0x0300
+
 # RC_LogicalDevice field offsets (rc_linux.h RC_LD_*_OFFSET)
 LD_ELEMENTOFFSET = 0x04
 LD_DEVICETYPE = 0x0C
@@ -94,6 +130,12 @@ LD_SECONDCOUNT = 0x70
 LD_PACKETSIZE = 0x90
 LD_CHUNKSIZE = 0xAC
 LD_CHUNKINDEX = 0x110
+LD_STATE = 0x08
+LD_ID = 0x2C
+LD_PARENTCOUNT = 0x74
+LD_CACHE = 0x80
+LD_STATE_NORMAL = 0x200
+LD_CACHE_RW = 0xC0000000
 
 # RC_LogicalElement_LE (64 bytes each)
 LE_BYTES = 64
@@ -125,9 +167,12 @@ GEN_HEADER_BYTES = 0x200        # records start 0x200 into a generation
 DECOY_GEN_SECTOR = 0            # ring head — where a naive scan looks first
 ACTIVE_GEN_SECTOR = 16
 
-# First user-data sector on each member: past the metadata block (0x5000)
-# and the config ring (0x5800 + CONFIG_RING_SIZE = 0x6000).
-USERDATA_START = 0x6000
+# Firmware's reservation ahead of user data: AllocOffset = 0x100000
+# sectors (512 MiB, 1 MiB-aligned) and UserDataOffset = 0x105000
+# (546 MiB) on the vendor's own LD elements.  Member images must be
+# larger than this.
+ALLOC_START = 0x100000
+USERDATA_START = 0x105000
 
 # chunk_index encoding per rcraid.sys FUN_1400121d0 (see
 # rc_volume_chunk_sectors_for in rc_nvme.c): only 2 and 3 are explicit,
@@ -214,7 +259,8 @@ def build_raw_disk_ld(device_id: int, disk_sectors: int) -> bytes:
 
 
 def build_ld_record(level: str, device_ids, capacity: int,
-                    user_size: int, chunk_index: int) -> bytes:
+                    user_size: int, chunk_index: int,
+                    volume_id: int = 0) -> bytes:
     n = len(device_ids)
     first, second = counts_for(level, n)
     size = ELEM_ARRAY_OFFSET + n * LE_BYTES
@@ -231,14 +277,74 @@ def build_ld_record(level: str, device_ids, capacity: int,
     # Real RAID1 records carry a chunk_index too (observed =3 on hardware)
     # even though mirrors don't stripe; the driver must ignore it for RAID1.
     struct.pack_into("<I", ld, LD_CHUNKINDEX, chunk_index)
+    # Fields rcadm renders: Id, State, ParentCount, cache flags.
+    struct.pack_into("<Q", ld, LD_ID, volume_id)
+    struct.pack_into("<I", ld, LD_STATE, LD_STATE_NORMAL)
+    struct.pack_into("<I", ld, LD_PARENTCOUNT, 1)
+    struct.pack_into("<I", ld, LD_CACHE, LD_CACHE_RW)
     for pos, did in enumerate(device_ids):
         e = ELEM_ARRAY_OFFSET + pos * LE_BYTES
         struct.pack_into("<Q", ld, e + LE_DEVICEID, did)
-        struct.pack_into("<Q", ld, e + LE_ALLOC_OFFSET, USERDATA_START)
+        struct.pack_into("<Q", ld, e + LE_ALLOC_OFFSET, ALLOC_START)
         struct.pack_into("<Q", ld, e + LE_ALLOC_SIZE, user_size)
         struct.pack_into("<Q", ld, e + LE_USERDATA_OFFSET, USERDATA_START)
         struct.pack_into("<Q", ld, e + LE_USERDATA_SIZE, user_size)
     return bytes(ld)
+
+
+def build_pd_record(device_id: int, ptype: int, channel: int, port: int,
+                    capacity: int) -> bytes:
+    pd = bytearray(PD_BYTES)
+    struct.pack_into("<I", pd, 0x00, PD_TAG)
+    struct.pack_into("<Q", pd, PD_DEVICE_ID, device_id)
+    struct.pack_into("<H", pd, PD_CHANNEL, channel)
+    struct.pack_into("<H", pd, PD_PORT, port)
+    struct.pack_into("<Q", pd, PD_CAPACITY, capacity)
+    struct.pack_into("<I", pd, PD_DEVICE_TYPE, ptype)
+    struct.pack_into("<I", pd, PD_STATE, PD_STATE_ONLINE)
+    return bytes(pd)
+
+
+def build_ctrl_record(index: int, sub_vid: int = SUB_VENDOR,
+                      sub_dev: int = SUB_DEVICE, pci_loc: int = None) -> bytes:
+    if pci_loc is None:
+        pci_loc = PCILOC_BASE + index
+    cid = (0x1022 << 32) | (0xB000 << 16) | index
+    c = bytearray(CTRL_BYTES)
+    struct.pack_into("<I", c, 0x00, CTRL_TAG)
+    struct.pack_into("<Q", c, CTRL_ID, cid)
+    struct.pack_into("<I", c, CTRL_HANDLE, 0x10000 | index)
+    c[CTRL_NAME:CTRL_NAME + 5] = b"NVMe\x00"
+    struct.pack_into("<H", c, CTRL_FEATURE, CTRL_FEATURE_VALUE)
+    struct.pack_into("<I", c, CTRL_PORTS, 1)
+    struct.pack_into("<H", c, CTRL_VID, 0x1022)
+    struct.pack_into("<H", c, CTRL_DID, 0xB000)
+    struct.pack_into("<I", c, CTRL_NUMBER, index)
+    struct.pack_into("<H", c, CTRL_SUBVID, sub_vid)
+    struct.pack_into("<H", c, CTRL_SUBDID, sub_dev)
+    struct.pack_into("<Q", c, CTRL_REGION_ID, cid)
+    struct.pack_into("<H", c, CTRL_ORIGVID, 0x1022)
+    struct.pack_into("<H", c, CTRL_ORIGDID, 0xB000)
+    struct.pack_into("<I", c, CTRL_PCILOC, pci_loc)
+    return bytes(c)
+
+
+def build_records(level: str, device_ids, capacity: int, user_size: int,
+                  chunk_index: int, disk_sectors: int) -> bytes:
+    """Controller PD, one PD per member, the array LD, the raw-disk LD for
+    member 0, then one ControllerDevice record per member — the order
+    firmware writes (mirrors rc_mb_records in src/rc_meta_build.h)."""
+    volume_id = (device_ids[0] ^ (device_ids[1] << 1)) | 1
+    out = build_pd_record(PD_CONTROLLER_ID, PD_TYPE_CONTROLLER,
+                          0xFFFF, 0, 0)
+    for did in device_ids:
+        out += build_pd_record(did, PD_TYPE_DISK, 1, 1, disk_sectors)
+    out += build_ld_record(level, device_ids, capacity, user_size,
+                           chunk_index, volume_id)
+    out += build_raw_disk_ld(device_ids[0], disk_sectors)
+    for i in range(len(device_ids)):
+        out += build_ctrl_record(i)
+    return out
 
 
 def build_generation(ts: int, records: bytes) -> bytes:
@@ -315,10 +421,9 @@ def main():
     # raw-disk records as volumes matches it before the array LD and
     # assembles a bogus 1-member volume (wrong capacity and level → the
     # guest checks fail).
-    raw_ld = build_raw_disk_ld(device_ids[0], min_sectors)
-    active_ld = build_ld_record(args.level, device_ids, capacity,
-                                user_size, args.chunk_index)
-    active_gen = build_generation(ACTIVE_GEN_TS, raw_ld + active_ld)
+    active_records = build_records(args.level, device_ids, capacity,
+                                   user_size, args.chunk_index, min_sectors)
+    active_gen = build_generation(ACTIVE_GEN_TS, active_records)
 
     # Decoy generation: a dead config for the OPPOSITE level with the same
     # DeviceIDs and a capacity that can't match the active one.  Sits at

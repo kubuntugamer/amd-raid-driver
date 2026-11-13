@@ -826,8 +826,17 @@ struct rc_raidcore_md {
 #define RC_LD_CHUNKINDEX_OFFSET		0x110u	/* u32 — RAID0 stripe index, see
 						 * rc_volume_chunk_sectors_for() */
 #define RC_LD_ELEMENTOFFSET_OFFSET	0x04u	/* u32 — bytes from LD start to element array */
+#define RC_LD_STATE_OFFSET		0x08u	/* u32 — RC_LOGICAL_STATE_* */
 #define RC_LD_DEVICETYPE_OFFSET		0x0Cu	/* u32 — RC_LDT_* */
+#define RC_LD_ID_OFFSET			0x2Cu	/* u64 — array DeviceID (rcadm's "Id") */
 #define RC_LD_CAPACITY_OFFSET		0x50u	/* u64 — total volume sectors */
+#define RC_LD_PARENTCOUNT_OFFSET	0x74u	/* u32 — 1 for a single array */
+#define RC_LD_CACHE_OFFSET		0x80u	/* u32 — cache attribute flags */
+
+/* Values of the LD State field.  Firmware writes RC_LOGICAL_STATE_NORMAL
+ * (0x200) for a healthy array; the CLI's state enum starts at 0x200, so a
+ * zeroed field is not a valid state and renders as UNKNOWN. */
+#define RC_LOGICAL_STATE_NORMAL		0x200u
 #define RC_LD_PACKETSIZE_OFFSET		0x90u	/* u32 — LD record size including element array */
 
 /* On-disk RC_LogicalElement_LE — 64 bytes, one per member of a logical

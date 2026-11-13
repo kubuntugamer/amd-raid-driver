@@ -66,7 +66,7 @@ battery, so a regression in the write path cannot pass CI silently.
 --level raid0|raid1     metadata RAID level (raid1 assembles once the
                         driver grows RAID1 dispatch — that's the point)
 --members N             member count (default 2)
---size-mib M            per-member image size (default 256)
+--size-mib M            per-member image size (default 1024)
 --workdir DIR           keep artifacts somewhere specific
 ```
 

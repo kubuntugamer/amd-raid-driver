@@ -29,7 +29,10 @@ typedef uint64_t u64;
 #include "rc_meta_build.h"
 
 /* Must match the constants in check-metabuild.py. */
-#define TEST_DISK_SECTORS	0x100000ull	/* 512 MiB members */
+#define TEST_DISK_SECTORS	0x200000ull	/* 1 GiB members */
+#define TEST_SUB_VENDOR		0x1987u
+#define TEST_SUB_DEVICE		0x5012u
+#define TEST_PCILOC_BASE	0x0300u
 #define TEST_GEN_TS		0x5243544553540A11ull
 #define TEST_GEN_SEQ		2u
 #define TEST_CHUNK_INDEX	3u		/* 256 KiB stripes */
@@ -59,14 +62,21 @@ static int write_file(const char *dir, const char *name, const void *buf,
 static int emit_array(const char *dir, const char *tag, u32 members,
 		      u32 first, u32 second)
 {
-	u64 ids[16];
+	struct rc_mb_member_meta metas[16];
+	u64 ids[16], volume_id;
 	u64 user, capacity;
 	u8 *records, *gen, *commit, *md;
-	u32 raw_len, ld_len, gen_len, i;
+	u32 rec_len, gen_len, i;
 	int ret = 0;
 
-	for (i = 0; i < members; i++)
+	for (i = 0; i < members; i++) {
 		ids[i] = TEST_ID_BASE + i;
+		metas[i].device_id = ids[i];
+		metas[i].disk_sectors = TEST_DISK_SECTORS;
+		metas[i].sub_vid = TEST_SUB_VENDOR;
+		metas[i].sub_dev = TEST_SUB_DEVICE;
+		metas[i].pci_loc = TEST_PCILOC_BASE + i;
+	}
 
 	user = rc_mb_user_sectors(TEST_DISK_SECTORS, TEST_CHUNK_SECTORS);
 	capacity = (first == 1 && second == 2) ? user : user * members;
@@ -75,7 +85,7 @@ static int emit_array(const char *dir, const char *tag, u32 members,
 		return -1;
 	}
 
-	records = calloc(1, 2 * RC_MB_LD_MAX);
+	records = calloc(1, 4096);
 	gen = calloc(1, RC_MB_SECTOR * 64);
 	commit = calloc(1, RC_MB_SECTOR);
 	md = calloc(1, RC_MB_SECTOR);
@@ -84,19 +94,17 @@ static int emit_array(const char *dir, const char *tag, u32 members,
 		goto out;
 	}
 
-	raw_len = rc_mb_raw_ld_record(records, RC_MB_LD_MAX, ids[0],
-				      TEST_DISK_SECTORS);
-	ld_len = rc_mb_ld_record(records + raw_len, RC_MB_LD_MAX,
-				 RC_MB_DEVTYPE_VOLUME, first, second, members,
-				 ids, capacity, user, TEST_CHUNK_INDEX);
-	if (!raw_len || !ld_len) {
+	volume_id = (ids[0] ^ (ids[1] << 1)) | 1ULL;
+	rec_len = rc_mb_records(records, 4096, metas, members, first, second,
+				capacity, user, TEST_CHUNK_INDEX, volume_id);
+	if (!rec_len) {
 		fprintf(stderr, "record build failed\n");
 		ret = -1;
 		goto out;
 	}
 
 	gen_len = rc_mb_generation(gen, RC_MB_SECTOR * 64, TEST_GEN_TS,
-				   records, raw_len + ld_len);
+				   records, rec_len);
 	if (!gen_len) {
 		fprintf(stderr, "generation build failed\n");
 		ret = -1;

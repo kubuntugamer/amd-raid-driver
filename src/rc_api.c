@@ -12,14 +12,13 @@
  * sees the array the driver sees rather than a second copy of firmware
  * state.
  *
- * Read-only by construction: this file never writes metadata.  rcadm's
- * only observed accepted write is the 8 KiB mailbox descriptor that
- * precedes a window read (command word 1).  Mutation frames
- * (CREATE/DELETE/TRANSFORM) are decoded into named fields so the log
- * says exactly what was asked for, then refused with CHECK CONDITION:
- * this driver has no metadata writer, and reporting success for a
- * change it cannot persist would leave rcadm believing in a volume that
- * does not exist on disk.
+ * This file itself writes no metadata: rcadm's only accepted write here is
+ * the 8 KiB mailbox descriptor that precedes a window read (command word 1).
+ * Mutation frames (CREATE/DELETE/TRANSFORM) are decoded into named fields so
+ * the log says exactly what was asked for.  DELETE is then handed to
+ * rc_volume_delete_array(), which persists the change on every member before
+ * the reply is sent; CREATE and TRANSFORM are refused with CHECK CONDITION
+ * because their writers are still missing.
  *
  * Original work, independently authored from clean-room reverse
  * engineering of the AMD-RAID Windows driver binaries under DMCA
@@ -70,6 +69,10 @@
 #define RC_API_PD_FIRMWARE	0x80
 #define RC_API_PD_MODEL		0x88
 #define RC_API_PD_SERIAL	0xB0
+/* Free-space words the CLI sizes a CREATE from (sectors).  Both were
+ * zero, which is why `rcadm -C` proposed 16384 MiB on 16 TB of disks. */
+#define RC_API_PD_LARGEST_FREE	0xC8
+#define RC_API_PD_TOTAL_FREE	0xD0
 
 /* ControllerDevice record (tag 0x25BE, 0x88 bytes) field offsets. */
 #define RC_API_CTRL_ID		0x04	/* RC_DeviceIdentifier_LE */
@@ -231,6 +234,8 @@ static void rc_api_build_packet(u8 *pkt, const struct rc_api_snapshot *s)
 		rc_api_put_le32(pd + RC_API_PD_DEVICE_NUMBER, 0x10000u + i);
 		rc_api_put_le32(pd + RC_API_PD_DEVICES, 0);
 		rc_api_put_le64(pd + RC_API_PD_CAPACITY, m->capacity_sectors);
+		rc_api_put_le64(pd + RC_API_PD_LARGEST_FREE, m->free_sectors);
+		rc_api_put_le64(pd + RC_API_PD_TOTAL_FREE, m->free_sectors);
 		rc_api_put_le32(pd + RC_API_PD_DEVICE_TYPE, RC_API_PD_TYPE_DISK);
 		rc_api_put_le32(pd + RC_API_PD_STATE,
 				m->online ? RC_API_PD_STATE_ONLINE : 0);
@@ -435,7 +440,7 @@ static void rc_api_log_create(const struct rc_cfgwrite *r)
 	u64 bytes = (u64)c->size_mb << 20;
 
 	rc_printk(RC_WARN,
-		  "/dev/rc_api: config-write CREATE refused (gen %llu, sync %u, %u B payload): %s type 0x%04x, %u device(s) %u x %u%s, %u spare, %u MiB (%llu B), cache flags 0x%08x tag %u, first device %16phN — no metadata writer, nothing persisted\n",
+		  "/dev/rc_api: config-write CREATE (gen %llu, sync %u, %u B payload): %s type 0x%04x, %u device(s) %u x %u%s, %u spare, %u MiB (%llu B), cache flags 0x%08x tag %u, first device %16phN — stamping every member\n",
 		  (unsigned long long)r->hdr.generation,
 		  r->hdr.sync_command, r->payload_bytes,
 		  rc_api_req_level(c->raid_type, c->first_count,
@@ -454,7 +459,7 @@ static void rc_api_log_delete(const struct rc_cfgwrite *r)
 	const struct rc_cfgwrite_delete *d = &r->u.delete;
 
 	rc_printk(RC_WARN,
-		  "/dev/rc_api: config-write DELETE refused (gen %llu, sync %u, %u B payload): all %u, %u device(s), first %16phN — no metadata writer, nothing persisted\n",
+		  "/dev/rc_api: config-write DELETE (gen %llu, sync %u, %u B payload): all %u, %u device(s), first %16phN — executing against every member\n",
 		  (unsigned long long)r->hdr.generation,
 		  r->hdr.sync_command, r->payload_bytes, d->all,
 		  d->device_count, d->device_id[0]);
@@ -486,10 +491,11 @@ static void rc_api_log_transform(const struct rc_cfgwrite *r)
  * field by field, so an rcadm verb that still fails names its level,
  * geometry, size and member instead of a bare "command refused".
  *
- * Execution is deliberately absent.  Persisting a change means writing a
- * new config generation plus the commit block, and this driver has no
- * metadata writer (docs/IMPLEMENTATION.MD, "Array creation from Linux").
- * A success reply here would be a lie the next reboot would expose.
+ * DELETE executes: rc_volume_delete_array() rewrites every member's active
+ * generation without the array LD and re-commits it before success is
+ * reported.  CREATE and TRANSFORM are still refused after decoding: they
+ * need free-member enumeration and the two-phase commit, and a success reply
+ * for a change that is not on disk would be a lie the next reboot exposes.
  */
 static long rc_api_config_write(struct sg_io_hdr *hdr, u64 lba, u32 bytes)
 {
@@ -532,9 +538,32 @@ static long rc_api_config_write(struct sg_io_hdr *hdr, u64 lba, u32 bytes)
 	switch (req.hdr.command) {
 	case RC_CW_CREATE:
 		rc_api_log_create(&req);
+		rc = rc_volume_create_array(req.u.create.raid_type,
+					    req.u.create.first_count,
+					    req.u.create.second_count,
+					    req.u.create.device_count,
+					    req.u.create.size_mb);
+		if (!rc) {
+			rc_printk(RC_NOTE,
+				  "/dev/rc_api: CREATE stamped on every member; volume appears on the next assembly\n");
+			kfree(frame);
+			return 0;
+		}
+		rc_printk(RC_ERROR,
+			  "/dev/rc_api: CREATE failed (%d)\n", rc);
 		break;
 	case RC_CW_DELETE:
 		rc_api_log_delete(&req);
+		rc = rc_volume_delete_array();
+		if (!rc) {
+			rc_printk(RC_NOTE,
+				  "/dev/rc_api: DELETE persisted on every member; volume torn down\n");
+			kfree(frame);
+			return 0;
+		}
+		rc_printk(RC_ERROR,
+			  "/dev/rc_api: DELETE failed (%d) — the array on disk is unchanged\n",
+			  rc);
 		break;
 	case RC_CW_TRANSFORM:
 		rc_api_log_transform(&req);

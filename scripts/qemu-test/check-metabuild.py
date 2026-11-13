@@ -18,7 +18,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Must match the constants in src/test_metabuild_userspace.c.
-DISK_SECTORS = 0x100000
+DISK_SECTORS = 0x200000
 GEN_TS = 0x5243544553540A11
 GEN_SEQ = 2
 CHUNK_INDEX = 3
@@ -47,9 +47,9 @@ def expect(mk, tag, members, first, second):
     capacity = user if second == 2 and first == 1 else user * members
     level = "raid0" if first != 1 else "raid1"
 
-    raw = mk.build_raw_disk_ld(ids[0], DISK_SECTORS)
-    ld = mk.build_ld_record(level, ids, capacity, user, CHUNK_INDEX)
-    gen = mk.build_generation(GEN_TS, raw + ld)
+    records = mk.build_records(level, ids, capacity, user, CHUNK_INDEX,
+                               DISK_SECTORS)
+    gen = mk.build_generation(GEN_TS, records)
     commit = mk.build_commit_block(mk.CONFIG_RING_LBA + 16, len(gen), GEN_TS)
 
     out = {}

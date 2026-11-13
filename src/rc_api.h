@@ -42,6 +42,7 @@
 struct rc_api_member {
 	u64 device_id;		/* RC_MetaData.DeviceId — matches LD elements */
 	u64 capacity_sectors;	/* namespace NSZE (vendor writes the same) */
+	u64 free_sectors;	/* usable sectors, 0 while in an array */
 	u32 ld_position;	/* index in the LogicalDevice element array */
 	u8  online;		/* member state is LIVE */
 	u8  _pad[3];
@@ -69,6 +70,13 @@ struct rc_api_snapshot {
 
 /* Copy the assembled-volume state out under rc_volume_lock (rc_nvme.c). */
 int  rc_api_snapshot_get(struct rc_api_snapshot *out);
+
+/* Persist a DELETE and tear the volume down (rc_nvme.c). */
+int  rc_volume_delete_array(void);
+
+/* Stamp a new array on every bound member (rc_nvme.c). */
+int  rc_volume_create_array(u32 raid_type, u32 first, u32 second,
+			    u32 device_count, u32 size_mb);
 
 /* /dev/rc_api registration (rc_api.c). */
 int  rc_api_init(void);

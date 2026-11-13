@@ -2166,7 +2166,9 @@ static void rc_nvme_meta_write_probe(struct rc_adapter *adapter,
 	built = page;
 	junk = page + RC_MB_SECTOR;
 
-	rc_mb_metadata_block(built, adapter->ctx.nvme.md_device_id);
+	rc_mb_metadata_block_ex(built, adapter->ctx.nvme.md_device_id,
+				adapter->ctx.nvme.md_mbr_checksum);
+
 	if (memcmp(built, on_disk, RC_MB_SECTOR)) {
 		rc_printk(RC_ERROR,
 			  "rc_meta_write_probe: %s refusing to write: encoder output does not match the block on media\n",
@@ -2219,7 +2221,10 @@ static void rc_nvme_verify_meta_encoding(struct rc_adapter *adapter,
 	u8 built[RC_MB_SECTOR];
 	u32 i, first = 0;
 
-	rc_mb_metadata_block(built, adapter->ctx.nvme.md_device_id);
+	/* MBRChecksum is firmware-owned and lives outside this block; carry
+	 * the value the media has so the re-encode is byte-exact. */
+	rc_mb_metadata_block_ex(built, adapter->ctx.nvme.md_device_id,
+				adapter->ctx.nvme.md_mbr_checksum);
 
 	/* Search the payload (everything but the checksum word) so a bad
 	 * field is named directly; the checksum is reported separately,
@@ -5619,6 +5624,439 @@ static void rc_volume_free_member_dma(int slot, struct device *dev)
 /* Allocate the gendisk + tagset, set up sizes, expose /dev/rcraid0.
  * Tolerates NULL (absent) slots for degraded RAID1 assembly — every
  * per-member computation runs over the PRESENT members. */
+/*
+ * Persist a DELETE: rewrite every member's active config generation without
+ * the array's LogicalDevice record, then re-commit it.  The ring slot and
+ * generation length are reused, and the commit block is rewritten only after
+ * the generation body is on media, so a torn write leaves the old commit
+ * timestamp pointing at a generation whose header no longer matches it — the
+ * parser rejects that generation instead of assembling half a deleted array.
+ *
+ * Every member carries its own copy of the generation; leaving one behind
+ * would let the next assembly re-form the array from it, so all members must
+ * be rewritten before the volume is torn down.  Returns 0 only when each
+ * member's rewrite was written, flushed and read back.
+ */
+int rc_volume_delete_array(void)
+{
+	int i, ret = 0, rewritten = 0;
+	u32 members;
+
+	mutex_lock(&rc_volume_lock);
+	if (!rc_volume_disk) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+	members = (u32)rc_volume_member_count;
+
+	for (i = 0; i < rc_volume_member_count; i++) {
+		struct rc_adapter *a = rc_volume_members[i];
+		struct rc_nvme_state *nvme;
+		struct device *dev;
+		u8 *gen, *commit, *probe;
+		dma_addr_t gen_dma, commit_dma, probe_dma;
+		u64 gen_lba, gen_ts, new_ts;
+		u32 gen_bytes, seq, off, pkt;
+		bool removed = false;
+		int rc;
+
+		if (!a)
+			continue;
+		nvme = &a->ctx.nvme;
+		dev = &a->pdev->dev;
+		if (!nvme->md_valid || !nvme->md_config_commit_lba)
+			continue;
+
+		gen = dma_alloc_coherent(dev, PAGE_SIZE, &gen_dma, GFP_KERNEL);
+		commit = dma_alloc_coherent(dev, PAGE_SIZE, &commit_dma,
+					    GFP_KERNEL);
+		probe = dma_alloc_coherent(dev, PAGE_SIZE, &probe_dma,
+					   GFP_KERNEL);
+		if (!gen || !commit || !probe) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_delete_array: %s cannot allocate DMA buffers\n",
+				  pci_name(a->pdev));
+			ret = -ENOMEM;
+			goto free_bufs;
+		}
+
+		rc = rc_volume_read_commit(a, commit, commit_dma, &gen_lba,
+					   &gen_bytes, &gen_ts);
+		if (rc) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_delete_array: %s cannot read the active commit (%d)\n",
+				  pci_name(a->pdev), rc);
+			ret = rc;
+			goto free_bufs;
+		}
+		if (gen_bytes > PAGE_SIZE) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_delete_array: %s generation of %u bytes exceeds one page — refusing\n",
+				  pci_name(a->pdev), gen_bytes);
+			ret = -EOPNOTSUPP;
+			goto free_bufs;
+		}
+		seq = get_unaligned_le32(commit + RC_COMMIT_GEN_SEQ_OFFSET);
+
+		rc = rc_nvme_read_lba(a, gen_lba, (u16)(gen_bytes / 512u - 1),
+				      gen_dma);
+		if (rc) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_delete_array: %s read generation @0x%llx failed (%d)\n",
+				  pci_name(a->pdev),
+				  (unsigned long long)gen_lba, rc);
+			ret = rc;
+			goto free_bufs;
+		}
+		if (get_unaligned_le64(gen + RC_GEN_HEADER_TS_OFFSET) != gen_ts) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_delete_array: %s generation header ts does not match the commit — refusing to edit\n",
+				  pci_name(a->pdev));
+			ret = -EBADMSG;
+			goto free_bufs;
+		}
+
+		/* Walk records in firmware order: PD (0x80), LD (PacketSize at
+		 * +0x90), CTRL (0x88).  Drop the volume LD for this member set. */
+		for (off = RC_MB_GEN_HEADER;
+		     off + RC_MB_LD_ELEM_ARRAY <= gen_bytes; ) {
+			u32 tag = get_unaligned_le32(gen + off);
+
+			if (!tag)
+				break;
+			if (tag == RC_MB_TAG_LOGICAL_DEVICE) {
+				pkt = get_unaligned_le32(gen + off +
+							RC_MB_LD_PACKET_SIZE);
+				if (pkt < RC_MB_LD_ELEM_ARRAY ||
+				    off + pkt > gen_bytes)
+					break;
+				if (get_unaligned_le32(gen + off +
+							RC_MB_LD_DEVICE_TYPE) ==
+						RC_MB_DEVTYPE_VOLUME &&
+				    get_unaligned_le32(gen + off +
+							RC_MB_LD_DEVICES) == members) {
+					memmove(gen + off, gen + off + pkt,
+						gen_bytes - off - pkt);
+					memset(gen + gen_bytes - pkt, 0, pkt);
+					removed = true;
+					break;
+				}
+				off += pkt;
+				continue;
+			}
+			if (tag == RC_DST_PHYSICAL_DEVICE) {
+				off += RC_MB_PD_BYTES;
+				continue;
+			}
+			if (tag == RC_DST_CONTROLLER_DEVICE) {
+				off += RC_MB_CTRL_BYTES;
+				continue;
+			}
+			break;
+		}
+		if (!removed) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_delete_array: %s generation has no %u-member volume LD to remove — refusing\n",
+				  pci_name(a->pdev), members);
+			ret = -ENOENT;
+			goto free_bufs;
+		}
+
+		new_ts = gen_ts + 1;
+		rc_mb_put64(gen + RC_MB_GEN_TS, new_ts);
+		rc = rc_nvme_write_lba(a, gen_lba,
+				      (u16)(gen_bytes / 512u - 1), gen_dma);
+		if (!rc)
+			rc = rc_nvme_flush(a);
+		if (rc) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_delete_array: %s generation write/flush failed (%d) — commit untouched\n",
+				  pci_name(a->pdev), rc);
+			ret = rc;
+			goto free_bufs;
+		}
+
+		rc_mb_commit_block(commit, (u32)gen_lba, gen_bytes, new_ts,
+				   seq + 1);
+		rc = rc_nvme_write_lba(a, nvme->md_config_commit_lba, 0,
+				      commit_dma);
+		if (!rc)
+			rc = rc_nvme_flush(a);
+		if (rc) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_delete_array: %s commit write/flush failed (%d)\n",
+				  pci_name(a->pdev), rc);
+			ret = rc;
+			goto free_bufs;
+		}
+
+		/* Read both back: the delete is only accepted when the commit
+		 * names the new timestamp.  Logged either way. */
+		rc = rc_nvme_read_lba(a, nvme->md_config_commit_lba, 0,
+				     probe_dma);
+		if (!rc && get_unaligned_le64(probe +
+				RC_COMMIT_GEN_TS_OFFSET) != new_ts) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_delete_array: %s commit readback ts 0x%016llx != 0x%016llx\n",
+				  pci_name(a->pdev),
+				  (unsigned long long)get_unaligned_le64(
+					probe + RC_COMMIT_GEN_TS_OFFSET),
+				  (unsigned long long)new_ts);
+			rc = -EIO;
+		}
+		if (!rc)
+			rc = rc_nvme_read_lba(a, gen_lba, 0, probe_dma);
+		if (!rc && get_unaligned_le64(probe) != new_ts) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_delete_array: %s generation readback ts 0x%016llx != 0x%016llx\n",
+				  pci_name(a->pdev),
+				  (unsigned long long)get_unaligned_le64(probe),
+				  (unsigned long long)new_ts);
+			rc = -EIO;
+		}
+		if (rc) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_delete_array: %s readback did not confirm the new generation (%d)\n",
+				  pci_name(a->pdev), rc);
+			ret = rc;
+			goto free_bufs;
+		}
+
+		rewritten++;
+		rc_printk(RC_NOTE,
+			  "rc_volume_delete_array: %s array LD removed, generation @0x%llx re-committed ts=0x%016llx seq=%u\n",
+			  pci_name(a->pdev),
+			  (unsigned long long)gen_lba,
+			  (unsigned long long)new_ts, seq + 1);
+free_bufs:
+		if (gen)
+			dma_free_coherent(dev, PAGE_SIZE, gen, gen_dma);
+		if (commit)
+			dma_free_coherent(dev, PAGE_SIZE, commit, commit_dma);
+		if (probe)
+			dma_free_coherent(dev, PAGE_SIZE, probe, probe_dma);
+		if (ret)
+			break;
+	}
+
+	if (!ret && !rewritten)
+		ret = -ENOENT;
+
+	if (!ret) {
+		for (i = 0; i < rc_volume_member_count; i++) {
+			struct rc_nvme_state *nvme;
+
+			if (!rc_volume_members[i])
+				continue;
+			nvme = &rc_volume_members[i]->ctx.nvme;
+			nvme->ld_valid = false;
+			nvme->ld_record_seen = false;
+			nvme->ld_raw_len = 0;
+			nvme->ld_my_position = -1;
+		}
+		rc_printk(RC_NOTE,
+			  "rc_volume_delete_array: array deleted on %d member(s), tearing the volume down\n",
+			  rewritten);
+	}
+
+out_unlock:
+	mutex_unlock(&rc_volume_lock);
+	if (!ret)
+		rc_volume_teardown();
+	return ret;
+}
+
+/*
+ * Persist a CREATE: stamp every bound member with a fresh RC_MetaData block,
+ * a config generation holding one array LogicalDevice record, and a
+ * RC_ConfigCommit that names it, then flush.  This is the on-disk half only —
+ * the volume appears when the driver next assembles (module reload or next
+ * boot), which is also the proof that the written generation is readable.
+ *
+ * Members are the bound adapters with valid metadata, in PCI order; rcadm's
+ * request names a count and a level, and the four members of this box are
+ * exactly what it is given.  Free-member enumeration beyond that (disks the
+ * driver does not bind) is still not possible: the shim can only offer what
+ * it probed.
+ */
+int rc_volume_create_array(u32 raid_type, u32 first, u32 second,
+			   u32 device_count, u32 size_mb)
+{
+	const u32 chunk_sectors = 512u;	/* chunk_index 3 = 256 KiB */
+	const u32 gen_lba = RC_MB_RING_LBA + 0x92u;
+	struct rc_adapter *list[RC_VOLUME_MAX_MEMBERS];
+	struct rc_mb_member_meta metas[RC_VOLUME_MAX_MEMBERS];
+	u64 ids[RC_VOLUME_MAX_MEMBERS], volume_id;
+	u8 *rec, *md, *commit;
+	u64 gen_ts, user_sz = ~0ULL, cap;
+	u32 rec_len, gen_len, i, n = 0;
+	int ret = 0;
+
+	if (raid_type != RC_MB_DEVTYPE_VOLUME || second != 1u || first < 2u)
+		return -EOPNOTSUPP;
+	if (!device_count || device_count > RC_VOLUME_MAX_MEMBERS)
+		return -EINVAL;
+
+	rec = kzalloc(PAGE_SIZE, GFP_KERNEL);
+	md = kzalloc(RC_MB_SECTOR, GFP_KERNEL);
+	commit = kzalloc(RC_MB_SECTOR, GFP_KERNEL);
+	if (!rec || !md || !commit) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
+
+	mutex_lock(&rc_state.lock);
+	if (rc_volume_disk) {
+		rc_printk(RC_ERROR,
+			  "rc_volume_create_array: a volume is already assembled — refusing to stamp over it\n");
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+
+	for (i = 0; i < RC_MAX_ADAPTERS && n < RC_VOLUME_MAX_MEMBERS; i++) {
+		struct rc_adapter *a = rc_state.adapters[i];
+
+		if (!a || !a->ctx.nvme.md_valid || !a->ctx.nvme.ns1_nsze)
+			continue;
+		list[n] = a;
+		ids[n] = a->ctx.nvme.md_device_id;
+		metas[n].device_id = a->ctx.nvme.md_device_id;
+		metas[n].disk_sectors = a->ctx.nvme.ns1_nsze;
+		metas[n].sub_vid = a->pdev->subsystem_vendor;
+		metas[n].sub_dev = a->pdev->subsystem_device;
+		metas[n].pci_loc = ((u32)a->pdev->bus->number << 16) |
+				   ((u32)PCI_SLOT(a->pdev->devfn) << 8) |
+				   (u32)PCI_FUNC(a->pdev->devfn);
+		n++;
+	}
+	if (n != device_count) {
+		rc_printk(RC_ERROR,
+			  "rc_volume_create_array: request names %u member(s), %u bound and initialised disk(s) are available\n",
+			  device_count, n);
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	for (i = 0; i < n; i++) {
+		u64 u = rc_mb_user_sectors(list[i]->ctx.nvme.ns1_nsze,
+					   chunk_sectors);
+
+		if (!u) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_create_array: %s offers no user sectors\n",
+				  pci_name(list[i]->pdev));
+			ret = -EINVAL;
+			goto out_unlock;
+		}
+		user_sz = min(user_sz, u);
+	}
+
+	cap = user_sz * n;
+	cap = cap / chunk_sectors * chunk_sectors;
+	if (size_mb) {
+		u64 want = (u64)size_mb << 11;
+
+		if (want < cap)
+			cap = want / chunk_sectors * chunk_sectors;
+	}
+	if (!cap) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	gen_ts = get_jiffies_64();
+	if (!gen_ts)
+		gen_ts = 1;
+
+	/*
+	 * Every element covers cap/n sectors, not the member's whole user
+	 * area: the LD's total capacity must equal per-member slice x members
+	 * or the driver marks the geometry untrusted and forces the volume
+	 * read-only.  (The full user_sz is only the ceiling computed above.)
+	 *
+	 * The record set is firmware-shaped: controller PD, one PD per member,
+	 * the array LD, the raw-disk LD, then one ControllerDevice record per
+	 * member.  A generation holding only the LD assembles here but is not
+	 * a layout the UEFI utility's parser is known to walk.
+	 */
+	volume_id = (ids[0] ^ (ids[n > 1 ? 1 : 0] << 1)) | 1ULL;
+	rec_len = rc_mb_records(rec, PAGE_SIZE, metas, n, first, second, cap,
+				cap / n, 3, volume_id);
+	if (!rec_len || RC_MB_GEN_HEADER + rec_len > PAGE_SIZE) {
+		rc_printk(RC_ERROR,
+			  "rc_volume_create_array: record set does not fit (%u bytes)\n",
+			  rec_len);
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+	for (i = 0; i < n; i++) {
+		struct rc_adapter *a = list[i];
+		struct rc_nvme_state *nvme = &a->ctx.nvme;
+		struct device *dev = &a->pdev->dev;
+		u8 *gen;
+		dma_addr_t gen_dma;
+		int rc;
+
+		gen = dma_alloc_coherent(dev, PAGE_SIZE, &gen_dma, GFP_KERNEL);
+		if (!gen) {
+			ret = -ENOMEM;
+			goto out_unlock;
+		}
+
+		rc_mb_metadata_block_ex(md, ids[i], nvme->md_mbr_checksum);
+		rc = rc_nvme_write_verify_lba(a, RC_MB_METADATA_LBA, md,
+					      "create metadata");
+		if (!rc) {
+			gen_len = rc_mb_generation(gen, PAGE_SIZE, gen_ts, rec,
+						   rec_len);
+			rc = rc_nvme_write_lba(a, gen_lba,
+					       (u16)(gen_len / 512u - 1), gen_dma);
+			if (!rc)
+				rc = rc_nvme_flush(a);
+		}
+		if (!rc) {
+			rc_mb_commit_block(commit, gen_lba, gen_len, gen_ts, 1);
+			rc = rc_nvme_write_verify_lba(a, RC_MB_COMMIT_LBA,
+						      commit, "create commit");
+		}
+		dma_free_coherent(dev, PAGE_SIZE, gen, gen_dma);
+		if (rc) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_create_array: %s stamping failed (%d) — %u member(s) were written\n",
+				  pci_name(a->pdev), rc, i);
+			ret = rc;
+			goto out_unlock;
+		}
+		rc_printk(RC_NOTE,
+			  "rc_volume_create_array: %s stamped (gen @0x%x len %u ts=0x%016llx)\n",
+			  pci_name(a->pdev), gen_lba, gen_len,
+			  (unsigned long long)gen_ts);
+	}
+
+	/*
+	 * Assemble immediately: rcadm queries the array right after CREATE and
+	 * treats an absent one as a failed create.  Re-parse each member's LD
+	 * from the generation just written, then feed the normal registration
+	 * path — the same calls boot uses after reading metadata.
+	 */
+	for (i = 0; i < n; i++) {
+		rc_volume_parse_logical_device(list[i]);
+		rc_volume_register_member(list[i]);
+	}
+
+	rc_printk(RC_NOTE,
+		  "rc_volume_create_array: %u-member array stamped, capacity %llu sectors\n",
+		  n, (unsigned long long)cap);
+
+out_unlock:
+	mutex_unlock(&rc_state.lock);
+out_free:
+	kfree(rec);
+	kfree(md);
+	kfree(commit);
+	return ret;
+}
+
 static int rc_volume_create_disk(void)
 {
 	struct rc_adapter *m0 = NULL;
@@ -6836,28 +7274,48 @@ int rc_api_snapshot_get(struct rc_api_snapshot *out)
 		return -EINVAL;
 	memset(out, 0, sizeof(*out));
 
+	mutex_lock(&rc_state.lock);
 	mutex_lock(&rc_volume_lock);
 	out->level = rc_volume_raid_level;
 	out->stripe_sectors = rc_volume_stripe_sectors;
 	if (rc_volume_disk)
 		out->capacity_sectors = get_capacity(rc_volume_disk);
-	out->nr_members = min_t(u32, (u32)rc_volume_member_count,
-				RC_API_PD_MAX);
 
-	for (i = 0; i < out->nr_members; i++) {
-		struct rc_adapter *a = rc_volume_members[i];
-		struct rc_api_member *m = &out->member[i];
+	/*
+	 * Report every bound member with valid metadata, not only the ones in
+	 * the assembled volume: after DELETE the adapters stay bound and rcadm
+	 * still needs them in the disk list before it can be asked to CREATE.
+	 * Volume members keep their slot state; free disks report online with
+	 * no array position.
+	 */
+	for (i = 0; i < RC_MAX_ADAPTERS && out->nr_members < RC_API_PD_MAX;
+	     i++) {
+		struct rc_adapter *a = rc_state.adapters[i];
+		struct rc_api_member *m;
 		struct rc_nvme_state *nvme;
+		int slot;
 
-		if (!a)
+		if (!a || !a->ctx.nvme.md_valid)
 			continue;
 		nvme = &a->ctx.nvme;
+		m = &out->member[out->nr_members++];
 		m->device_id = nvme->md_device_id;
 		m->capacity_sectors = nvme->ns1_nsze;
 		m->ld_position = nvme->ld_my_position < 0 ? 0 :
 			(u32)nvme->ld_my_position;
-		m->online = READ_ONCE(rc_volume_member_state[i]) ==
-			RC_MEMBER_LIVE;
+		m->online = 1;
+		slot = READ_ONCE(nvme->volume_slot);
+		if (slot >= 0 && slot < rc_volume_member_count)
+			m->online = READ_ONCE(rc_volume_member_state[slot]) ==
+				    RC_MEMBER_LIVE;
+		/* A member of the assembled volume has no space to offer a
+		 * CREATE; a free disk offers everything past the firmware
+		 * reservation.  Reporting zero here made `rcadm -C` size a
+		 * new array at 16384 MiB on 16 TB of free disks. */
+		m->free_sectors = 0;
+		if (!rc_volume_disk || slot < 0 ||
+		    slot >= rc_volume_member_count)
+			m->free_sectors = rc_mb_user_sectors(nvme->ns1_nsze, 1);
 		m->vid = nvme->id_vid;
 		m->ssvid = nvme->id_ssvid;
 		m->sub_vid = a->pdev->subsystem_vendor;
@@ -6878,6 +7336,7 @@ int rc_api_snapshot_get(struct rc_api_snapshot *out)
 		}
 	}
 	mutex_unlock(&rc_volume_lock);
+	mutex_unlock(&rc_state.lock);
 
 	return 0;
 }

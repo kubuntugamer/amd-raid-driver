@@ -379,9 +379,11 @@ end instead of the LD record's `PacketSize`. `-dc` still warns because this
 module reports `9.3.3.00291` and the shipped `rcadm` is `9.3.3-00302`; that
 mismatch is real, not masked.
 
-Every mutation frame is decoded field by field and refused, because there is
-no metadata writer to persist it — the refusal is the correct behaviour, not a
-gap to paper over.
+*Status 2026-11-13:* DELETE and CREATE execute. DELETE rewrites each member's
+active generation without the array LD and re-commits it. CREATE stamps
+`RC_MetaData`, a generation and the commit block on every enumerated member and
+hot-assembles the volume, so `rcadm` finds the array immediately after the verb.
+The remaining mutation verbs are still decoded field by field and refused.
 
 The cost is dominated by three shared pieces, not by the verbs:
 
@@ -405,8 +407,8 @@ The cost is dominated by three shared pieces, not by the verbs:
 
 | Verb | Code | Payload | Blocked on |
 |---|---|---|---|
-| CREATE | 2 | 172 B, decoded | persistence, enumeration, gendisk create |
-| DELETE | 3 | 24 B, decoded | persistence, gendisk teardown |
+| CREATE | 2 | 172 B, decoded | implemented for RAID 0; hardware-validated 2026-11-13 (16 GiB default size — full-size create blocked by rcadm's 17180 MB cap) |
+| DELETE | 3 | 24 B, decoded | implemented; hardware-validated 2026-11-13 |
 | TRANSFORM | 8 | 140 B, decoded | OCE/ORLM data movement (phases 3–4) |
 | ACCEPT_CONFIG_CHANGES | 15 | — | persistence (two-phase commit) |
 | COMMIT_PREVIOUS_CONFIG | 36 | 4 B | persistence (rollback) |
@@ -425,6 +427,14 @@ recorded, not that the command is trivial.
 
 Blockers, in the order they bite:
 
+- **The LD `State` word was the CREATE blocker (2026-11-13).**
+  `RC_LogicalDevice.State` is at `+0x08`, not `+0x74` — the vendor CLI's own
+  DWARF enumerates `RC_LOGICAL_STATE_NORMAL = 0x200`, `CRITICAL`, `OFFLINE`,
+  `OUTDATE`, `LOCKED`. Our create path left `+0x08` zero (and wrote 1 at
+  `+0x74`, which is `ParentCount`), so `rcadm` rendered `State UNKNOWN` and
+  exited 1 even though the volume assembled. `rc_volume_create_array()` now
+  stamps `RC_LOGICAL_STATE_NORMAL`; `make` is warning-clean and
+  `make test-metabuild` still matches.
 - **The commit checksum is confirmed (2026-11-13).** Both `RC_MetaData` and
   `RC_ConfigCommit` store `Checksum` at `+0x00` over `[0x08, 0x200)`, and the
   algorithm in `rc_meta_build.h` reproduces the stored value on all four
@@ -434,12 +444,27 @@ Blockers, in the order they bite:
   NVMe array on 2026-11-13 (`docs/REVERSE_ENGINEERING.md`, "On-disk
   generation layout"): the generation carries no checksum word at all — `+0x00`
   is its timestamp — and the 128-byte `RC_PhysicalDeviceOnDisk` records are the
-  `0x25BC` entries inside the generation, before the LD records. The gap that
-  remains is in our encoders, not in the layout: `rc_mb_generation()` writes
-  only LD records, so it produces a generation this driver's parser accepts
-  and the QEMU rig assembles, but not the PD-then-LD-then-CTRL order firmware
-  writes. Emitting those sections is the next writer task, and the observed
-  bytes are the target.
+  `0x25BC` entries inside the generation, before the LD records.
+  *Status 2026-11-13:* the encoders now emit that order — controller PD
+  (`0x1201`), one PD per member (`0x1200`), the array LD, the raw-disk LD
+  (`0x1BF9`) and one ControllerDevice record (`0x25BE`) per member — and LD
+  elements carry firmware's `AllocOffset` `0x100000` / `UserDataOffset`
+  `0x105000` instead of `0x6000`. A created generation is 3072 bytes with the
+  LD at `gen+0x480`; this driver and `rcadm` both accept it, `make` is
+  warning-clean and `make test-metabuild` still matches `mkmeta.py`. `/dev/rc_api`
+  now reports per-disk free space (PD `+0xC8`/`+0xD0`), so the CLI's disk list
+  shows 4.0TB per free disk instead of 0.0MB. Still open: `rcadm -C -ms` caps a
+  new array at 17180 MB regardless of disk count, so a full-size create is not
+  possible yet — the field it derives that from is not one of the free-space
+  words.
+- **The encoder now reproduces a firmware block byte for byte (2026-11-13).**
+  `rc_mb_metadata_block_ex()` carries the member's own `MBRChecksum` (`+0x38`)
+  forward instead of zeroing it; that word is firmware-owned and cannot be
+  derived from the 512-byte block. On the live 4-member array,
+  `rc_nvme_verify_meta_encoding` now logs an exact match for all four members
+  where it previously logged `differs at +0x38` and switched the writer off.
+  This was the gate in front of DELETE/CREATE, not the persistence engine
+  itself.
 - **No vendor-written bytes to validate against.** The vendor-created parity
   array was deleted; the array box's live RAID 0 cannot be written without
   unbinding the OS disk. The first real test of any writer is BIOS accepting a

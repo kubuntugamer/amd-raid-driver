@@ -36,7 +36,14 @@
 #define RC_MB_COMMIT_LBA	0x5001u
 #define RC_MB_RING_LBA		0x5800u
 #define RC_MB_RING_SECTORS	2048u
-#define RC_MB_USERDATA_LBA	0x6000u
+/* Firmware reservation ahead of user data.  The vendor's own LD elements
+ * on the live RAID 0 (2026-11-13) read AllocOffset = 0x100000 sectors
+ * (512 MiB) and UserDataOffset = 0x105000 (546 MiB), i.e. a 1 MiB-aligned
+ * allocation region plus a 10 MiB gap.  Starting user data at 0x6000, as
+ * this encoder did, put every sector inside the area firmware keeps for
+ * itself (config ring, relocation, MBR stash). */
+#define RC_MB_ALLOC_LBA		0x100000u	/* 512 MiB */
+#define RC_MB_USERDATA_LBA	0x105000u	/* 546 MiB */
 #define RC_MB_MAGIC		0x65726F4344494152ULL	/* "RAIDCore" */
 #define RC_MB_VERSION		0x00030000u
 #define RC_MB_FEATURES		0x1Cu	/* observed on firmware arrays */
@@ -89,7 +96,9 @@
 #define RC_MB_LE_USER_SIZE	0x28
 
 /* Record tags. */
+#define RC_MB_TAG_PHYSICAL_DEVICE	0x25BCu
 #define RC_MB_TAG_LOGICAL_DEVICE	0x25BDu
+#define RC_MB_TAG_CONTROLLER_DEVICE	0x25BEu
 /* DeviceType the request/LD format uses for a striped/mirrored volume;
  * the level itself is in FirstCount/SecondCount. */
 #define RC_MB_DEVTYPE_VOLUME	0x1BF6u
@@ -105,6 +114,12 @@ static inline void rc_mb_put32(u8 *p, u32 v)
 	p[1] = (u8)(v >> 8);
 	p[2] = (u8)(v >> 16);
 	p[3] = (u8)(v >> 24);
+}
+
+static inline void rc_mb_put16(u8 *p, u16 v)
+{
+	p[0] = (u8)v;
+	p[1] = (u8)(v >> 8);
 }
 
 static inline void rc_mb_put64(u8 *p, u64 v)
@@ -166,11 +181,16 @@ static inline u64 rc_mb_checksum(const void *data, u32 bytes)
 
 /*
  * Per-member RC_MetaData block (512 B).  The commit and ring LBAs are
- * the fixed locations above; MBRChecksum is left zero, which is what
- * the parser expects on arrays this driver writes (the read path does
- * not consult it).
+ * the fixed locations above.  MBRChecksum is not derivable from this
+ * block: firmware fills it from the member's MBR area, outside the 512
+ * bytes here.  A writer must carry the value already on media forward
+ * (rc_mb_metadata_block_ex); zeroing it makes the encoder's output
+ * differ from the firmware's block at +0x38 and turns off the writer
+ * gate in rc_nvme_verify_meta_encoding.  This wrapper is the "no MBR"
+ * form for a freshly initialised member.
  */
-static inline void rc_mb_metadata_block(u8 *out, u64 device_id)
+static inline void rc_mb_metadata_block_ex(u8 *out, u64 device_id,
+					   u64 mbr_checksum)
 {
 	memset(out, 0, RC_MB_SECTOR);
 	rc_mb_put64(out + RC_MB_MD_MAGIC, RC_MB_MAGIC);
@@ -181,9 +201,14 @@ static inline void rc_mb_metadata_block(u8 *out, u64 device_id)
 	rc_mb_put32(out + RC_MB_MD_VERSION, RC_MB_VERSION);
 	rc_mb_put32(out + RC_MB_MD_FEATURES, RC_MB_FEATURES);
 	rc_mb_put32(out + RC_MB_MD_SPARE_INFO, 0);
-	rc_mb_put64(out + RC_MB_MD_MBR_CHECKSUM, 0);
+	rc_mb_put64(out + RC_MB_MD_MBR_CHECKSUM, mbr_checksum);
 	rc_mb_put64(out + RC_MB_MD_CHECKSUM,
 		    rc_mb_checksum(out + RC_MB_MD_MAGIC, RC_MB_MD_PAYLOAD));
+}
+
+static inline void rc_mb_metadata_block(u8 *out, u64 device_id)
+{
+	rc_mb_metadata_block_ex(out, device_id, 0);
 }
 
 /* User-data sectors a member offers after the metadata reserve, rounded
@@ -229,7 +254,7 @@ static inline u32 rc_mb_ld_record(u8 *out, u32 cap, u32 device_type,
 		u32 e = RC_MB_LD_ELEM_ARRAY + i * RC_MB_LE_BYTES;
 
 		rc_mb_put64(out + e + RC_MB_LE_DEVICE_ID, device_ids[i]);
-		rc_mb_put64(out + e + RC_MB_LE_ALLOC_OFFSET, RC_MB_USERDATA_LBA);
+		rc_mb_put64(out + e + RC_MB_LE_ALLOC_OFFSET, RC_MB_ALLOC_LBA);
 		rc_mb_put64(out + e + RC_MB_LE_ALLOC_SIZE, user_size);
 		rc_mb_put64(out + e + RC_MB_LE_USER_OFFSET, RC_MB_USERDATA_LBA);
 		rc_mb_put64(out + e + RC_MB_LE_USER_SIZE, user_size);
@@ -267,6 +292,172 @@ static inline u32 rc_mb_raw_ld_record(u8 *out, u32 cap, u64 device_id,
 	rc_mb_put64(out + RC_MB_LD_ELEM_ARRAY + RC_MB_LE_USER_SIZE,
 		    disk_sectors);
 	return size;
+}
+
+/*
+ * RC_PhysicalDeviceOnDisk (tag 0x25BC) — 0x80 bytes inside a generation,
+ * ahead of the LD records.  Layout read off the vendor's own 4-member
+ * generation on 2026-11-13: tag, DeviceID, channel/port, capacity, type
+ * and state.  Firmware writes one controller record (type 0x1201) and one
+ * record per member (type 0x1200), then a volume record (0x1203) for the
+ * array it already knows about.
+ */
+#define RC_MB_PD_BYTES		0x80u
+#define RC_MB_PD_DEVICE_ID	0x04u
+#define RC_MB_PD_CHANNEL	0x0Cu
+#define RC_MB_PD_PORT		0x0Eu
+#define RC_MB_PD_CAPACITY	0x1Cu
+#define RC_MB_PD_DEVICE_TYPE	0x24u
+#define RC_MB_PD_STATE		0x2Cu
+#define RC_MB_PD_TYPE_CONTROLLER 0x1201u
+#define RC_MB_PD_TYPE_DISK	0x1200u
+#define RC_MB_PD_STATE_ONLINE	0x3000u
+/* DeviceID the controller record carries (observed on the live array). */
+#define RC_MB_PD_CONTROLLER_ID	0x0000102285900000ULL
+
+/* RC_ControllerDevice (tag 0x25BE) — 0x88 bytes, one per member. */
+#define RC_MB_CTRL_BYTES	0x88u
+#define RC_MB_CTRL_ID		0x04u
+#define RC_MB_CTRL_HANDLE	0x0Cu
+#define RC_MB_CTRL_NAME		0x24u
+#define RC_MB_CTRL_FEATURE	0x34u
+#define RC_MB_CTRL_PORTS	0x68u
+#define RC_MB_CTRL_VID		0x6Cu
+#define RC_MB_CTRL_DID		0x6Eu
+#define RC_MB_CTRL_NUMBER	0x70u
+#define RC_MB_CTRL_SUBVID	0x74u
+#define RC_MB_CTRL_SUBDID	0x76u
+#define RC_MB_CTRL_REGION_ID	0x78u
+#define RC_MB_CTRL_ORIGVID	0x80u
+#define RC_MB_CTRL_ORIGDID	0x82u
+#define RC_MB_CTRL_PCILOC	0x84u
+#define RC_MB_CTRL_FEATURE_VALUE 0x01ffu
+
+/*
+ * LD fields rcadm renders but the assembler does not need: State at +0x08
+ * (a zeroed word renders as UNKNOWN and CREATE is reported failed), Id at
+ * +0x2C, ParentCount at +0x74 (1 for a single array) and cache flags at
+ * +0x80 (read cache + write-back).
+ */
+#define RC_MB_LD_STATE		0x08u
+#define RC_MB_LD_ID		0x2Cu
+#define RC_MB_LD_PARENTCOUNT	0x74u
+#define RC_MB_LD_CACHE		0x80u
+#define RC_MB_LD_STATE_NORMAL	0x200u
+#define RC_MB_LD_CACHE_RW	0xc0000000u
+
+/* One member's identity, as the record set needs it. */
+struct rc_mb_member_meta {
+	u64 device_id;
+	u64 disk_sectors;
+	u16 sub_vid;
+	u16 sub_dev;
+	u32 pci_loc;
+};
+
+static inline u32 rc_mb_pd_record(u8 *out, u32 cap, u64 device_id, u32 type,
+				  u16 channel, u16 port, u64 capacity)
+{
+	if (cap < RC_MB_PD_BYTES)
+		return 0;
+	memset(out, 0, RC_MB_PD_BYTES);
+	rc_mb_put32(out, RC_MB_TAG_PHYSICAL_DEVICE);
+	rc_mb_put64(out + RC_MB_PD_DEVICE_ID, device_id);
+	rc_mb_put16(out + RC_MB_PD_CHANNEL, channel);
+	rc_mb_put16(out + RC_MB_PD_PORT, port);
+	rc_mb_put64(out + RC_MB_PD_CAPACITY, capacity);
+	rc_mb_put32(out + RC_MB_PD_DEVICE_TYPE, type);
+	rc_mb_put32(out + RC_MB_PD_STATE, RC_MB_PD_STATE_ONLINE);
+	return RC_MB_PD_BYTES;
+}
+
+static inline u32 rc_mb_ctrl_record(u8 *out, u32 cap, u64 id, u32 number,
+				    u16 sub_vid, u16 sub_dev, u32 pci_loc)
+{
+	if (cap < RC_MB_CTRL_BYTES)
+		return 0;
+	memset(out, 0, RC_MB_CTRL_BYTES);
+	rc_mb_put32(out, RC_MB_TAG_CONTROLLER_DEVICE);
+	rc_mb_put64(out + RC_MB_CTRL_ID, id);
+	rc_mb_put32(out + RC_MB_CTRL_HANDLE, 0x10000u | number);
+	memcpy(out + RC_MB_CTRL_NAME, "NVMe", 5);
+	rc_mb_put16(out + RC_MB_CTRL_FEATURE, RC_MB_CTRL_FEATURE_VALUE);
+	rc_mb_put32(out + RC_MB_CTRL_PORTS, 1);
+	rc_mb_put16(out + RC_MB_CTRL_VID, 0x1022);
+	rc_mb_put16(out + RC_MB_CTRL_DID, 0xb000);
+	rc_mb_put32(out + RC_MB_CTRL_NUMBER, number);
+	rc_mb_put16(out + RC_MB_CTRL_SUBVID, sub_vid);
+	rc_mb_put16(out + RC_MB_CTRL_SUBDID, sub_dev);
+	rc_mb_put64(out + RC_MB_CTRL_REGION_ID, id);
+	rc_mb_put16(out + RC_MB_CTRL_ORIGVID, 0x1022);
+	rc_mb_put16(out + RC_MB_CTRL_ORIGDID, 0xb000);
+	rc_mb_put32(out + RC_MB_CTRL_PCILOC, pci_loc);
+	return RC_MB_CTRL_BYTES;
+}
+
+/*
+ * Full record set for one generation, in the order firmware writes it:
+ * controller PD, one PD per member, the array LD, the raw-disk LD for
+ * member 0, then one ControllerDevice record per member.  The array LD
+ * carries the cosmetic fields rcadm renders (Id/State/ParentCount/cache).
+ * Returns the byte length, 0 if it does not fit.
+ */
+static inline u32 rc_mb_records(u8 *out, u32 cap,
+				const struct rc_mb_member_meta *m, u32 members,
+				u32 first, u32 second, u64 capacity,
+				u64 user_size, u32 chunk_index, u64 volume_id)
+{
+	u64 ids[16];
+	u32 off = 0, n, i, ld_off;
+
+	if (!members || members > 16)
+		return 0;
+	for (i = 0; i < members; i++)
+		ids[i] = m[i].device_id;
+
+	n = rc_mb_pd_record(out, cap, RC_MB_PD_CONTROLLER_ID,
+			    RC_MB_PD_TYPE_CONTROLLER, 0xffffu, 0, 0);
+	if (!n)
+		return 0;
+	off += n;
+	for (i = 0; i < members; i++) {
+		n = rc_mb_pd_record(out + off, cap - off, ids[i],
+				    RC_MB_PD_TYPE_DISK, 1, 1,
+				    m[i].disk_sectors);
+		if (!n)
+			return 0;
+		off += n;
+	}
+
+	ld_off = off;
+	n = rc_mb_ld_record(out + off, cap - off, RC_MB_DEVTYPE_VOLUME, first,
+			    second, members, ids, capacity, user_size,
+			    chunk_index);
+	if (!n)
+		return 0;
+	rc_mb_put64(out + ld_off + RC_MB_LD_ID, volume_id);
+	rc_mb_put32(out + ld_off + RC_MB_LD_STATE, RC_MB_LD_STATE_NORMAL);
+	rc_mb_put32(out + ld_off + RC_MB_LD_PARENTCOUNT, 1);
+	rc_mb_put32(out + ld_off + RC_MB_LD_CACHE, RC_MB_LD_CACHE_RW);
+	off += n;
+
+	n = rc_mb_raw_ld_record(out + off, cap - off, ids[0],
+				m[0].disk_sectors);
+	if (!n)
+		return 0;
+	off += n;
+
+	for (i = 0; i < members; i++) {
+		u64 id = ((u64)0x1022 << 32) | ((u64)0xb000 << 16) | i;
+
+		n = rc_mb_ctrl_record(out + off, cap - off, id, i,
+				      m[i].sub_vid, m[i].sub_dev,
+				      m[i].pci_loc);
+		if (!n)
+			return 0;
+		off += n;
+	}
+	return off;
 }
 
 /*
