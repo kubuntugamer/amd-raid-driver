@@ -107,6 +107,38 @@ Not covered: power-cut/write-hole behaviour, parity rebuild, firmware
 acceptance of a driver-stamped parity generation, a vendor-written array, and
 any member count or chunk size other than this one.
 
+## 2026-11-13 — Delete/create + I/O across RAID 0, 1, 10 and 5 (hardware)
+
+Ran the full create/delete matrix on the array box (4× Sabrent Rocket Q 4 TB,
+`1022:B000`, kernel `7.3.0-10-generic`), using `rxp2adm` for every delete and
+create. Each level was created from scratch on the same four members, came up
+`optimal`, and took a 768 KiB O_DIRECT write followed by a cache-dropped
+readback:
+
+| Level | Members | Capacity | ro | Result |
+|---|---|---|---|---|
+| RAID 0 | 0 1 2 3 | 16.00 TB (31,251,871,744 sectors) | 0 | PASS |
+| RAID 1 | 0 1 | 4.00 TB (7,812,967,936 sectors) | 0 | PASS |
+| RAID 10 | 0 1 2 3 | 8.00 TB (15,625,935,872 sectors) | 0 | PASS |
+| RAID 5 | 0 1 2 3 | 12.00 TB (23,438,903,808 sectors) | 0 | PASS |
+
+Every capacity is the expected multiple of the same per-member user size: 4×,
+1×, 2× and 3× respectively.
+
+The first run exposed a real RAID 1 bug: a read crossing a stripe boundary was
+sent into the RAID 0 per-member stripe fan-out, which rejects mirrored members
+(`rc_volume_dispatch_multi_stripe: member mismatch`), so RAID 1 reads larger
+than one 256 KiB stripe (768 KiB and 1 MiB in the probe) failed with
+`BLK_STS_IOERR`. RAID 1 reads now skip that branch
+and use the single-member path, where `rc_volume_map_lba()` already selects a
+live mirror — both mirrors hold the whole logical range, so one member can
+serve the request. `make` is warning-clean, and the table above is the post-fix
+run with zero driver errors. Screenshot:
+[`image/raid-level-matrix-2026-11-13.png`](../image/raid-level-matrix-2026-11-13.png).
+
+RAID 5 CREATE remains metadata-only over erased members: this run wrote only
+the tested 768 KiB, so the rest of that volume is not initialised.
+
 ## 2026-11-13 — RAID 5 CREATE/DELETE through the driver and rxp2adm
 
 The metadata writer no longer stops at 0/1/10. `rc_volume_create_array()`
