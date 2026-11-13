@@ -10,6 +10,21 @@ Work top to bottom. Steps 1 and 2 are **destructive** — run them against a
 scratch array or a scratch partition (`/dev/rcraid0pN`), never against a disk
 holding anything you care about.
 
+## Status 2026-11-13 — what has run, and what has not
+
+Two **driver-written** RAID 10 fixtures have exercised the data path on the
+array box: `rcstamp --level raid10` over four members (it found the read-copy
+bug, and after the fix the write/readback, reload, discard and mke2fs battery
+passed) and `rcadm -C -r10` creating a 2×2, 8 TB array through this driver's
+writer, which assembled `optimal` and read back 16 MiB. Neither is
+firmware-created: the metadata came from this tree.
+
+So **steps 0–1 are still unrun** — nobody has assembled RAID 10 metadata
+written by firmware or the vendor driver, and the adjacent pair convention has
+not been checked on this box's NVMe path. Steps 2–6 may use a driver-stamped
+array, because they exercise the same dispatch, failover, rebuild and boot
+paths; the results table stays empty until a firmware-created array is run.
+
 ## Fast path — one command
 
 Most of steps 0–4 (trust gate, geometry, cache-dropped reads, one-copy

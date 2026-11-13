@@ -191,20 +191,34 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
       `1022:B000`** — [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) is the
       gate before the README/STATUS rows may say "stable".
 
-- [ ] **RAID5 / RAID6** — **read-only, 2026-11-08.** Parity math and the
-      dedicated-parity layout map are done (`src/patch_parity_math.c`, the one
-      place to change once a vendor array confirms the placement). RAID 6 Q is
-      the vendor's EVENODD construction (prime 17, `src/raid6_evenodd.h`), but
-      nothing calls it — there is no P/Q write path; the level is
-      identified from the LD `DeviceType` (`0x1BF5` / `0x1BFA`, confirmed on a
-      BIOS-created 3-disk RAID 5), a parity volume
-      assembles at `(N-1)` / `(N-2)` × per-member user size, and reads go
-      through the shared map with the queue capped at one stripe per request.
-      Writes and discards are refused and the volume is forced read-only.
-      Still open: the parity **write** path (P/Q generation plus
-      read-modify-write of a partial stripe), rebuild, the metadata writer,
-      hardware validation, and confirming the on-disk placement itself
-      (issues #6 and #3).
+- [ ] **RAID5 / RAID6** — **read-only by default; full-row RAID 5 writes
+      opt-in, 2026-11-13.** Parity math and the dedicated-parity layout map are
+      done (`src/patch_parity_math.c`, the one place to change once a vendor
+      array confirms the placement). RAID 6 Q is the vendor's EVENODD
+      construction (prime 17, `src/raid6_evenodd.h`), still with no caller: no
+      dual-parity write path exists. The level is identified from the LD
+      `DeviceType` (`0x1BF5` / `0x1BFA`, confirmed on a BIOS-created 3-disk
+      RAID 5), a parity volume assembles at `(N-1)` / `(N-2)` × per-member user
+      size, and reads go through the shared map.
+      **Write path (opt-in):** with `enable_writes=1 parity_writes=1` a request
+      that covers one complete row is written as one NVMe WRITE per data member
+      plus the dedicated parity chunk, with P generated from the request's own
+      bytes into a bounded pool of driver buffers. A partial row is
+      read-modify-written: only the touched data chunks and the old parity are
+      read into per-member DMA buffers, the request's bytes are overlaid and P
+      becomes P_old ^ D_old ^ D_new before the touched chunks plus parity are
+      rewritten. All RAID 5 writes are
+      serialized by one semaphore so a partial and a full write cannot update
+      the same row's parity from different old bytes. Reads fan out per data
+      member when the queue is not chunk-split. The QEMU rig verifies full-row,
+      in-row, boundary and cross-row writes. Discards are refused; there is no
+      write-hole journal (a power cut between data and parity leaves that row
+      stale), no parity rebuild, and the path has not been run on hardware.
+      Without `parity_writes=1` the volume stays read-only and the installer's
+      hard stop is unchanged.
+      Still open: the write hole, rebuild, the metadata writer, hardware
+      validation, and confirming the on-disk placement itself (issues #6 and
+      #3).
 
 - [ ] **Multi-volume support** — BIOS can create multiple arrays
       on the same members. We hardcode one `/dev/rcraid0`. Refactor
@@ -370,7 +384,7 @@ from the volume this driver actually assembled. `--version`, `--show` and
 guest running this module with the shipped `rcadm` 9.3.3-00302. The committed
 rig does not bundle `rcadm`, so that run is not reproducible from the tree and
 none of these verbs has an automated test; other read verbs are untested, not
-claimed.
+claimed. Issue #13 tracks the missing coverage.
 
 *Status 2026-11-13:* the controller list (`-q -ct N`) and
 `/proc/rcraid/version` now work on the live 4-member RAID 0; the controller
@@ -401,7 +415,7 @@ The cost is dominated by three shared pieces, not by the verbs:
 - [ ] **Multi-volume registry and hot lifecycle (~800–1,500 LOC)** — today
       `rc_volume_members[]` is a singleton and the single gendisk is created at
       assembly; create/delete need a per-volume list, gendisk create and
-      teardown, and a busy check. Required by CREATE and DELETE on their own.
+      teardown, and a busy check. Required by CREATE and DELETE on their own (issue #12).
 - [ ] **Free-member enumeration** — the shim can only emit disks the driver
       bound, and binding requires the `0x5000` metadata signature, so
       `rcadm --list --disk` has nothing to offer `-C`. The PD record already
@@ -410,7 +424,7 @@ The cost is dominated by three shared pieces, not by the verbs:
 
 | Verb | Code | Payload | Blocked on |
 |---|---|---|---|
-| CREATE | 2 | 172 B, decoded | implemented for RAID 0/1/10 over the disks named with `-d`; hardware-validated 2026-11-13 (RAID 0 ×4 = 16 TB, RAID 1 = 4 TB, RAID 10 ×4 = 8 TB; all assemble `optimal` and read back). `PreferDeviceID` is the logical-device Id rcadm looks up after the write and is now stamped, so the CLI and the packet agree on the Id; `rcadm` still exits 1 because its post-write handle lookup uses the in-process config cache and reports `LOGICAL_DEVICE_NOT_FOUND` (10) — issue #16. DELETE exits 0. The old 16 GiB default came from a misread `GET_CREATE_INFO` reply; max size now reports real free space |
+| CREATE | 2 | 172 B, decoded | implemented for RAID 0/1/10 over the disks named with `-d`; hardware-validated 2026-11-13 (RAID 0 ×4 = 16 TB, RAID 1 = 4 TB, RAID 10 ×4 = 8 TB; all assemble `optimal` and read back — issue #15). `PreferDeviceID` is the logical-device Id rcadm looks up after the write and is now stamped, so the CLI and the packet agree on the Id; `rcadm` still exits 1 because its post-write handle lookup uses the in-process config cache and reports `LOGICAL_DEVICE_NOT_FOUND` (10) — issue #16. DELETE exits 0. The old 16 GiB default came from a misread `GET_CREATE_INFO` reply; max size now reports real free space. JBOD (`0x1BF7`) and RAIDAble (`0x1BFB`) are refused by the `DeviceType` gate; RAID 5 `CREATE` is now implemented behind `parity_create=1` (metadata only over erased members) and reachable through the clean-room `rxp2adm`; AMD's CLI still stops at its licence check before any frame, so that verb remains untested. RAID 6 `CREATE` stays refused. DELETE removes parity LDs as well as `0x1BF6` volumes (issue #16) |
 | DELETE | 3 | 24 B, decoded | implemented; hardware-validated 2026-11-13 |
 | TRANSFORM | 8 | 140 B, decoded | OCE/ORLM data movement (phases 3–4) |
 | ACCEPT_CONFIG_CHANGES | 15 | — | persistence (two-phase commit) |
@@ -452,6 +466,10 @@ Blockers, in the order they bite:
   `RC_ConfigCommit` store `Checksum` at `+0x00` over `[0x08, 0x200)`, and the
   algorithm in `rc_meta_build.h` reproduces the stored value on all four
   members of the X399 fixture set — vendor-written bytes, not inference.
+  With the live-array walk recorded in `STATUS.md`, that settles the two
+  unknowns issue #11 tracked: a persisted generation carries no checksum
+  word (its `+0x00` is the timestamp), and the 128-byte member stamp is the
+  `0x25BC` record already inside the generation.
   Re-run it with `scripts/qemu-test/verify-checksums.py member*.meta.bin`.
   The two items that were still open were then read off the live 4-member
   NVMe array on 2026-11-13 (`docs/REVERSE_ENGINEERING.md`, "On-disk
@@ -608,7 +626,7 @@ ORLM, COW, P2PDMA, io_uring, ZNS/FDP) are not on the daily-driver path at all.
 | Phase | Feature | Status (2026-11-08) | Enables |
 |---|---|---|---|
 | 0 | RAID 0 / 1 / 10 I/O + rebuild | ✅ RAID0 and RAID1 shipped and hardware-validated; RAID10 feature-complete, array-box run pending ([VALIDATION_RAID10.md](VALIDATION_RAID10.md)) | Production baseline |
-| 1 | RAID 5/6 I/O + rebuild | 🟡 Assembly + reads wired, forced read-only, writes refused; first firmware 3-disk RAID 5 metadata parsed, assembled and read back 2026-11-08 (`0x1BF5`, N=3, `(N-1)` × user size); placement settled from the vendor core, corroboration pending (issue #6); Q generator now the vendor's EVENODD, uncalled (issue #10); no parity rebuild | Inspect and read existing parity arrays |
+| 1 | RAID 5/6 I/O + rebuild | 🟡 Assembly + reads wired, forced read-only, writes refused by default (RAID 5 opt-in exists); create/delete metadata works in the rig (RAID 5 behind `parity_create=1`); first firmware 3-disk RAID 5 metadata parsed, assembled and read back 2026-11-08 (`0x1BF5`, N=3, `(N-1)` × user size); placement settled from the vendor core, corroboration pending (issue #6); Q generator now the vendor's EVENODD, uncalled (issue #10); no parity rebuild | Inspect and read existing parity arrays |
 | 2 | Metadata writer + TUI create | ⏳ Planned — leads the next-PR order: `mkmeta.py` writes RAID0/1 only, so the TUI's 10/5/6 choices stop at an error message | Create RAID 5/6 arrays |
 | 3 | OCE (Online Capacity Expansion) | 🗺️ Roadmap — this driver | Add drives online, restripe, grow FS |
 | 4 | ORLM (Online RAID Level Migration) | 🗺️ Roadmap — this driver | RAID 0↔5↔6↔10 online, zero host CPU |
@@ -663,8 +681,9 @@ rather than code.
    anyway, so even while it existed it carried no vendor-written data to
    check the placement against. The dedicated-parity placement in `src/patch_parity_math.c` is
    taken from the vendor core rather than inferred, and the RAID6 Q generator
-   is now the vendor's EVENODD (issue #10) — though nothing calls it, because
-   there is no parity write path yet. A staged fixture can only show that the
+   is now the vendor's EVENODD (issue #10) — still with no caller, because the
+   full-row path that landed is RAID 5 P-only and RAID 6 has no writes at all.
+   A staged fixture can only show that the
    driver reads the map it implements: re-stamped under the dedicated layout
    on 2026-11-08 it round-trips byte-identically, which is self-consistency,
    not corroboration. Only data written through RAIDXpert2/Windows can prove

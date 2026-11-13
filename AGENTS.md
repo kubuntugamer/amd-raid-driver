@@ -51,9 +51,14 @@ scripts/qemu-test/run-qemu-raid-test.sh --kver "$KVER" --kernel ./vmlinuz --leve
 2. **warnings** — no compiler warnings in `rc_*.c` / `rc_*.h` other than
    `-Wunused-parameter`.
 3. **qemu-rig** — boots the module against synthetic arrays for `raid0`,
-   `raid1`, `raid1-degraded`, and `raid1-degraded-boot`, then runs the guest
-   battery: write/readback, module reload cycles, discard+rewrite, `mke2fs`
-   (sub-page buffered writeback), and the stale-config-generation decoy.
+   `raid1`, `raid1-degraded`, `raid1-degraded-boot`, `raid5-parity-write`, and
+   `raid5-create-delete`
+   (the opt-in RAID5 write path: full-row parity, in-row/boundary/cross-row
+   read-modify-write) and `raid5-create-delete` (delete a parity LD, re-create
+   it through the driver's writer, require the same capacity/level), then runs
+   the guest battery: write/readback, module
+   reload cycles, discard+rewrite, `mke2fs` (sub-page buffered writeback),
+   and the stale-config-generation decoy.
 4. **spdx** — the line-1 license tag above.
 5. **whitespace** — `git diff --check` on changed lines; `docs/ghidra_output/**`
    and `drivers/windows/**` are excluded as reference artifacts.
@@ -86,16 +91,18 @@ The repo's automated review prompt enforces these; write code that passes it:
   in this project. Keep `BLK_STS_RESOURCE` for transient allocation/unload
   races so the block layer retries.
 - Do not add a feature that writes metadata the driver cannot validate. The
-  metadata writer currently emits RAID 0/1 only; the TUI stops with an explicit
-  message for 10/5/6 rather than stamping an invalid layout.
+  TUI's offline encoder (`mkmeta.py`) emits RAID 0/1 only and stops with an
+  explicit message for 10/5/6. The kernel writer emits RAID 0/1/10, and RAID 5
+  only behind `parity_create=1` — metadata over members whose user area is
+  known empty, never data/parity initialisation. RAID 6 is never written.
 
 ## Deployment status (do not contradict these claims)
 
 | Level | State |
 |---|---|
 | RAID 0 / RAID 1 | Hardware-validated baseline, production-supported |
-| RAID 10 | Feature-complete; driver-written 4-disk array created, assembled and read on real hardware 2026-11-13, **but no firmware-created array-box run yet** (`docs/VALIDATION_RAID10.md` still empty) |
-| RAID 5 / RAID 6 | Assemble and read only; **writes and discards refused**, volume forced read-only; layout settled against the vendor core, not yet corroborated on vendor-written data |
+| RAID 10 | Feature-complete; an `rcadm -C -r10` 2×2 array written by this driver was assembled and read on real hardware 2026-11-13, **but no firmware-created array-box run yet** (`docs/VALIDATION_RAID10.md` runbook exists; its results table is still empty) |
+| RAID 5 / RAID 6 | Assemble and read only by default; **writes and discards refused**, volume forced read-only. DELETE now removes parity LDs; RAID 5 CREATE is available behind `parity_create=1` (metadata only, erased members). RAID 5 has an opt-in (`enable_writes=1 parity_writes=1`) write path: full rows generate P directly, partial rows read-modify-write the row under a volume-wide write lock. RAID 6 writes and RAID 5 discards are still refused. QEMU-verified (readback, partial and cross-row RMW); **no hardware run yet**, no write-hole journal, no parity rebuild. Layout settled against the vendor core, not yet corroborated on vendor-written data |
 
 - RAID 5 `DeviceType` is `0x1BF5`, RAID 6 is `0x1BFA`. Level comes from the LD
   `DeviceType` alone — never infer it from member counts.

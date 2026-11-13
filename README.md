@@ -13,13 +13,18 @@ Your motherboard's AMD RAIDXpert2 NVMe storage arrays become a native, standard 
 > **⚠️ DEPLOYMENT WARNING — READ BEFORE INSTALLING.**
 > The hardware-validated baseline is **RAID 0 and RAID 1**. **RAID 10 is
 > feature-complete** — reads/writes/discards, per-pair degraded failover, member
-> rebuild, and boot-time degraded assembly are all implemented — **but it has not had
-> its own array-box run yet**, so treat it as unproven for production data until
+> rebuild, and boot-time degraded assembly are all implemented — **but its only array-box run so far used metadata written by this driver**
+> (an `rcadm -C -r10` 2×2 array, 2026-11-13); a firmware-created array has not
+> been assembled yet, so treat it as unproven for production data until
 > [`docs/VALIDATION_RAID10.md`](docs/VALIDATION_RAID10.md) is signed off.
-> **RAID 5/6** assemble **read-only**: the driver identifies them and reads
-> them, but the parity write path is not implemented and the parity map, while
-> now matching the vendor (dedicated parity on the last member, found by
-> reverse engineering), has not been checked against an array the vendor wrote.
+> **RAID 5/6** assemble **read-only** by default: the driver identifies them
+> and reads them. RAID 5 has an opt-in write path
+> (`enable_writes=1 parity_writes=1`): full rows generate P directly, partial
+> rows read-modify-write the row under one volume-wide write lock. There is no
+> write-hole journal, no parity rebuild and no hardware run yet, and RAID 6 has
+> no write path at all. The parity map matches the vendor (dedicated parity on
+> the last member, found by reverse engineering) but has not been checked
+> against an array the vendor wrote.
 > Not deployable yet.
 > The mirror completion and array rebuild paths run on a
 > **modern non-blocking asynchronous thread runner** (`kamd_async_worker` parks
@@ -80,15 +85,17 @@ stamping a layout the driver can't validate; phases 3–8 are long-horizon.
 
 The baseline release is deliberately narrow. RAID 0 and RAID 1 are the
 production-supported, hardware-validated rows; RAID 10 is feature-complete and
-next in line for its array-box run; RAID 5/6 assemble and read, but refuse every
-write until the parity write path and the layout itself are confirmed.
+next in line for its array-box run; RAID 5/6 assemble and read, and refuse
+every write by default. RAID 5 writes (full rows and read-modify-write of
+partial rows) exist under `enable_writes=1 parity_writes=1`; discards and all
+RAID 6 writes remain refused, and that path is not hardware-validated yet.
 
 | Format | State | Notes |
 | --- | --- | --- |
 | **RAID 0 (Stripe)** | ✅ **Baseline — stable** | Full horizontal data chunk striping. |
 | **RAID 1 (Mirror)** | ✅ **Baseline — stable** | Duplicated writes across pairs; round-robin load-balanced reads; degraded failover + non-blocking resync. |
-| **RAID 10 (Nested)** | 🟡 **Feature-complete — validation pending** | Striped row segments over 2-way mirrored pairs (≥ 4 drives). Writes/discards mirror to both copies, reads round-robin, per-pair degraded failover. Pair-aware member rebuild/resync and boot-time degraded assembly landed; a lost pair refuses assembly. Mirror-pair convention (adjacent `{2c, 2c+1}`) confirmed against real X399 firmware dumps (2026-10-07), but the NVMe `1022:B000` data path has **not** had its own array-box run — the [runbook's](docs/VALIDATION_RAID10.md) results table is still empty. |
-| RAID 5 (Parity) | 🟡 **Read-only — assembly + reads wired** | Single-parity, dense per-row packing. Level comes from the LD `DeviceType` only (`0x1BF5`, confirmed on a BIOS-created 3-disk array 2026-11-08). Volume assembles at `(N-1)` × per-member capacity and serves reads; writes/discards are refused and the queue is capped at one stripe per request, because the parity-chunk address is the *same* row slot as the data chunk it protects. **Level/geometry hardware-confirmed.** Parity placement is settled from the vendor blob — **dedicated parity on member `N-1`, no rotation** — and the map (`rc_amd_map_distributed_raid5`) now implements it; the earlier row-rotating map disagreed on two rows in three and was replaced 2026-11-08 ([VALIDATION_RAID5.md](docs/VALIDATION_RAID5.md), issue #6). **Layout settled against the vendor implementation**; not yet corroborated by reading a vendor-written array, and member order comes from the LD element array. The volume is read-only because there is no parity write path, not because the map is in doubt. No rebuild or metadata writer yet. |
+| **RAID 10 (Nested)** | 🟡 **Feature-complete — validation pending** | Striped row segments over 2-way mirrored pairs (≥ 4 drives). Writes/discards mirror to both copies, reads round-robin, per-pair degraded failover. Pair-aware member rebuild/resync and boot-time degraded assembly landed; a lost pair refuses assembly. Mirror-pair convention (adjacent `{2c, 2c+1}`) confirmed against real X399 firmware dumps (2026-10-07), but the NVMe `1022:B000` data path has run **only with metadata this driver wrote** (`rcadm -C -r10`, 2×2, 8 TB, 2026-11-13); a firmware-created array has not been assembled yet, and the [runbook's](docs/VALIDATION_RAID10.md) results table is still empty. |
+| RAID 5 (Parity) | 🟡 **Read-only — assembly + reads wired** | Single-parity, dense per-row packing. Level comes from the LD `DeviceType` only (`0x1BF5`, confirmed on a BIOS-created 3-disk array 2026-11-08). Volume assembles at `(N-1)` × per-member capacity and serves reads; writes/discards are refused by default. Without the opt-in the queue is capped at one stripe per request, because the parity-chunk address is the *same* row slot as the data chunk it protects; with it, full rows are fanned out and partial rows are read-modify-written, serialized by one write lock. **Level/geometry hardware-confirmed.** Parity placement is settled from the vendor blob — **dedicated parity on member `N-1`, no rotation** — and the map (`rc_amd_map_distributed_raid5`) now implements it; the earlier row-rotating map disagreed on two rows in three and was replaced 2026-11-08 ([VALIDATION_RAID5.md](docs/VALIDATION_RAID5.md), issue #6). **Layout settled against the vendor implementation**; not yet corroborated by reading a vendor-written array, and member order comes from the LD element array. The volume is read-only by default; an opt-in `parity_writes=1` write path exists (full rows and read-modify-write; discards are refused), and there is still no write-hole journal or rebuild. DELETE handles parity LDs, and the clean-room `rxp2adm` can create a RAID 5 array behind `parity_create=1` — metadata only over erased members, with no data/parity initialisation. |
 | RAID 6 (Dual Parity) | 🟡 **Read-only — assembly + reads wired** | P + Q dual parity (`0x1BFA`); data on `0..N-3` with P/Q dedicated to `N-2`/`N-1`, matching the vendor blob (the P/Q order within those two is assumed). Same read-only contract as RAID 5, capacity `(N-2)` × per-member. The vendor's Q is **EVENODD/RDP diagonal parity (prime 17, XOR plus an integer modulus, no Galois field)**, settled from `rc_raid6_evenodd.cpp` (issue #3) — and the generator in this tree implements that construction (`src/raid6_evenodd.h`, issue #10), with no Galois code at all. It still has no callers. No reconstruct/verify path exists, so nothing reads parity yet; a healthy array is read from its data members alone. |
 
 ---

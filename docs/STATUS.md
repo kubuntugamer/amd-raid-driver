@@ -60,12 +60,16 @@ re-assembles as if in sync; needs config-ring writer RE), **RAID10 hardware
 validation** (the level is feature-complete; a driver-written 4-disk array was
 created, assembled and read on 2026-11-13, but the firmware-array run in
 [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) is still missing), RAID5/6
-**write** dispatch (parity volumes assemble and read today, read-only; a
-firmware-created 3-disk RAID 5 was parsed, assembled and read on 2026-11-08
-— `0x1BF5`, volume `optimal`, reads served, forced read-only — but that
-array no longer exists, so it cannot be re-read; the QEMU rig re-verified
-parity assembly on 2026-11-13 with a 4-member synthetic fixture, but that
-fixture comes from our own encoder, not vendor-written media),
+**write** dispatch (parity volumes still come up read-only by default; writes
+are opt-in with `enable_writes=1 parity_writes=1` — full-row P generation and
+partial-row read-modify-write, QEMU-verified for full-row, in-row,
+chunk-boundary and cross-row writes, but never run on hardware, with no parity
+rebuild and no write-hole journal. A firmware-created 3-disk RAID 5 was parsed,
+assembled and read on 2026-11-08 — `0x1BF5`, volume `optimal`, reads served,
+forced read-only — but that array no longer exists, so it cannot be re-read;
+the QEMU rig re-verified parity assembly on 2026-11-13 with a 4-member
+synthetic fixture, but that fixture comes from our own encoder, not
+vendor-written media),
 hot-plug/rebuild, SMART pass-through,
 multi-volume, array creation from Linux
 beyond RAID0/RAID1/RAID10 (`rcadm -C` now stamps all three levels; the live
@@ -78,6 +82,95 @@ RE ground truth is in [`REVERSE_ENGINEERING.md`](REVERSE_ENGINEERING.md).
 The sections below are the dated implementation log — how each piece was built,
 kept for forensics. Where an early "Not started" / "Next steps" note has since
 been implemented, it's marked.
+
+## 2026-11-13 — RAID 5 CREATE/DELETE through the driver and rxp2adm
+
+The metadata writer no longer stops at 0/1/10. `rc_volume_create_array()`
+accepts the parity DeviceType (`0x1BF5`) and emits the firmware geometry:
+`FirstCount` 1, `SecondCount` = members, capacity `(N-1) x` the per-member user
+area, elements at the full user size. `rxp2adm create -l 5` reaches it through
+`/dev/amd_ctl0`; the rig deletes the synthetic RAID 5, re-creates it, and gets
+the same capacity and `level=RAID5` back (`--create-test`). The CLI ships as
+`rxp2adm` (`make rxp2adm`) so it is never mistaken for AMD's `rcadm` binary;
+the implementation is the same clean-room tool.
+
+`rc_volume_delete_array()` now recognises `0x1BF5`/`0x1BFA` LDs as well as
+`0x1BF6`, so deleting a parity array no longer returns `ENOENT`.
+
+Two limits are deliberate and documented:
+
+- **CREATE is opt-in** (`parity_create=1`) and writes **metadata only**. It does
+  not zero or rebuild the members' user-data regions, so it must only be used
+  with erased disks; zero the volume before trusting it. Default remains a
+  refusal with the reason in dmesg.
+- **AMD's `rcadm` still cannot create parity arrays**: its licence check stops
+  before any frame. The clean-room CLI is the path this tree tests. RAID 6
+  CREATE is still refused (no Q write/initialisation path).
+
+## 2026-11-13 — On-metal CREATE/DELETE, and the read path at hardware speed
+
+- **CREATE and DELETE ran against this driver on four 4 TB members**
+  (issue #15). DELETE removed the array LD from every member's active
+  generation and re-committed it; a forced re-probe then found only the
+  raw-disk LD and refused to register. CREATE stamped exactly the named
+  members and assembled a 16 GiB RAID 0 that `rcadm` listed as `NORMAL`.
+  One caveat is unresolved: `-ca rw` printed the caching-licence warning and
+  still sent its frame, so a gated option neither fails nor is accepted.
+- **A vendor-driver DELETE is not proof the metadata is gone.** Before the
+  run, every member still carried a committed 4-member RAID 0 LD after
+  `rcadm -D` under the vendor module. Dump LBA `0x5000` and read the active
+  generation before believing a CLI exit code.
+- **The blacklist trap that made the rig bind nothing:** `blacklist nvme` in
+  `/etc/modprobe.d` does not stop the initramfs from loading `nvme` first, so
+  `rc_init` logged `Found 0 adapters`. It needs `install nvme /bin/false` plus
+  `update-initramfs -u`, and `modprobe -r nvme` at runtime before binding.
+  The `rd.driver.blacklist=nvme` note in `README.md` now carries the same
+  warning.
+- **Measured read path (issue #14):** 4× Sabrent Rocket Q, firmware RAID 0,
+  read-only — 13,276 MiB/s sequential (100.0 % of the four members' raw
+  aggregate, 3.8× a single member at QD1) and 1,846,226 IOPS at 4 KiB random
+  with 128 outstanding (93.7 % of raw). Method and full table in
+  [`README.md`](README.md#benchmarks).
+
+## 2026-11-13 — rcadm CREATE across every level; the exit-1 cause; vendor bootstrap wedged
+
+Issue #16 ran `rcadm -C` for every array type the 9.3.3-00302 CLI offers
+against this driver on 4 × 4 TB NVMe (`enable_writes=0`, all four members
+bound), deleting each array afterwards and reading 16 MiB from every one that
+assembled. What it settled:
+
+- **Sizing is right for every level.** The default and `-ms` come from the
+  `GET_CREATE_INFO` reply (`0x100D`, `RC_WpGetCreateInfo`): 15,259,703 MiB
+  for 4-disk RAID 0, 7,629,851 for 2-disk RAID 0, 3,814,925 per RAID 1/10
+  copy. The old 17,180 MiB for everything was our `PacketSize` being read as
+  the maximum.
+- **The writer stamps exactly the named disks**, with capacity
+  `user × data_members`: RAID 0 ×4 = 31,251,871,744 sectors, RAID 0 ×2 =
+  15,625,934,848, RAID 1 = 7,812,966,400, RAID 10 ×4 = 15,625,934,848. All
+  four assemble `optimal` and read back. The earlier subset failures were
+  `-d` selection stored in `file->private_data` while `rcadm` opens
+  `/dev/rc_api` twice; it now lives at module scope and is used only when the
+  frame's `DeviceCount` matches (`45a7d4a`).
+- **JBOD (`0x1BF7`) and RAIDAble (`0x1BFB`) are still refused** by the
+  `0x1BF6 && SecondCount == 1` gate. A subset like `-C -r0 -d 0 1` used to
+  fall back to stamping every bound disk; the module-scope disk list fixes
+  that. RAID 5/6 are different: the CLI stops at "not licensed", so no frame
+  is sent at all and the driver's own refusal is untested through this verb.
+- **CREATE still exits 1 on success.** The Id is not the cause: `PreferDeviceID`
+  is stamped verbatim (`d5d4389`) and `-M -qa` lists it. After the config
+  write, `RC_ApiCreateLogicalDevice` calls `RC_FindLogicalHandle(core, id)` on
+  an in-process config that predates the mutation, and the driver's `0x1000`
+  re-read does not refresh it — hence `LOGICAL_DEVICE_NOT_FOUND` (10). A
+  fresh `rcadm` lists the array, and DELETE (no post-write lookup) exits 0.
+  Closing this needs the vendor kernel's mutation-reply semantics.
+
+The vendor-driver bootstrap from the same issue — build fixes for 7.3, blob
+patch offsets, the post-reboot sequence — is written up in
+[`VALIDATION_RAID5.md`](VALIDATION_RAID5.md) §3c, because it is the only way
+to obtain vendor-written RAID 5 bytes. It is blocked on a reboot: the first
+load with the unpatched blob oopsed inside `load_module` and left
+`module_mutex` held, so neither module can load until then. Vendor artefacts
+stay outside the tree, unlinked.
 
 ## 2026-11-13 — RAIDCore checksums corroborated on vendor-written members
 
@@ -796,8 +889,9 @@ the short view. The original bring-up backlog (interrupt-driven completion,
 per-CPU queues) is done — see "Since done" above. What remains, in rough
 priority:
 
-1. **Metadata writer for RAID10/5/6** — `scripts/qemu-test/mkmeta.py` writes
-   0/1 only, so the installer's 10/5/6 choices stop at an error message.
+1. **Metadata writer for RAID10/5/6** — the kernel writer handles 0/1/10 and
+   opt-in RAID 5; the installer's offline encoder (`mkmeta.py`) still writes 0/1
+   only, so its 10/5/6 choices stop at an error message.
 2. **RAID10 hardware validation** — RAID0/1/10 dispatch is implemented and
    RAID0/1 are hardware-validated; what remains for RAID10 is the array-box run
    and sign-off in [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md), then promoting

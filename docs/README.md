@@ -123,6 +123,25 @@ free: the same RAID0 array that did 19.7 / 18.7 GB/s on Linux 6.17 does
 **20.6 / 19.7 GB/s on Linux 7.0** — the interrupt-driven, zero-copy
 design rides every block-layer improvement upstream lands.
 
+### Four-member NVMe RAID 0 (read-only, hardware)
+
+A second box, measured read-only (`enable_writes=0`) with `fio` 3.41,
+`direct=1`: firmware-created RAID 0 over 4× Sabrent Rocket Q 4 TB
+(PCIe 3.0 ×4), 256 KiB chunks, 14.55 TiB, the volume holding a live XFS
+filesystem. Raw baselines are the same four drives served by `nvme`.
+
+| Workload | Raw members | RAID 0 | vs raw |
+|---|---:|---:|---:|
+| Seq 1 MiB, 128 outstanding | 13,276.0 MiB/s | 13,276.2 MiB/s | **100.0 %** |
+| Rand 4 KiB, 128 outstanding | 1,969,933 IOPS | 1,846,226 IOPS | **93.7 %** |
+
+Each member did 3,319 MiB/s sequential — pinned at its PCIe 3.0 ×4 link —
+so that array ceiling is the drives, not the driver. At QD1 a 1 MiB read
+is split across all four members: 9,239 MiB/s and 90 µs mean versus
+2,421 MiB/s and 390 µs on one drive. 4 KiB QD1 is 39.3 K IOPS against
+36.8 K raw, i.e. no measurable driver latency. Single 20 s pass per
+workload, `powersave` governor.
+
 <p align="center">
   <img src="image/kdiskmark.png" width="480" alt="KDiskMark on the RAID0 array: 20,563 MB/s read, 19,699 MB/s write (SEQ1M Q8T1)"><br>
   <em>KDiskMark 3.3.0 on the RAID0 array serving <code>/</code> — 2× Crucial T700 NVMe SSDs (PCIe 5.0), TRX50, Kubuntu 26.04 (Linux 7.0).</em>
@@ -240,6 +259,12 @@ don't stick on RAIDXpert firmware).
 own. If the first boot misbehaves, hit `e` in GRUB and add
 `rd.driver.blacklist=nvme` to prove the rcraid path, then revert.
 
+> A `blacklist nvme` line in `/etc/modprobe.d` is **not** equivalent: if the
+> initramfs loads `nvme` first, the blacklist never applies and `rc_init`
+> finds no adapters. On a test rig that must keep `nvme` away, also add
+> `install nvme /bin/false`, run `update-initramfs -u`, and `modprobe -r nvme`
+> before binding (issue #15).
+
 ### 🅑 Mount an array from an existing Linux install (DKMS, persistent)
 
 Survives kernel updates and comes up automatically at every boot:
@@ -320,17 +345,25 @@ Full setup, troubleshooting, and the Secure-Boot / signing details are in
   array — before rebooting. On-disk state tracking requires further
   reverse engineering of the config-ring writer and is a roadmap item.
 - **RAID10 hardware validation** — the level itself is feature-complete
-  (dispatch, per-pair failover, rebuild, degraded boot), but it has not been run
-  on the `1022:B000` array box yet, so don't put data you can't lose on it. See
+  (dispatch, per-pair failover, rebuild, degraded boot), but its only
+  `1022:B000` array-box run used metadata this driver wrote (`rcadm -C -r10`,
+  2×2, 8 TB, 2026-11-13); a firmware-created array has not been assembled yet,
+  so don't put data you can't lose on it. See
   [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md). **RAID5/6** — a parity volume
   is now identified from the LD `DeviceType`, assembles at the right capacity
-  and serves reads, but it is forced **read-only**: the parity write path, the
-  rebuild, and the metadata writer are not wired. Vendor parity placement is
-  settled against the vendor implementation (dedicated, on member `N-1`) and
-  the map now matches it; what is still owed is corroboration — no
-  vendor-written array has been read back through it, so treat that as the last
-  open check rather than as doubt about the layout. Don't write to one: there
-  is no write path (issue #6).
+  and serves reads, but it is **read-only by default**: partial-stripe
+  read-modify-write and writes need the opt-in below, and there is no parity
+  rebuild. RAID 5 has an opt-in write path (`enable_writes=1 parity_writes=1`:
+  full-row parity generation plus read-modify-write for partial rows, checked
+  in the QEMU rig); RAID 6 has none. DELETE handles parity LDs, and the
+  clean-room `rxp2adm` can create RAID 5 behind `parity_create=1` — metadata only
+  over erased members, with no initialisation pass. Vendor parity placement is settled against
+  the vendor implementation (dedicated, on member `N-1`) and the map matches
+  it; what is still owed is corroboration — no vendor-written array has been
+  read back through it, so treat that as the last open check rather than as
+  doubt about the layout. Don't write without the opt-in, and treat writes as
+  unvalidated on hardware: there is no write-hole journal or rebuild (issue
+  #6).
 - **SATA RAID** — the `43BD / 7905 / 7916 / 7917` controllers are **not
   claimed**; the AHCI path is unimplemented, so those devices stay bound to
   `ahci` (see #7).
