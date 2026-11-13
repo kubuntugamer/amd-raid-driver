@@ -225,10 +225,13 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
       RAID0/RAID1 images.  The member block can also be written back
       through the driver's own NVMe queues and flushed
       (`meta_write_probe`, rig-only): the QEMU battery rewrites LBA
-      0x5000, proves the medium changed, and restores the original on
+      0x5000, proves the medium changed, and restores the      original on
       RAID0, RAID1 and degraded RAID1.  Still missing: stamping a full
       image set (generation + commit) onto members that have none,
       choosing the free devices, and the hot gendisk create/teardown.
+      The `rcadm`/`/dev/rc_api` side of the same writer — which verbs need
+      it and what still blocks them — is inventoried under "Management &
+      monitoring plane" → "`rcadm` parity on `/dev/rc_api`".
 
 - [x] **Replace / rebuild a failed drive** — moot for RAID0; needed
       for RAID1/5/10. Background rebuild kthread, progress in
@@ -348,6 +351,83 @@ rebuild) being the definition of the category. The items below are what
       *Status 2026-11-08:* there are **zero** `kobject_uevent()` calls in the
       tree — degraded, member death, reset latch and resync completion are
       all dmesg-only, so the sysfs attrs are poll-only.
+
+#### `rcadm` parity on `/dev/rc_api` — inventory (2026-11-10)
+
+`rcadm` stays AMD's binary; the deliverable is the kernel ABI it speaks, not a
+replacement CLI, so this subsection is the entire userspace-parity budget. The
+read half is done (`src/rc_api.c`, `src/rc_cfgwrite.h`): `INQUIRY` EVPD page
+`0xD7`, the mailbox-window handshake, and a 64 KiB config packet synthesized
+from the volume this driver actually assembled. `--version`, `--show` and
+`--list` are answered from that packet (exercised with the shipped `rcadm`
+9.3.3-00302 in the QEMU rig); other read verbs are untested, not claimed.
+Every mutation frame is decoded field by field and refused, because there is
+no metadata writer to persist it — the refusal is the correct behaviour, not a
+gap to paper over.
+
+The cost is dominated by three shared pieces, not by the verbs:
+
+- [ ] **Persistence engine (~1,500–2,500 LOC)** — full 16 KiB packet
+      round-trip (all four record types, offsets, sizes, checksum),
+      generation-ring slot choice, the 512-byte `RC_ConfigCommit`, the
+      `WaitForAcceptConfigChange` two-phase commit, the 128-byte per-member
+      stamp, and crash-safe ordering. Gates every verb below. The vendor
+      chain is specified in
+      [`REVERSE_ENGINEERING.md`](REVERSE_ENGINEERING.md), "Vendor kernel-side
+      config-write chain".
+- [ ] **Multi-volume registry and hot lifecycle (~800–1,500 LOC)** — today
+      `rc_volume_members[]` is a singleton and the single gendisk is created at
+      assembly; create/delete need a per-volume list, gendisk create and
+      teardown, and a busy check. Required by CREATE and DELETE on their own.
+- [ ] **Free-member enumeration** — the shim can only emit disks the driver
+      bound, and binding requires the `0x5000` metadata signature, so
+      `rcadm --list --disk` has nothing to offer `-C`. The PD record already
+      defines the fields (`DeviceState`, largest/total free space at
+      `+0xC8`/`+0xD0`); this is enumeration and stamping, not new layout.
+
+| Verb | Code | Payload | Blocked on |
+|---|---|---|---|
+| CREATE | 2 | 172 B, decoded | persistence, enumeration, gendisk create |
+| DELETE | 3 | 24 B, decoded | persistence, gendisk teardown |
+| TRANSFORM | 8 | 140 B, decoded | OCE/ORLM data movement (phases 3–4) |
+| ACCEPT_CONFIG_CHANGES | 15 | — | persistence (two-phase commit) |
+| COMMIT_PREVIOUS_CONFIG | 36 | 4 B | persistence (rollback) |
+| RESCAN | 16 | — | config re-read + rebind |
+| MANAGE | 7 | 76 B | spare semantics the data path lacks |
+| MANAGE_PHYSICAL_DEVICE | 29 | — | spare/offline semantics |
+| OFFLINE | 17 | 20 B | spare/offline semantics |
+| CONTROL_TASK | 34 | 28 B | resync/rebuild task records |
+| COPY | 35 | 56 B | data movement |
+| SPLIT | 14 | 52 B | data movement |
+| WRITE_METADATA | 44 | 32 B | semantics unrecorded — needs more RE |
+
+Thirteen command codes appear in the vendor DWARF; payload sizes are known for
+eleven and field layouts for the three above. A dash means the size is not
+recorded, not that the command is trivial.
+
+Blockers, in the order they bite:
+
+- **The commit checksum is unconfirmed.** `RC_GenerateChecksum` is documented
+  as an order-dependent XOR with a half-word swap, but it has never been
+  round-tripped against a `Checksum` read off a vendor-written member. A writer
+  built on it can emit metadata this driver and `mkmeta.py` both accept while
+  the firmware rejects it — and no QEMU test can tell the difference, because
+  the rig has no vendor firmware to disagree.
+- **No vendor-written bytes to validate against.** The vendor-created parity
+  array was deleted; the array box's live RAID 0 cannot be written without
+  unbinding the OS disk. The first real test of any writer is BIOS accepting a
+  generation it did not produce, on disks that can be lost.
+- **RAID 5/6 create cannot be honest before the parity write path** (phase 1).
+  Metadata that assembles a volume the driver still forces read-only is worse
+  than the current refusal.
+- **TRANSFORM/SPLIT/COPY are phase 3/4 projects, not shim work.** They move
+  data, so they are precisely the OCE/ORLM items the prime directive keeps out
+  of main.
+
+Minimum useful cut: persistence + enumeration + CREATE + DELETE, RAID 0/1 only
+— roughly 3,000–4,500 LOC over four to six PRs, two-thirds of it the
+persistence engine. The private-ioctl route (`rcraidctl`) does not avoid that
+cost; it only saves the ABI decoding, which is the smallest part.
 
 ### Validation & support
 
