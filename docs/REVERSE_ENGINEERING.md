@@ -1067,6 +1067,47 @@ on all four members of the X399 fixture set
 CC0). The commit checksum is therefore no longer an open question. Re-run the
 check with `scripts/qemu-test/verify-checksums.py member*.meta.bin`.
 
+Second corroboration, on NVMe (2026-11-13): all four members of this box's live
+4-member RAID 0 reproduce both stored values the same way, and the committed
+generation was then walked byte by byte. That settles the two items the roadmap
+listed as unestablished, and corrects one of them:
+
+- **The generation has no checksum.** Its `+0x00` is the generation timestamp
+  (`ce92a7827c5432da` on this array), equal to the commit block's `+0x10`, and
+  the records start at `+0x200`. The `Checksum` word in the rcadm-facing
+  packet header belongs to that runtime view only (see "Checksum: not
+  validated by `rcadm`"); a writer persisting a generation does not compute
+  it.
+- **The 128-byte member record is inside the generation**, not a separate
+  stamp: tag `0x25BC`, 128-byte stride, written before the LD records. The
+  observed order is `6 × 0x25BC` at `+0x200`, then `0x25BD` records (array
+  first, size from `+0x90`), then `6 × 0x25BE` at `0x88` stride.
+
+### On-disk generation layout (observed 2026-11-13)
+
+`0x25BC` records, 128-byte stride, all `DeviceState 0x3000`, all
+`PreviousHandle 0`, all `StartMetaDataSpace`/`EndMetaDataSpace` zero:
+
+| Slot | `DeviceType` | `DeviceID` | `Capacity` | `Features` |
+|---|---|---|---|---|
+| 0 | `0x1201` controller/version | `0x0000102285900000` | 0 | 0 |
+| 1-3, 5 | `0x1200` NVMe member | each member's `RC_MetaData` DeviceId | 7813988352 (whole disk) | `0x22af001c` |
+| 4 | `0x1203` SATA disk | `0x17bb137f72a02f21` | 1953525168 | `0x21ed0018` |
+
+Then the LD records: the array first (`0x1BF6`, `PacketSize 0x310`, 4 elements
+at `alloc_off` 1048576 / `user_off` 1069056), and one `0x1BF9` single-disk
+record for the 1 TB disk that is not a member. Note there is **no** `0x1BF9`
+record for the NVMe members of this array, contrary to the earlier reading
+that firmware publishes one raw-disk LD per physical member; here the members
+are consumed by the array and only the non-member disk gets a raw record.
+Then `6 × 0x25BE` controller records: four `1022:b000` NVMe ports and two
+`1022:43bd` AHCI controllers (6 ports each), `PCILocation` `0x170000`,
+`0x150000`, `0x110000`, `0x0a0000`, `0x060000`, `0x030000`.
+
+The walk ends with zero padding to a 512-byte boundary (`0xE00` total here).
+Reproduce it with `scripts/qemu-test/inspect-generation.py member*.meta.bin`.
+The encoders in this tree do not yet emit the PD or CTRL sections.
+
 Still unestablished: which range the 16 KiB config packet's own checksum
 covers, and the 128-byte `RC_PhysicalDeviceOnDisk` member stamp — neither
 record appears in these dumps.

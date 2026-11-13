@@ -97,10 +97,21 @@ generation.
   it over `[0x08, 0x200)`. The parser never read that word, so assembly is
   unchanged, but metadata stamped from this tree now matches the firmware's
   layout; `make test-metabuild` still diffs the two encoders byte for byte.
-- Still open for a writer: the byte range the 16 KiB config packet's checksum
-  covers, and the 128-byte `RC_PhysicalDeviceOnDisk` member stamp. Neither
-  appears in these dumps. RAID 5/6 create stays blocked on the parity write
-  path, and TRANSFORM/SPLIT/COPY remain OCE/ORLM work.
+- **The two remaining writer unknowns were settled from the live array,
+  read-only (2026-11-13).** The four members of this box's firmware-created
+  RAID 0 verify both checksums, and the committed generation was walked in
+  full: `+0x00` is the generation timestamp (no checksum), then
+  `6 × 0x25BC` 128-byte records (the controller record, the members, and a
+  non-member disk), then the `0x25BD` records, then `6 × 0x25BE` controllers.
+  So the packet checksum is a runtime-view field a persisted generation never
+  carries, and the member stamp is the `0x25BC` record already inside the
+  generation. Reproduce with `scripts/qemu-test/inspect-generation.py`.
+- **The gap that replaces them: our encoders omit two sections of that
+  layout.** `rc_mb_generation()` / `mkmeta.py` write only the raw and array LD
+  records. The parser needs nothing else and the rig assembles, but firmware's
+  generation is PD-then-LD-then-CTRL; a writer aimed at BIOS acceptance has to
+  emit that order. RAID 5/6 create stays blocked on the parity write path, and
+  TRANSFORM/SPLIT/COPY remain OCE/ORLM work.
 - **A stamped RAID10 set reached the RAID10 data path, found a read defect,
   and now passes the full battery.** `rcstamp --level raid10` on four members
   assembles as RAID10 at the expected capacity (`FirstCount` 2 × `SecondCount`

@@ -430,10 +430,16 @@ Blockers, in the order they bite:
   algorithm in `rc_meta_build.h` reproduces the stored value on all four
   members of the X399 fixture set — vendor-written bytes, not inference.
   Re-run it with `scripts/qemu-test/verify-checksums.py member*.meta.bin`.
-  Still unestablished: the byte range the 16 KiB config packet's checksum
-  covers, and the 128-byte `RC_PhysicalDeviceOnDisk` member stamp. Neither
-  appears in those dumps, so a writer must still get those two right on
-  hardware.
+  The two items that were still open were then read off the live 4-member
+  NVMe array on 2026-11-13 (`docs/REVERSE_ENGINEERING.md`, "On-disk
+  generation layout"): the generation carries no checksum word at all — `+0x00`
+  is its timestamp — and the 128-byte `RC_PhysicalDeviceOnDisk` records are the
+  `0x25BC` entries inside the generation, before the LD records. The gap that
+  remains is in our encoders, not in the layout: `rc_mb_generation()` writes
+  only LD records, so it produces a generation this driver's parser accepts
+  and the QEMU rig assembles, but not the PD-then-LD-then-CTRL order firmware
+  writes. Emitting those sections is the next writer task, and the observed
+  bytes are the target.
 - **No vendor-written bytes to validate against.** The vendor-created parity
   array was deleted; the array box's live RAID 0 cannot be written without
   unbinding the OS disk. The first real test of any writer is BIOS accepting a
