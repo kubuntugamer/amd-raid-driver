@@ -353,19 +353,19 @@ Full setup, troubleshooting, and the Secure-Boot / signing details are in
   [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md). **RAID5/6** — a parity volume
   is now identified from the LD `DeviceType`, assembles at the right capacity
   and serves reads, but it is **read-only by default**: partial-stripe
-  read-modify-write and writes need the opt-in below, and there is no parity
-  rebuild. RAID 5 has an opt-in write path (`enable_writes=1 parity_writes=1`:
+  read-modify-write and writes need the opt-in below. RAID 5 has an opt-in write path (`enable_writes=1 parity_writes=1`:
   full-row parity generation plus read-modify-write for partial rows),
   hardware-validated 2026-11-13 on a 4-member array stamped by this driver;
-  RAID 6 has none. DELETE handles parity LDs, and the
+  RAID 6 has none. RAID 5 also has hardware-validated degraded reads and a
+  manual parity rebuild (2026-11-13); while degraded it is read-only. DELETE handles parity LDs, and the
   clean-room `rxp2adm` can create RAID 5 behind `parity_create=1` — metadata only
   over erased members, with no initialisation pass. Vendor parity placement is settled against
   the vendor implementation (dedicated, on member `N-1`) and the map matches
   it; what is still owed is corroboration — no vendor-written array has been
   read back through it, so treat that as the last open check rather than as
   doubt about the layout. Don't write without the opt-in; there is no
-  write-hole journal, no parity rebuild, and no firmware-created parity array
-  yet (issue #6).
+  write-hole journal, rebuild is manual, and no firmware-created parity array
+  has been tested yet (issue #6).
 - **SATA RAID** — the `43BD / 7905 / 7916 / 7917` controllers are **not
   claimed**; the AHCI path is unimplemented, so those devices stay bound to
   `ahci` (see #7).

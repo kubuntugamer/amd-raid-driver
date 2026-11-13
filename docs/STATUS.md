@@ -103,9 +103,32 @@ the same capacity and readback matched; without `parity_writes=1` the volume
 came up `ro=1` and refused a write. The 4 MiB metadata window on all four
 members was unchanged.
 
-Not covered: power-cut/write-hole behaviour, parity rebuild, firmware
-acceptance of a driver-stamped parity generation, a vendor-written array, and
-any member count or chunk size other than this one.
+Not covered: power-cut/write-hole behaviour, firmware acceptance of a
+driver-stamped parity generation, a vendor-written array, and any member count
+or chunk size other than this one.
+
+## 2026-11-13 — RAID 5 degraded reads + parity rebuild (hardware)
+
+On the same 4× Sabrent Rocket Q 4 TB box, on a freshly created 256 MiB RAID 5
+fixture (`rxp2adm create -l 5 -d 0 1 2 3 -s 256`), 64 MiB was written with
+O_DIRECT and read back byte-identical. Member 1 was failed through
+`/sys/block/rcraid0/rcraid/fail_member`; the volume reported `degraded`, the
+same 64 MiB read back byte-identical with the missing member's chunks
+reconstructed from P plus the two surviving data members, and a write was
+refused with `EIO`. `AMD_IOCTL_START_RESYNC` rebuilt member 1 over 174,762
+sectors (85 MiB, the whole per-member user area), the rebuild completed and
+the state returned to `optimal`; the 64 MiB readback and an 8 MiB write at
+offset 64 MiB then passed. A separate fresh-create 9 MiB run passed the same
+sequence.
+
+Two code fixes came out of the run: parity volumes now allocate the per-member
+coherent RMW buffers even when writes are disabled (degraded reads and rebuild
+need them), and the synchronous PRP path now expresses a transfer whose last
+page is partial, so the rebuild's 170-sector tail completes instead of
+aborting. Without the opt-in the volume remains read-only; while degraded it is
+also read-only, and the rebuild is manual. Still open: the write hole, parity
+initialisation, automatic rebuild, vendor-written corroboration, and member
+counts/chunk sizes other than 4×256 KiB.
 
 ## 2026-11-13 — Delete/create + I/O across RAID 0, 1, 10 and 5 (hardware)
 

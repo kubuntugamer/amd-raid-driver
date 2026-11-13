@@ -277,9 +277,10 @@ static void rc_volume_member_set_state(int idx, enum rc_member_state st)
  *   RAID10: every column still has at least one live copy — one failure per
  *           pair is tolerated, losing a whole pair is fatal.
  *   RAID0 : every member is live (each stripe crosses all of them).
- *   RAID5/6: every member is live — the read mapping has no
- *           reconstruction step yet, so a dead member makes some
- *           stripes unreadable rather than degraded.
+ *   RAID5 : one failed member is tolerated — reads reconstruct that
+ *           member's chunks from parity plus the surviving chunks.
+ *           Losing a second member is fatal.
+ *   RAID6 : every member is live (no dual-parity reconstruction yet).
  * Reads and writes both require this; a RAID10 column with no live member
  * would leave that half of the logical space unmapped. */
 static bool rc_volume_can_serve(void)
@@ -301,6 +302,8 @@ static bool rc_volume_can_serve(void)
 		}
 		return true;
 	}
+	if (rc_volume_raid_level == RC_LDT_RAID5)
+		return hweight32(live) + 1 >= (unsigned int)rc_volume_member_count;
 	return live == (unsigned int)(BIT(rc_volume_member_count) - 1);
 }
 
@@ -328,6 +331,8 @@ static bool rc_volume_can_serve_without(int slot)
 		}
 		return true;
 	}
+	if (rc_volume_raid_level == RC_LDT_RAID5)
+		return hweight32(live) >= (unsigned int)rc_volume_member_count - 1;
 	return live == (unsigned int)(BIT(rc_volume_member_count) - 1);
 }
 
@@ -3930,9 +3935,11 @@ static u32 rc_volume_sg_append(struct scatterlist *sgl, u32 used, u32 max,
  * overlays the request, regenerates P and rewrites the touched chunks plus
  * parity.  Both paths take rc_volume_parity_lock, so two writes can never
  * update one row's parity from different old bytes.  Discards are refused
- * because they would leave parity stale.  There is no parity rebuild and
- * no write-hole journal: a power cut between the data and parity commands
- * can leave a row inconsistent, the same exposure mdadm has without PPL.
+ * because they would leave parity stale.  A lost member is readable: the
+ * degraded path XORs P with the surviving chunks, and the resync engine
+ * rebuilds the missing member the same way.  There is still no write-hole
+ * journal: a power cut between the data and parity commands can leave a row
+ * inconsistent, the same exposure mdadm has without PPL.
  * --------------------------------------------------------------------- */
 
 static void rc_volume_rmw_free(void)
@@ -4025,14 +4032,23 @@ static void rc_volume_parity_pool_prepare(void)
 {
 	u32 bytes;
 
-	if (rc_volume_raid_level != RC_LDT_RAID5 || !rc_volume_parity_writes)
+	if (rc_volume_raid_level != RC_LDT_RAID5 &&
+	    rc_volume_raid_level != RC_LDT_RAID6)
 		return;
 	bytes = rc_volume_stripe_sectors * 512u;
 	if (!bytes || bytes > RC_VOLUME_MS_PAGES_PER_MEMBER * PAGE_SIZE)
 		return;
-	if (rc_volume_parity_pool_alloc(bytes))
+	/* parity_pool_alloc() frees the rmw pool as part of its own reset, so
+	 * it must run first.  The per-member coherent buffers then serve
+	 * three consumers, not just writes: degraded read reconstruction,
+	 * parity rebuild, and the read-modify-write path.  Allocate them even
+	 * when writes are off, or a read-only parity volume could not survive
+	 * a member loss. */
+	if (rc_volume_raid_level == RC_LDT_RAID5 && rc_volume_parity_writes &&
+	    rc_volume_parity_pool_alloc(bytes))
 		return;
-	rc_volume_rmw_alloc(bytes);
+	if (!rc_volume_rmw_bytes)
+		rc_volume_rmw_alloc(bytes);
 }
 
 static int rc_volume_parity_buf_acquire(void)
@@ -4103,10 +4119,13 @@ static int rc_volume_rmw_io(int member, u8 opc, u64 slba, u32 sectors)
 	if (!b->va || !b->prp || !rc_volume_rmw_bytes)
 		return -ENODEV;
 	bytes = sectors * 512u;
-	if (!bytes || bytes > rc_volume_rmw_bytes || (bytes % PAGE_SIZE) ||
+	if (!bytes || bytes > rc_volume_rmw_bytes ||
 	    (b->pa & (PAGE_SIZE - 1)))
 		return -EINVAL;
-	pages = bytes / PAGE_SIZE;
+	/* The transfer may end in the middle of its last page (a rebuild
+	 * tail), so count pages with DIV_ROUND_UP and point the PRP entries
+	 * at whole pages: the NVMe byte count trims the final page. */
+	pages = DIV_ROUND_UP(bytes, PAGE_SIZE);
 	if (pages > 1 + (u32)(PAGE_SIZE / sizeof(__le64)))
 		return -E2BIG;
 
@@ -4135,6 +4154,159 @@ static int rc_volume_rmw_io(int member, u8 opc, u64 slba, u32 sectors)
 		usleep_range(1000, 2000);
 	}
 	return ret;
+}
+
+/* dst ^= src over a whole chunk.  Both buffers are coherent per-member
+ * chunk buffers, so the length is a multiple of 8. */
+static void rc_volume_xor(void *dst, const void *src, u32 bytes)
+{
+	u64 *d = dst;
+	const u64 *s = src;
+	u32 i;
+
+	for (i = 0; i < bytes / sizeof(u64); i++)
+		d[i] ^= s[i];
+}
+
+/* Reconstruct one missing chunk into rc_volume_rmw[target].va.
+ *
+ * For every RAID 5 row the N chunks XOR to zero (parity is the XOR of the
+ * data chunks), so the missing chunk is the XOR of all the row's surviving
+ * chunks.  The caller holds rc_volume_parity_lock, which also owns the
+ * per-member buffers. */
+static int rc_volume_parity_reconstruct_chunk(u64 stripe_lba, int target)
+{
+	const u32 chunk = rc_volume_stripe_sectors;
+	const u32 chunk_bytes = chunk * 512u;
+	const int nm = rc_volume_member_count;
+	/* stripe_lba is chunk-aligned; a row spans one chunk on each of the
+	 * (nm - 1) data members, so divide by the logical row size. */
+	const u64 row = div_u64(stripe_lba, (u64)chunk * (nm - 1));
+	u8 *dst;
+	u32 live;
+	int m, rc;
+
+	if (nm < 3 || target < 0 || target >= nm ||
+	    target >= RC_VOLUME_MAX_MEMBERS || !chunk || !chunk_bytes)
+		return -EINVAL;
+	dst = rc_volume_rmw[target].va;
+	if (!dst)
+		return -ENODEV;
+	live = (u32)atomic_read(&rc_volume_live_mask);
+
+	memset(dst, 0, chunk_bytes);
+	for (m = 0; m < nm; m++) {
+		if (m == target)
+			continue;
+		if (!(live & BIT(m)))
+			return -EIO;
+		rc = rc_volume_rmw_io(m, RC_NVME_NVM_OP_READ,
+				      row * chunk +
+				      rc_volume_member_phys_offset[m], chunk);
+		if (rc)
+			return rc;
+		rc_volume_xor(dst, rc_volume_rmw[m].va, chunk_bytes);
+	}
+	return 0;
+}
+
+/* Copy @len bytes into the request's bvecs starting at logical byte
+ * @req_off.  Used by the blocking degraded-read path, which has already
+ * assembled the bytes in a chunk buffer. */
+static int rc_volume_copy_to_request(struct request *req, u32 req_off,
+				     const void *src, u32 len)
+{
+	struct req_iterator iter;
+	struct bio_vec bv;
+	u32 pos = 0;
+
+	rq_for_each_segment(bv, req, iter) {
+		u32 end = pos + bv.bv_len;
+
+		if (req_off < end) {
+			u32 skip = req_off - pos;
+			u32 n = min(len, bv.bv_len - skip);
+			void *kaddr = kmap_local_page(bv.bv_page);
+
+			memcpy(kaddr + bv.bv_offset + skip, src, n);
+			kunmap_local(kaddr);
+			src = (const u8 *)src + n;
+			len -= n;
+			req_off += n;
+			if (!len)
+				return 0;
+		}
+		pos = end;
+	}
+	return -EIO;
+}
+
+/* Degraded RAID 5 read: one member is missing, so chunks that map to it
+ * are reconstructed from parity and the survivors.  Runs synchronously in
+ * queue_rq (the tagset is BLK_MQ_F_BLOCKING for parity levels) and takes
+ * rc_volume_parity_lock so it cannot race the per-member buffers used by
+ * writes or a rebuild.  Writes are refused while degraded, so no
+ * read-modify-write can be in flight here. */
+static blk_status_t rc_volume_parity_degraded_read(struct request *req)
+{
+	const u32 chunk = rc_volume_stripe_sectors;
+	const u32 nr = blk_rq_sectors(req);
+	const sector_t pos = blk_rq_pos(req);
+	const u32 live = (u32)atomic_read(&rc_volume_live_mask);
+	u32 done = 0;
+	blk_status_t st = BLK_STS_OK;
+
+	if (rc_volume_member_count < 3 || !chunk || !nr ||
+	    rc_volume_rmw_bytes < chunk * 512u) {
+		rc_printk(RC_ERROR,
+			  "rc_volume: degraded RAID5 read at lba %llu cannot reconstruct — chunk buffer missing (chunk=%u bytes=%u)\n",
+			  (unsigned long long)pos, chunk,
+			  rc_volume_rmw_bytes);
+		return BLK_STS_IOERR;
+	}
+
+	down(&rc_volume_parity_lock);
+	while (done < nr) {
+		const sector_t cur = pos + done;
+		const sector_t stripe_lba = cur - (cur % chunk);
+		const u32 off = (u32)(cur - stripe_lba);
+		const u32 nsec = min(nr - done, chunk - off);
+		int tgt, rc;
+		u64 phys;
+		u8 *src;
+
+		rc_volume_map_lba(cur, &tgt, &phys);
+		if (tgt < 0 || tgt >= rc_volume_member_count) {
+			st = BLK_STS_IOERR;
+			break;
+		}
+		if (live & BIT(tgt)) {
+			rc = rc_volume_rmw_io(tgt, RC_NVME_NVM_OP_READ,
+					      phys - off, chunk);
+		} else {
+			rc = rc_volume_parity_reconstruct_chunk(stripe_lba, tgt);
+		}
+		if (rc) {
+			rc_printk(RC_ERROR,
+				  "rc_volume: degraded RAID5 read failed at lba %llu (member %d, row chunk %llu): %d\n",
+				  (unsigned long long)cur, tgt,
+				  (unsigned long long)stripe_lba, rc);
+			st = BLK_STS_IOERR;
+			break;
+		}
+		src = (u8 *)rc_volume_rmw[tgt].va + off * 512u;
+		if (rc_volume_copy_to_request(req, done * 512u, src,
+					      nsec * 512u)) {
+			rc_printk(RC_ERROR,
+				  "rc_volume: degraded RAID5 read could not copy lba %llu len %u into the request\n",
+				  (unsigned long long)cur, nsec);
+			st = BLK_STS_IOERR;
+			break;
+		}
+		done += nsec;
+	}
+	up(&rc_volume_parity_lock);
+	return st;
 }
 
 /* Partial-row RAID 5 write.  Only the chunks the slice touches are read,
@@ -5549,9 +5721,10 @@ static blk_status_t rc_volume_queue_rq(struct blk_mq_hw_ctx *hctx,
 				"no live mirror member remains" :
 			rc_volume_raid_level == RC_LDT_RAID10 ?
 				"a mirror pair lost both copies" :
-			(rc_volume_raid_level == RC_LDT_RAID5 ||
-			 rc_volume_raid_level == RC_LDT_RAID6) ?
-				"a RAID5/6 member is dead and reconstruction is not implemented yet" :
+			rc_volume_raid_level == RC_LDT_RAID5 ?
+				"more than one RAID5 member is dead" :
+			rc_volume_raid_level == RC_LDT_RAID6 ?
+				"a RAID6 member is dead and dual-parity reconstruction is not implemented" :
 				"a member controller is dead and RAID0 has no degraded mode");
 		blk_mq_start_request(req);
 		if (rc_volume_claim_completion(pdu)) {
@@ -5652,6 +5825,36 @@ static blk_status_t rc_volume_queue_rq(struct blk_mq_hw_ctx *hctx,
 			blk_mq_end_request(req, BLK_STS_IOERR);
 		}
 		return BLK_STS_OK;
+	}
+
+	/* RAID 5 with one dead member is degraded and READ-ONLY.  Reads
+	 * reconstruct the missing chunks from parity plus the survivors;
+	 * writes and discards are refused with a reason because the RMW
+	 * path would need the dead member's old bytes to regenerate parity. */
+	if (rc_volume_raid_level == RC_LDT_RAID5) {
+		unsigned int live =
+			(unsigned int)atomic_read(&rc_volume_live_mask);
+		unsigned int full =
+			(unsigned int)(BIT(rc_volume_member_count) - 1);
+
+		if (live != full) {
+			if (op != REQ_OP_READ) {
+				printk_ratelimited(KERN_ERR
+					"rcraid: %s: op=%u pos=%llu len=%u refused — RAID 5 is DEGRADED (%u of %d members live); writes and discards stay disabled until the member is rebuilt\n",
+					rc_volume_disk ? rc_volume_disk->disk_name : "?",
+					op, (unsigned long long)pos, nr_sectors,
+					hweight32(live), rc_volume_member_count);
+				blk_mq_start_request(req);
+				if (rc_volume_claim_completion(pdu))
+					blk_mq_end_request(req, BLK_STS_IOERR);
+				return BLK_STS_OK;
+			}
+			st = rc_volume_parity_degraded_read(req);
+			blk_mq_start_request(req);
+			if (rc_volume_claim_completion(pdu))
+				blk_mq_end_request(req, st);
+			return BLK_STS_OK;
+		}
 	}
 
 	/* A RAID 5/6 read that crosses a chunk boundary now fans out one
@@ -7098,12 +7301,15 @@ static int rc_volume_create_disk(void)
 		rc_volume_tagset.numa_node    = NUMA_NO_NODE;
 		rc_volume_tagset.cmd_size     = sizeof(struct rc_volume_pdu);
 		/* Full-row writes are async (completed by the ISR), but the
-		 * partial-row read-modify-write path runs synchronous NVMe
-		 * commands in queue_rq under the parity-write lock.  BLOCKING
-		 * tells blk-mq that queue_rq may sleep; it is only set when
-		 * that path is actually enabled. */
-		rc_volume_tagset.flags        = rc_volume_parity_write_ready() ?
-						 BLK_MQ_F_BLOCKING : 0;
+		 * partial-row read-modify-write path, degraded RAID 5 reads and
+		 * the parity rebuild all run synchronous NVMe commands in
+		 * process context.  BLOCKING tells blk-mq that queue_rq may
+		 * sleep; it is set for every parity level, even a read-only one. */
+		rc_volume_tagset.flags        =
+			(rc_volume_parity_write_ready() ||
+			 rc_volume_raid_level == RC_LDT_RAID5 ||
+			 rc_volume_raid_level == RC_LDT_RAID6) ?
+			BLK_MQ_F_BLOCKING : 0;
 
 		rc_printk(RC_NOTE,
 			  "rc_volume_create_disk: blk-mq nr_hw_queues=%u (queue_depth=%u → %u total outstanding, %u SQEs/queue reserved for internal cmds)\n",
@@ -7476,6 +7682,7 @@ static int rc_volume_resync_fn(void *arg)
 	 * (the caller sets total = volume / cols), and the exclusion window
 	 * is published in LOGICAL sectors so the write gate works unchanged. */
 	bool raid10 = (rc_volume_raid_level == RC_LDT_RAID10);
+	bool raid5 = (rc_volume_raid_level == RC_LDT_RAID5);
 	u32 stripe = rc_volume_stripe_sectors;
 	u32 cols = rc_volume_raid10_cols;
 	u32 tcol = cols ? (u32)(target / 2u) : 0u;
@@ -7516,6 +7723,76 @@ static int rc_volume_resync_fn(void *arg)
 				  target, (unsigned long long)cursor,
 				  (unsigned long long)total);
 			goto done;
+		}
+		if (raid5) {
+			u32 live, nlb5, bytes5;
+			u8 *dst;
+			int m, err5;
+
+			nlb5 = (u32)min_t(u64, RC_RESYNC_XFER_SECTORS,
+					  total - cursor);
+			bytes5 = nlb5 * 512u;
+			if (!nlb5) {
+				rc_printk(RC_ERROR,
+					  "rc_volume_resync: RAID5 zero-length chunk at %llu — aborting\n",
+					  (unsigned long long)cursor);
+				goto done;
+			}
+			live = (u32)atomic_read(&rc_volume_live_mask);
+			down(&rc_volume_parity_lock);
+			dst = rc_volume_rmw[target].va;
+			if (!dst) {
+				up(&rc_volume_parity_lock);
+				rc_printk(RC_ERROR,
+					  "rc_volume_resync: no chunk buffer for member %d — aborting\n",
+					  target);
+				goto done;
+			}
+			memset(dst, 0, bytes5);
+			err5 = 0;
+			for (m = 0; m < rc_volume_member_count; m++) {
+				if (m == target)
+					continue;
+				if (!(live & BIT(m))) {
+					err5 = -EIO;
+					break;
+				}
+				err5 = rc_volume_rmw_io(m, RC_NVME_NVM_OP_READ,
+						cursor + rc_volume_member_phys_offset[m],
+						nlb5);
+				if (err5)
+					break;
+				rc_volume_xor(dst, rc_volume_rmw[m].va, bytes5);
+			}
+			if (!err5)
+				err5 = rc_volume_rmw_io(target,
+						RC_NVME_NVM_OP_WRITE,
+						cursor + rc_volume_member_phys_offset[target],
+						nlb5);
+			up(&rc_volume_parity_lock);
+			if (err5) {
+				if ((err5 == -EBUSY || err5 == -ETIMEDOUT) &&
+				    ++retries <= RC_RESYNC_MAX_RETRIES) {
+					rc_printk(RC_WARN,
+						  "rc_volume_resync: transient RAID5 error (%d) at lba %llu — retry %d/%d\n",
+						  err5, (unsigned long long)cursor,
+						  retries, RC_RESYNC_MAX_RETRIES);
+					msleep(20);
+					continue;
+				}
+				rc_printk(RC_ERROR,
+					  "rc_volume_resync: RAID5 rebuild of member %d failed (%d) at lba %llu — aborting\n",
+					  target, err5,
+					  (unsigned long long)cursor);
+				goto done;
+			}
+			retries = 0;
+			cursor += nlb5;
+			atomic64_set(&rc_volume_resync_cursor, cursor);
+			if (rc_volume_resync_delay_ms)
+				msleep(rc_volume_resync_delay_ms);
+			cond_resched();
+			continue;
 		}
 		srv_slot = rc_volume_resync_pick_survivor(target);
 		if (srv_slot < 0) {
@@ -7720,6 +7997,20 @@ done:
 			  "rc_volume_resync: member %d resynced (%llu MiB) — volume OPTIMAL\n",
 			  target,
 			  (unsigned long long)(rc_volume_resync_total >> 11));
+	} else if (raid5) {
+		/* A parity rebuild writes the target's data, so a failure
+		 * leaves it FAILED rather than parked: retrying a member
+		 * that just failed the copy would spin the scheduler.  The
+		 * operator replaces/resets it and calls START_RESYNC again. */
+		if (cmpxchg(&rc_volume_member_state[target],
+			    RC_MEMBER_RESYNCING, RC_MEMBER_FAILED) ==
+		    RC_MEMBER_RESYNCING) {
+			atomic_andnot(BIT(target), &rc_volume_write_mask);
+			rc_printk(RC_WARN,
+				  "rc_volume_resync: member %d rebuild aborted at %llu/%llu sectors — left FAILED\n",
+				  target, (unsigned long long)cursor,
+				  (unsigned long long)rc_volume_resync_total);
+		}
 	} else if (ret != 0 &&
 		   cmpxchg(&rc_volume_member_state[target],
 			   RC_MEMBER_RESYNCING, RC_MEMBER_NEEDS_RESYNC) ==
@@ -7783,14 +8074,17 @@ static void rc_volume_resync_stop(void)
 }
 
 /* Per-member sectors the resync engine copies: RAID1 spans the whole
- * (mirror) volume; RAID10 rebuilds only the target column's stripes, i.e.
- * one column's worth = volume / cols.  Caller holds rc_volume_lock. */
+ * (mirror) volume; RAID10 one column (volume / cols); RAID 5 one member's
+ * data region (volume / (members - 1)).  Caller holds rc_volume_lock. */
 static u64 rc_volume_per_member_sectors(void)
 {
 	u64 cap = rc_volume_disk ? get_capacity(rc_volume_disk) : 0;
 
 	if (rc_volume_raid_level == RC_LDT_RAID10 && rc_volume_raid10_cols)
 		cap = div_u64(cap, rc_volume_raid10_cols);
+	else if (rc_volume_raid_level == RC_LDT_RAID5 &&
+		 rc_volume_member_count > 1)
+		cap = div_u64(cap, rc_volume_member_count - 1);
 	return cap;
 }
 
@@ -7831,16 +8125,35 @@ static void rc_volume_rebuild_fn(struct work_struct *w)
 	rc_volume_resync_reap_locked();
 
 	if (rc_volume_tearing_down || rc_volume_resync_thread ||
-	    !rc_volume_disk || get_disk_ro(rc_volume_disk))
+	    !rc_volume_disk ||
+	    (get_disk_ro(rc_volume_disk) &&
+	     rc_volume_raid_level != RC_LDT_RAID5))
 		goto out;
 
 	for (slot = 0;
 	     slot < rc_volume_member_count && slot < RC_VOLUME_MAX_MEMBERS;
 	     slot++) {
+		enum rc_member_state state;
+
 		if (!rc_volume_members[slot])
 			continue;
-		if (READ_ONCE(rc_volume_member_state[slot]) !=
-		    RC_MEMBER_NEEDS_RESYNC)
+		state = READ_ONCE(rc_volume_member_state[slot]);
+		if (rc_volume_raid_level == RC_LDT_RAID5) {
+			/* Rebuild a failed member (or a re-plugged one that
+			 * came back parked) from the other N-1 live members.
+			 * Two dead members are fatal and never reach here. */
+			if (state != RC_MEMBER_FAILED &&
+			    state != RC_MEMBER_NEEDS_RESYNC)
+				continue;
+			if (hweight32((u32)atomic_read(&rc_volume_live_mask)) !=
+			    (u32)rc_volume_member_count - 1)
+				continue;
+			if (READ_ONCE(rc_volume_members[slot]->ctx.nvme.dead))
+				continue;
+			pick = slot;
+			break;
+		}
+		if (state != RC_MEMBER_NEEDS_RESYNC)
 			continue;
 		if (rc_volume_resync_pick_survivor(slot) < 0)
 			continue;
@@ -7862,7 +8175,9 @@ static void rc_volume_rebuild_fn(struct work_struct *w)
 		rc_printk(RC_ERROR,
 			  "rc_volume: failed to start resync thread (%ld)\n",
 			  PTR_ERR(t));
-		rc_volume_member_set_state(pick, RC_MEMBER_NEEDS_RESYNC);
+		rc_volume_member_set_state(pick,
+			(rc_volume_raid_level == RC_LDT_RAID5) ?
+			RC_MEMBER_FAILED : RC_MEMBER_NEEDS_RESYNC);
 		rc_volume_resync_slot = -1;
 		goto out;
 	}
@@ -8059,6 +8374,9 @@ static const char *rc_volume_state_str(void)
 		if (rc_volume_raid_level == RC_LDT_RAID1)
 			return "degraded";
 		if (rc_volume_raid_level == RC_LDT_RAID10 &&
+		    rc_volume_can_serve())
+			return "degraded";
+		if (rc_volume_raid_level == RC_LDT_RAID5 &&
 		    rc_volume_can_serve())
 			return "degraded";
 		return "failed";
@@ -8346,29 +8664,49 @@ int rc_volume_fail_member_slot(int slot)
 }
 EXPORT_SYMBOL_GPL(rc_volume_fail_member_slot);
 
-/* Nudge the live resync scheduler.  The scheduler picks one parked
- * NEEDS_RESYNC member; RAID 5/6 and RAID 0 have no rebuild path here. */
+/* Nudge the live resync scheduler.  RAID1/RAID10 pick a parked
+ * NEEDS_RESYNC member; RAID 5 picks a FAILED (or re-plugged NEEDS_RESYNC)
+ * member while the other N-1 are live.  RAID 0 and RAID 6 have no rebuild
+ * path.  A parity volume is allowed to rebuild while its block device is
+ * read-only: the engine writes the member directly, not through the disk. */
 int rc_volume_request_resync(void)
 {
 	int ret = 0;
 	int i;
 	bool parked = false;
+	bool raid5;
 
 	mutex_lock(&rc_volume_lock);
+	raid5 = (rc_volume_raid_level == RC_LDT_RAID5);
 	if (!rc_volume_disk) {
 		ret = -ENODEV;
 	} else if (rc_volume_raid_level != RC_LDT_RAID1 &&
-		   rc_volume_raid_level != RC_LDT_RAID10) {
+		   rc_volume_raid_level != RC_LDT_RAID10 && !raid5) {
 		ret = -EOPNOTSUPP;
-	} else if (get_disk_ro(rc_volume_disk)) {
+	} else if (!raid5 && get_disk_ro(rc_volume_disk)) {
 		ret = -EROFS;
 	} else {
 		for (i = 0;
 		     i < rc_volume_member_count && i < RC_VOLUME_MAX_MEMBERS;
 		     i++) {
-			if (rc_volume_members[i] &&
-			    READ_ONCE(rc_volume_member_state[i]) ==
-				RC_MEMBER_NEEDS_RESYNC) {
+			enum rc_member_state state;
+
+			if (!rc_volume_members[i])
+				continue;
+			state = READ_ONCE(rc_volume_member_state[i]);
+			if (raid5) {
+				if (state != RC_MEMBER_FAILED &&
+				    state != RC_MEMBER_NEEDS_RESYNC)
+					continue;
+				if (hweight32((u32)atomic_read(&rc_volume_live_mask)) !=
+				    (u32)rc_volume_member_count - 1)
+					continue;
+				if (READ_ONCE(rc_volume_members[i]->ctx.nvme.dead))
+					continue;
+				parked = true;
+				break;
+			}
+			if (state == RC_MEMBER_NEEDS_RESYNC) {
 				parked = true;
 				break;
 			}

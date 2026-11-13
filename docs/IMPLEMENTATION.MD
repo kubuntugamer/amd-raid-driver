@@ -212,14 +212,18 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
       the same row's parity from different old bytes. Reads fan out per data
       member when the queue is not chunk-split.      The QEMU rig and, on 2026-11-13, the array box verify full-row, in-row,
       boundary and cross-row writes; the hardware run also XOR-checked the
-      parity chunk on media. Discards are refused; there is no write-hole
-      journal (a power cut between data and parity leaves that row stale), no
-      parity rebuild, and no firmware-created parity array has been assembled.
-      Without `parity_writes=1` the volume stays read-only and the installer's
-      hard stop is unchanged.
-      Still open: the write hole, rebuild, the metadata writer, hardware
-      validation, and confirming the on-disk placement itself (issues #6 and
-      #3).
+      parity chunk on media. Discards are refused. **Degraded reads and
+      parity rebuild landed 2026-11-13:** with one member failed the volume
+      reports `degraded`, reconstructs a read chunk from P plus the surviving
+      chunks through the synchronous RMW buffers, and refuses writes;
+      `AMD_IOCTL_START_RESYNC` rebuilds a `FAILED` member from the other N-1
+      members in 128 KiB chunks, including the final partial-page tail.
+      Hardware-validated on a 4-member 256 MiB fixture (64 MiB written, member
+      failed, 64 MiB degraded readback, 85 MiB rebuild, optimal readback and
+      new writes). Without `parity_writes=1` the volume stays read-only and the
+      installer's hard stop is unchanged. Still open: the write hole, parity
+      initialisation, automatic rebuild, the metadata writer, a firmware-created
+      parity array, and vendor-written corroboration (issues #6 and #3).
 
 - [ ] **Multi-volume support** — BIOS can create multiple arrays
       on the same members. We hardcode one `/dev/rcraid0`. Refactor
@@ -263,8 +267,8 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
       member at a time; `rc_volume_resync_pick_survivor()` picks the source,
       and RAID10 rebuilds from the column's pair partner. Progress is
       `/sys/block/rcraid0/rcraid/resync_progress` (`memberN cur/tot pct%`).
-      **Scope: RAID1 and RAID10 only** — parity rebuild stays open under
-      RAID5/6 above.
+      **Scope: RAID1, RAID10 and RAID5** — RAID 5 rebuild XORs the other N-1
+      members into the target; RAID 6 remains open.
 
 ---
 
@@ -627,7 +631,7 @@ ORLM, COW, P2PDMA, io_uring, ZNS/FDP) are not on the daily-driver path at all.
 | Phase | Feature | Status (2026-11-08) | Enables |
 |---|---|---|---|
 | 0 | RAID 0 / 1 / 10 I/O + rebuild | ✅ RAID0 and RAID1 shipped and hardware-validated; RAID10 feature-complete, array-box run pending ([VALIDATION_RAID10.md](VALIDATION_RAID10.md)) | Production baseline |
-| 1 | RAID 5/6 I/O + rebuild | 🟡 Assembly + reads wired; RAID 5 writes opt-in and hardware-validated 2026-11-13, RAID 6 forced read-only; create/delete metadata works in the rig (RAID 5 behind `parity_create=1`); first firmware 3-disk RAID 5 metadata parsed, assembled and read back 2026-11-08 (`0x1BF5`, N=3, `(N-1)` × user size); placement settled from the vendor core, corroboration pending (issue #6); Q generator now the vendor's EVENODD, uncalled (issue #10); no parity rebuild | Inspect and read existing parity arrays |
+| 1 | RAID 5/6 I/O + rebuild | 🟡 Assembly + reads wired; RAID 5 writes opt-in and hardware-validated 2026-11-13, RAID 6 forced read-only; create/delete metadata works in the rig (RAID 5 behind `parity_create=1`); first firmware 3-disk RAID 5 metadata parsed, assembled and read back 2026-11-08 (`0x1BF5`, N=3, `(N-1)` × user size); placement settled from the vendor core, corroboration pending (issue #6); Q generator now the vendor's EVENODD, uncalled (issue #10); RAID 5 degraded reads + manual parity rebuild hardware-validated 2026-11-13 | Inspect and read existing parity arrays |
 | 2 | Metadata writer + TUI create | ⏳ Planned — leads the next-PR order: `mkmeta.py` writes RAID0/1 only, so the TUI's 10/5/6 choices stop at an error message | Create RAID 5/6 arrays |
 | 3 | OCE (Online Capacity Expansion) | 🗺️ Roadmap — this driver | Add drives online, restripe, grow FS |
 | 4 | ORLM (Online RAID Level Migration) | 🗺️ Roadmap — this driver | RAID 0↔5↔6↔10 online, zero host CPU |

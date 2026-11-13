@@ -4,12 +4,13 @@ This is the checklist for the **read-only-by-default** RAID 5 path. There is
 no destructive write phase to run: the driver refuses every write and discard
 unless loaded with `enable_writes=1 parity_writes=1`. With that opt-in, full
 rows generate P directly and partial rows are read-modify-written under one
-volume-wide write lock. There is no parity rebuild and no write-hole journal;
-the write path is QEMU-verified and was hardware-validated on a 4-member
-driver-stamped array on 2026-11-13 (see below). The parity **placement** is no
+volume-wide write lock. There is no write-hole journal; the write path is
+QEMU-verified and was hardware-validated on a 4-member driver-stamped array on
+2026-11-13 (see below), and degraded reads/parity rebuild are hardware-validated
+(see the second run section). The parity **placement** is no
 longer the open question — it is settled against the vendor core (§3) and the
 driver's map already follows it. What remains is corroboration on
-vendor-written bytes, power-cut behaviour, and rebuild.
+vendor-written bytes and power-cut behaviour.
 
 ## What is already confirmed on hardware
 
@@ -69,9 +70,39 @@ generation in this tree's writer layout: `DeviceType 0x1BF5`, `FirstCount` 1,
   byte-identical to the pre-run backup after the writes.
 - **Discard.** `blkdiscard` on the read-write parity volume exited non-zero.
 
-Not covered by this run: power cut / write hole, parity rebuild, firmware or
-BIOS acceptance of a driver-stamped parity generation, a vendor-written array,
-and any other member count or chunk size.
+Not covered by this run: power cut / write hole, firmware or BIOS acceptance of
+a driver-stamped parity generation, a vendor-written array, and any other
+member count or chunk size.
+
+## Degraded read + parity rebuild — 2026-11-13 (PASS)
+
+Same 4× Sabrent box, kernel `7.3.0-10-generic`, on a freshly created 256 MiB
+RAID 5 (`rxp2adm create -l 5 -d 0 1 2 3 -s 256`) loaded with
+`enable_writes=1 parity_writes=1 parity_create=1`.
+
+- **Healthy write.** 64 MiB of random data written with O_DIRECT at LBA 0 and
+  read back byte-identical.
+- **Degraded read.** Member 1 was failed through
+  `echo 1 > /sys/block/rcraid0/rcraid/fail_member`. The volume reported
+  `degraded`; the same 64 MiB read back byte-identical with every chunk on the
+  missing member reconstructed from P plus the two surviving data members. A
+  write while degraded was refused with `EIO`.
+- **Rebuild.** `AMD_IOCTL_START_RESYNC` rebuilt member 1 over 174,762 sectors
+  (85 MiB, the whole per-member user area, including the final 170-sector
+  partial-page tail). The rebuild completed, the state returned to `optimal`,
+  and the 64 MiB readback plus an 8 MiB write at offset 64 MiB both passed.
+- **Repeat.** A separate fresh-create 9 MiB run passed the same sequence
+  (healthy, degraded, rebuild, optimal).
+
+Two fixes came out of this run: parity volumes allocate the per-member coherent
+RMW buffers even when writes are disabled, because degraded reads and rebuild
+need them; and the synchronous PRP path now expresses a transfer whose last
+page is partial, so the rebuild tail completes.
+
+Limits: one failed member only (two are fatal and the volume reports `failed`),
+writes are refused while degraded, rebuild is manual via START_RESYNC, state is
+in-memory only (a reboot reassembles as in-sync), and only 4 members × 256 KiB
+chunks were tested. The write hole and parity initialisation remain open.
 
 ## Fast path — one command
 
@@ -104,17 +135,19 @@ Paste the whole output for sign-off.
 
 | What | How | Meaning |
 |---|---|---|
-| State | `cat /sys/block/rcraid0/rcraid/state` | RAID5 is `optimal` or `failed`; there is **no** `degraded`/`resyncing` |
+| State | `cat /sys/block/rcraid0/rcraid/state` | RAID5 is `optimal`, `degraded` or `resyncing`; one failed member stays readable, writes are refused until rebuilt |
 | Members | `cat /sys/block/rcraid0/rcraid/members` | one line per LD position |
 | Detail | `/sys/kernel/debug/rcraid/volume` | level, member count, per-member state |
-| Read-only | `blockdev --getro /dev/rcraid0` | must be `1` |
+| Read-only | `blockdev --getro /dev/rcraid0` | `1` without the write opt-in, `0` with it |
 | Load record | `dmesg \| grep rc_volume_parse_logical_device` | raw DeviceType/counts/capacity/chunk |
 
-`enable_writes=1` cannot make a RAID 5 volume writable: the driver records a
-geometry veto for every parity array, and the write path returns an error.
+Without `parity_writes=1` (and a full-row-capable geometry) the volume stays
+read-only; `enable_writes=1` alone is not enough.
 
-**Do not use `fail_member` on a RAID 5 array.** With one member gone, the
-volume goes straight to `failed`; there is no reconstruction/rebuild path.
+**`fail_member` is supported on RAID 5 for one member.** The volume reports
+`degraded`, reconstructs reads from parity and refuses writes; a second failed
+member is fatal. Trigger a rebuild with `AMD_IOCTL_START_RESYNC` once the
+member is usable again.
 
 ## 0. Trust gate
 
