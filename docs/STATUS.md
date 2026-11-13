@@ -60,11 +60,12 @@ re-assembles as if in sync; needs config-ring writer RE), **RAID10 hardware
 validation** (the level is feature-complete; a driver-written 4-disk array was
 created, assembled and read on 2026-11-13, but the firmware-array run in
 [`VALIDATION_RAID10.md`](VALIDATION_RAID10.md) is still missing), RAID5/6
-**write** dispatch (parity volumes still come up read-only by default; writes
-are opt-in with `enable_writes=1 parity_writes=1` — full-row P generation and
-partial-row read-modify-write, QEMU-verified for full-row, in-row,
-chunk-boundary and cross-row writes, but never run on hardware, with no parity
-rebuild and no write-hole journal. A firmware-created 3-disk RAID 5 was parsed,
+**write** dispatch (parity volumes still come up read-only by default; RAID 5
+writes are opt-in with `enable_writes=1 parity_writes=1` — full-row P generation
+and partial-row read-modify-write, QEMU-verified for full-row, in-row,
+chunk-boundary and cross-row writes and hardware-validated on 2026-11-13 on a
+4-member driver-stamped array, with the parity chunk XOR-checked on media; no
+parity rebuild and no write-hole journal. A firmware-created 3-disk RAID 5 was parsed,
 assembled and read on 2026-11-08 — `0x1BF5`, volume `optimal`, reads served,
 forced read-only — but that array no longer exists, so it cannot be re-read;
 the QEMU rig re-verified parity assembly on 2026-11-13 with a 4-member
@@ -82,6 +83,29 @@ RE ground truth is in [`REVERSE_ENGINEERING.md`](REVERSE_ENGINEERING.md).
 The sections below are the dated implementation log — how each piece was built,
 kept for forensics. Where an early "Not started" / "Next steps" note has since
 been implemented, it's marked.
+
+## 2026-11-13 — RAID 5 writes validated on hardware (4 members)
+
+The opt-in RAID 5 write path ran on the array box: 4× Sabrent Rocket Q 4 TB
+behind `1022:B000`, kernel `7.3.0-10-generic`, root on USB, Secure Boot off.
+The committed generation was a 4-member RAID 5 in this tree's writer layout
+(`0x1BF5`, `FirstCount` 1, `SecondCount` 4, chunk index 3 = 256 KiB, capacity
+`23,438,757,888` sectors, elements at `0x105000`); it assembled `optimal` with
+`enable_writes=1 parity_writes=1 parity_create=1`.
+
+Two full 768 KiB rows and four partial writes (4 KiB in-chunk, 8 KiB over a
+chunk boundary, 8 KiB over a row boundary, 4 KiB in the last chunk) read back
+byte-identical after a cache drop (`sha256 cf7e8780…c476e4`). Unloading the
+driver and reading the members raw on `nvme` showed members 0–2 holding the
+expected logical bytes and member 3 holding their XOR for both rows
+(`c454ba92…`, `0fd6774f…`). A full `rmmod`/reload re-assembled the array at
+the same capacity and readback matched; without `parity_writes=1` the volume
+came up `ro=1` and refused a write. The 4 MiB metadata window on all four
+members was unchanged.
+
+Not covered: power-cut/write-hole behaviour, parity rebuild, firmware
+acceptance of a driver-stamped parity generation, a vendor-written array, and
+any member count or chunk size other than this one.
 
 ## 2026-11-13 — RAID 5 CREATE/DELETE through the driver and rxp2adm
 

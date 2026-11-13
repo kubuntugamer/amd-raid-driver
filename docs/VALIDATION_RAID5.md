@@ -5,10 +5,11 @@ no destructive write phase to run: the driver refuses every write and discard
 unless loaded with `enable_writes=1 parity_writes=1`. With that opt-in, full
 rows generate P directly and partial rows are read-modify-written under one
 volume-wide write lock. There is no parity rebuild and no write-hole journal;
-the write path is QEMU-verified but has not run on hardware. The
-parity **placement** is no longer the open question — it is settled against
-the vendor core (§3) and the driver's map already follows it. What remains is
-corroboration on vendor-written bytes and the write path itself.
+the write path is QEMU-verified and was hardware-validated on a 4-member
+driver-stamped array on 2026-11-13 (see below). The parity **placement** is no
+longer the open question — it is settled against the vendor core (§3) and the
+driver's map already follows it. What remains is corroboration on
+vendor-written bytes, power-cut behaviour, and rebuild.
 
 ## What is already confirmed on hardware
 
@@ -41,6 +42,36 @@ item 7) — and the RAID 6 Q encoding is settled as EVENODD with prime 17
 by the vendor firmware/driver. A freshly created array is zeroed, so
 XOR checks on it are vacuous — all-zero data and all-zero parity agree with
 every candidate layout.
+
+## Hardware write run — 2026-11-13 (PASS)
+
+4× Sabrent Rocket Q 4 TB behind `1022:B000`, kernel `7.3.0-10-generic`, root on
+a USB disk, Secure Boot off. The members carried a 4-member RAID 5 committed
+generation in this tree's writer layout: `DeviceType 0x1BF5`, `FirstCount` 1,
+`SecondCount` 4, chunk index 3 (256 KiB), capacity `23,438,757,888` sectors,
+`UserDataOffset 0x105000`. It assembled `optimal` with
+`enable_writes=1 parity_writes=1 parity_create=1`.
+
+- **Writes.** Two complete rows (768 KiB each, one O_DIRECT write per row) and
+  four partial writes: 4 KiB inside a data chunk, 8 KiB straddling a chunk
+  boundary, 8 KiB straddling a row boundary, and 4 KiB in the last data chunk.
+  After `fsync` and a cache drop, the 1.5 MiB span read back byte-identical
+  (`sha256 cf7e8780…c476e4`).
+- **On-media parity.** Driver unloaded, members returned to `nvme`, raw 256 KiB
+  chunks read at `0x105000 + row × 256 KiB`. Members 0–2 matched the expected
+  logical bytes, and member 3 equalled their XOR for both rows
+  (`c454ba9291f7d53f…`, `0fd6774f8b40930e…`).
+- **Persistence.** A full `rmmod` and reload re-assembled the same 4-member
+  RAID 5 (`optimal`, same capacity) and the span read back identically.
+- **Default gate.** Reloading with `enable_writes=1` but without
+  `parity_writes=1` gave `ro=1`, and a 4 KiB write was refused.
+- **Metadata untouched.** The 4 MiB window at LBA `0x5000` on each member was
+  byte-identical to the pre-run backup after the writes.
+- **Discard.** `blkdiscard` on the read-write parity volume exited non-zero.
+
+Not covered by this run: power cut / write hole, parity rebuild, firmware or
+BIOS acceptance of a driver-stamped parity generation, a vendor-written array,
+and any other member count or chunk size.
 
 ## Fast path — one command
 
@@ -301,21 +332,23 @@ machine whose OS disk sits behind `1022:B000`.
 
 Fallbacks if the patched blob still wedges: create the array in UEFI
 RAIDXpert2 ([`AFTER-REBOOT.md`](AFTER-REBOOT.md)), or boot a kernel in the
-vendor's validated 6.15–6.17 range (this driver also builds there). Do **not**
-stamp RAID 5 metadata with our writer as a substitute — it emits RAID 0/1 only.
+vendor's validated 6.15–6.17 range (this driver also builds there). Our writer
+can now stamp RAID 5 metadata (`parity_create=1`), but it initialises neither
+data nor parity and is not a substitute for a vendor-written fixture.
 
 ## 4. Explicitly not testable yet
 
-- Discard, and any write outside the opt-in. Writes exist behind
-  `parity_writes=1`; the QEMU rig checks full-row, in-row, boundary and
-  cross-row read-modify-write (`--level raid5 --members 4 --parity-writes`),
-  but nothing has validated a driver-written parity chunk on hardware, against
-  vendor-written data, or across a power cut.
+- Discard remains refused. The write path is now hardware-validated for
+  full-row, in-row, chunk-boundary and row-boundary writes, including the
+  parity chunk on media, but not across a power cut and not against
+  vendor-written data.
 - Creating a RAID 5/6 array through AMD's `rcadm`: its licence check stops it
   before any frame is sent (§3c). This driver's own CLI can stamp RAID 5 with
-  `parity_create=1`, and the QEMU rig covers delete → create → reassembly, but
-  that is metadata only over zeroed images — no hardware run, and no
-  initialisation of data or parity. RAID 6 CREATE remains refused.
+  `parity_create=1`; the box's 4-member array carried a generation in that
+  format, and rows 4–6 show such a volume assembling and taking writes on
+  hardware. It remains metadata only, with no initialisation of data or
+  parity, and firmware/BIOS acceptance of a driver-stamped parity generation is
+  untested. RAID 6 CREATE remains refused.
 - Member rebuild and degraded reads (RAID5 has no single-member reconstruction
   path in this driver).
 - Boot-from-RAID5.
@@ -329,12 +362,15 @@ stamp RAID 5 metadata with our writer as a substitute — it emits RAID 0/1 only
 | 1 | Level / geometry / capacity | PASS 2026-11-08 | `level=raid5`, `members=3`, `devtype=0x1bf5`, capacity 15,625,838,592 = 2 × user size |
 | 2 | Read path + read-only enforcement | PASS 2026-11-08 | 18 checks: reads at 0/25/50/75/100 %, cache-drop stable, write refused |
 | 3 | Parity placement | settled against the vendor code + map changed | issue #6: dedicated parity on member `N-1`, driver follows it since 2026-11-08; not yet corroborated by a vendor-written read |
-| 4 | Boot / install | blocked | parity writes exist only behind the QEMU rig |
+| 4 | Write path (full row + RMW) | PASS 2026-11-13 | 2 × 768 KiB full rows + 4 partial writes (in-chunk, chunk boundary, row boundary, last chunk); 1.5 MiB readback byte-identical after cache drop |
+| 5 | On-media parity | PASS 2026-11-13 | raw chunks at `0x105000 + row × 256 KiB`: members 0–2 match, member 3 equals their XOR for both rows |
+| 6 | Persistence + default gate | PASS 2026-11-13 | rmmod/reload re-assembles `optimal` at the same capacity; without `parity_writes=1` the volume is `ro=1` and refuses writes; metadata window unchanged |
+| 7 | Boot / install | blocked | installer still treats RAID 5 as read-only; no boot-from-RAID5 run |
 
 Rows 0–2 are the 2026-11-08 evidence from the 3-disk firmware array, which was
-removed on 2026-11-09 — re-running them needs a newly created array (§3c). Row
-3 has no vendor-written bytes to check against; row 4 waits on hardware-validated
-writes.
+removed on 2026-11-09. Rows 4–6 are the 2026-11-13 run on a driver-stamped
+4-member array. Row 3 still has no vendor-written bytes to check against; row 7
+waits on the installer path.
 
 Not a hardware result: delete → create → reassembly is QEMU-verified on the
 synthetic 4-member fixture (`--create-test`). It does not cover initialising a
@@ -342,8 +378,9 @@ real array's data/parity, nor firmware acceptance of the stamped generation.
 
 ## Promote
 
-Do **not** mark RAID 5 stable until the parity write path and rebuild exist.
-Placement no longer gates it — the layout is settled against the vendor code
-and the map matches it; what step 3 adds is corroboration on real bytes. The
-README row may already say "assembles and reads on hardware; layout settled
-against the vendor implementation", and moves to stable only when writes land.
+Do **not** mark RAID 5 stable until parity rebuild and write-hole handling
+exist. Writes and placement are no longer the gate: the opt-in write path is
+hardware-validated (rows 4–6) and the layout is settled against the vendor
+code. The README row may say "opt-in writes hardware-validated; no rebuild",
+and moves to stable only when rebuild, write-hole handling, and a
+firmware-created parity array have run.

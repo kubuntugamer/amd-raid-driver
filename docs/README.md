@@ -34,7 +34,7 @@ from it**.
 
 | | |
 |---|---|
-| **RAID levels** | RAID0 ✅ &nbsp;·&nbsp; RAID1 ✅ &nbsp;·&nbsp; RAID10 🟡 feature-complete, validation pending &nbsp;·&nbsp; RAID5/6 🟡 read-only (assembly + reads) |
+| **RAID levels** | RAID0 ✅ &nbsp;·&nbsp; RAID1 ✅ &nbsp;·&nbsp; RAID10 🟡 feature-complete, validation pending &nbsp;·&nbsp; RAID5 🟡 opt-in writes, hardware-validated · RAID6 🟡 read-only |
 | **Boot from the array** | ✅ Validated on hardware for **both** levels — installer script, DKMS rebuilds, initramfs hook, UEFI fallback entry |
 | **Throughput** (2× T700, PCIe 5.0) | RAID0 **20.6 / 19.7 GB/s** · RAID1 **20.5 / 11.1 GB/s** (seq R/W — [details](#benchmarks)) |
 | **Filesystem safety** | FLUSH · FUA · DISCARD/TRIM — `fsync`, journaling, and `fstrim` behave correctly |
@@ -228,8 +228,9 @@ and overwrites the selected disks.
 
 Once the volume is up the script states whether it is **writable for the
 level it found**. Read-only is a hard stop — no OS installer can write to
-it — and happens for RAID 5/6 (no parity write path yet, issue #6) or
-when the driver refused to trust the geometry.
+it — and happens for RAID 5/6 (the installer does not enable the RAID 5
+parity-write opt-in, and RAID 6 has no write path) or when the driver refused
+to trust the geometry.
 
 **3. Run the OS installer — leave this terminal open.**
 Launch the distro's installer from the live desktop (*Install Kubuntu*,
@@ -354,16 +355,17 @@ Full setup, troubleshooting, and the Secure-Boot / signing details are in
   and serves reads, but it is **read-only by default**: partial-stripe
   read-modify-write and writes need the opt-in below, and there is no parity
   rebuild. RAID 5 has an opt-in write path (`enable_writes=1 parity_writes=1`:
-  full-row parity generation plus read-modify-write for partial rows, checked
-  in the QEMU rig); RAID 6 has none. DELETE handles parity LDs, and the
+  full-row parity generation plus read-modify-write for partial rows),
+  hardware-validated 2026-11-13 on a 4-member array stamped by this driver;
+  RAID 6 has none. DELETE handles parity LDs, and the
   clean-room `rxp2adm` can create RAID 5 behind `parity_create=1` — metadata only
   over erased members, with no initialisation pass. Vendor parity placement is settled against
   the vendor implementation (dedicated, on member `N-1`) and the map matches
   it; what is still owed is corroboration — no vendor-written array has been
   read back through it, so treat that as the last open check rather than as
-  doubt about the layout. Don't write without the opt-in, and treat writes as
-  unvalidated on hardware: there is no write-hole journal or rebuild (issue
-  #6).
+  doubt about the layout. Don't write without the opt-in; there is no
+  write-hole journal, no parity rebuild, and no firmware-created parity array
+  yet (issue #6).
 - **SATA RAID** — the `43BD / 7905 / 7916 / 7917` controllers are **not
   claimed**; the AHCI path is unimplemented, so those devices stay bound to
   `ahci` (see #7).

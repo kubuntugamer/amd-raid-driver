@@ -210,10 +210,11 @@ For status of work already done, see [`STATUS.md`](STATUS.md).
       rewritten. All RAID 5 writes are
       serialized by one semaphore so a partial and a full write cannot update
       the same row's parity from different old bytes. Reads fan out per data
-      member when the queue is not chunk-split. The QEMU rig verifies full-row,
-      in-row, boundary and cross-row writes. Discards are refused; there is no
-      write-hole journal (a power cut between data and parity leaves that row
-      stale), no parity rebuild, and the path has not been run on hardware.
+      member when the queue is not chunk-split.      The QEMU rig and, on 2026-11-13, the array box verify full-row, in-row,
+      boundary and cross-row writes; the hardware run also XOR-checked the
+      parity chunk on media. Discards are refused; there is no write-hole
+      journal (a power cut between data and parity leaves that row stale), no
+      parity rebuild, and no firmware-created parity array has been assembled.
       Without `parity_writes=1` the volume stays read-only and the installer's
       hard stop is unchanged.
       Still open: the write hole, rebuild, the metadata writer, hardware
@@ -626,7 +627,7 @@ ORLM, COW, P2PDMA, io_uring, ZNS/FDP) are not on the daily-driver path at all.
 | Phase | Feature | Status (2026-11-08) | Enables |
 |---|---|---|---|
 | 0 | RAID 0 / 1 / 10 I/O + rebuild | ✅ RAID0 and RAID1 shipped and hardware-validated; RAID10 feature-complete, array-box run pending ([VALIDATION_RAID10.md](VALIDATION_RAID10.md)) | Production baseline |
-| 1 | RAID 5/6 I/O + rebuild | 🟡 Assembly + reads wired, forced read-only, writes refused by default (RAID 5 opt-in exists); create/delete metadata works in the rig (RAID 5 behind `parity_create=1`); first firmware 3-disk RAID 5 metadata parsed, assembled and read back 2026-11-08 (`0x1BF5`, N=3, `(N-1)` × user size); placement settled from the vendor core, corroboration pending (issue #6); Q generator now the vendor's EVENODD, uncalled (issue #10); no parity rebuild | Inspect and read existing parity arrays |
+| 1 | RAID 5/6 I/O + rebuild | 🟡 Assembly + reads wired; RAID 5 writes opt-in and hardware-validated 2026-11-13, RAID 6 forced read-only; create/delete metadata works in the rig (RAID 5 behind `parity_create=1`); first firmware 3-disk RAID 5 metadata parsed, assembled and read back 2026-11-08 (`0x1BF5`, N=3, `(N-1)` × user size); placement settled from the vendor core, corroboration pending (issue #6); Q generator now the vendor's EVENODD, uncalled (issue #10); no parity rebuild | Inspect and read existing parity arrays |
 | 2 | Metadata writer + TUI create | ⏳ Planned — leads the next-PR order: `mkmeta.py` writes RAID0/1 only, so the TUI's 10/5/6 choices stop at an error message | Create RAID 5/6 arrays |
 | 3 | OCE (Online Capacity Expansion) | 🗺️ Roadmap — this driver | Add drives online, restripe, grow FS |
 | 4 | ORLM (Online RAID Level Migration) | 🗺️ Roadmap — this driver | RAID 0↔5↔6↔10 online, zero host CPU |
