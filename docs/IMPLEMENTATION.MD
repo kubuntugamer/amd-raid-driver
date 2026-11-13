@@ -371,6 +371,14 @@ guest running this module with the shipped `rcadm` 9.3.3-00302. The committed
 rig does not bundle `rcadm`, so that run is not reproducible from the tree and
 none of these verbs has an automated test; other read verbs are untested, not
 claimed.
+
+*Status 2026-11-13:* the controller list (`-q -ct N`) and
+`/proc/rcraid/version` now work on the live 4-member RAID 0; the controller
+section had been 16 bytes early because the builder used the element table's
+end instead of the LD record's `PacketSize`. `-dc` still warns because this
+module reports `9.3.3.00291` and the shipped `rcadm` is `9.3.3-00302`; that
+mismatch is real, not masked.
+
 Every mutation frame is decoded field by field and refused, because there is
 no metadata writer to persist it — the refusal is the correct behaviour, not a
 gap to paper over.

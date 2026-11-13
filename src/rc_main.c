@@ -11,6 +11,7 @@
 
 #include "rc_linux.h"
 #include "patch_prototypes.h"
+#include <linux/seq_file.h>
 
 // Global state
 struct rc_global_state rc_state = {
@@ -32,6 +33,45 @@ MODULE_DESCRIPTION(RC_DRIVER_DESCRIPTION);
 MODULE_VERSION(RC_DRIVER_VERSION);
 MODULE_INFO(build_rev, RC_DRIVER_BUILD_REV);
 MODULE_LICENSE("GPL v2");
+
+/*
+ * rcadm reads /proc/rcraid/version to report and compare the driver
+ * version; the vendor driver provides it.  Without it rcadm omits the
+ * "rcraid:" line from <VERSIONS> and always warns about a version
+ * mismatch.  Report the real module version here, not the rcadm build.
+ */
+static struct proc_dir_entry *rc_proc_dir;
+
+static int rc_proc_version_show(struct seq_file *m, void *v)
+{
+    seq_printf(m, "rcraid %s\n", RC_DRIVER_VERSION);
+    return 0;
+}
+
+static void rc_proc_init(void)
+{
+    rc_proc_dir = proc_mkdir("rcraid", NULL);
+    if (!rc_proc_dir) {
+        rc_printk(RC_WARN, "rc_init: could not create /proc/rcraid\n");
+        return;
+    }
+
+    if (!proc_create_single("version", 0444, rc_proc_dir,
+                            rc_proc_version_show)) {
+        rc_printk(RC_WARN,
+                  "rc_init: could not create /proc/rcraid/version\n");
+        proc_remove(rc_proc_dir);
+        rc_proc_dir = NULL;
+    }
+}
+
+static void rc_proc_cleanup(void)
+{
+    if (rc_proc_dir) {
+        proc_remove(rc_proc_dir);
+        rc_proc_dir = NULL;
+    }
+}
 
 // Module initialization
 static int __init rc_init(void)
@@ -115,6 +155,7 @@ static int __init rc_init(void)
         return err;
     }
 
+    rc_proc_init();
     rc_state.initialized = 1;
     rc_printk(RC_NOTE, "rc_init: AMD RAID Driver initialized successfully\n");
     rc_printk(RC_NOTE, "rc_init: Found %d adapters\n", rc_state.num_adapters);
@@ -126,6 +167,8 @@ static int __init rc_init(void)
 static void __exit rc_exit(void)
 {
     rc_printk(RC_NOTE, "rc_exit: AMD RAID Driver cleanup\n");
+
+    rc_proc_cleanup();
 
     /* Remove the control nodes first so no new ioctl can touch a volume
      * that is about to be dismantled. */

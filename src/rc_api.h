@@ -26,10 +26,11 @@
 
 /*
  * Largest RC_LogicalDevice record the shim re-emits: the fixed 0x200-byte
- * header plus one 64-byte RC_LogicalElement_LE per member.  A 4-member
- * record is 0x310 bytes; 8 members is 0x400.
+ * header, one 64-byte RC_LogicalElement_LE per member, and the 16-byte tail
+ * the firmware's PacketSize includes.  A 4-member record is 0x310 bytes;
+ * 8 members is 0x410.  Keep some slack above that.
  */
-#define RC_API_LD_MAX		0x400
+#define RC_API_LD_MAX		0x420
 
 /* Config-packet geometry, from docs/REVERSE_ENGINEERING.md. */
 #define RC_API_PACKET_BYTES	0x10000u	/* what rcadm reads */

@@ -1,5 +1,5 @@
-#include "patch_prototypes.h"
 // SPDX-License-Identifier: GPL-2.0-only
+#include "patch_prototypes.h"
 /*
  * AMD-RAID Linux driver — NVMe controller + RAID0/RAID1 volume I/O path
  *
@@ -2719,11 +2719,30 @@ static void rc_volume_parse_logical_device(struct rc_adapter *adapter)
 			 * than rebuilding the record from these fields. */
 			{
 				u32 rec_len = elem_off + devices * RC_LE_BYTES;
+				u32 pkt_len =
+					get_unaligned_le32(ld + RC_LD_PACKETSIZE_OFFSET);
 
+				/*
+				 * rcadm strides the LD by its own PacketSize (+0x90),
+				 * not by the end of the element table.  On real
+				 * firmware the two differ by a 16-byte tail; using
+				 * elem_off + devices*64 places the controller
+				 * section 16 bytes early, so rcadm reads zeros where
+				 * the first 0x25BE record should start and reports
+				 * "no controllers found".  Keep the full record.
+				 */
+				if (pkt_len >= rec_len &&
+				    (u64)i + pkt_len <= avail)
+					rec_len = pkt_len;
 				if (rec_len > avail - i)
 					rec_len = avail - i;
-				if (rec_len > RC_API_LD_MAX)
+				if (rec_len > RC_API_LD_MAX) {
+					rc_printk(RC_WARN,
+						  "rc_volume_parse_logical_device: %s LD record is %u bytes, clamping to %u; /dev/rc_api will under-report members\n",
+						  pci_name(adapter->pdev), rec_len,
+						  RC_API_LD_MAX);
 					rec_len = RC_API_LD_MAX;
+				}
 				memcpy(nvme->ld_raw, ld, rec_len);
 				nvme->ld_raw_len = rec_len;
 			}
