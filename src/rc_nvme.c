@@ -5800,10 +5800,19 @@ static blk_status_t rc_volume_queue_rq(struct blk_mq_hw_ctx *hctx,
 	 * instead of the 1-cmd-per-stripe split blk-mq would otherwise force.
 	 * For a 1 MiB write on a 2-member RAID0 with 256 KiB stripe, this
 	 * cuts 4 cmds → 2 cmds and halves the per-byte queue_rq /
-	 * dma_map / completion overhead. */
+	 * dma_map / completion overhead.
+	 *
+	 * RAID1 READs are the exception: every mirror holds the whole logical
+	 * range, so one member can serve a request that spans stripes.  The
+	 * fan-out below assigns chunks by stripe modulo member count, which is
+	 * wrong for mirrors (both members map every stripe) and made a read
+	 * larger than one stripe fail with BLK_STS_IOERR.  Let those reads
+	 * fall through to the single-member path, which maps them through
+	 * rc_volume_map_lba's live-mirror selection. */
 	if ((op == REQ_OP_READ || op == REQ_OP_WRITE) &&
 	    rc_volume_stripe_sectors &&
 	    nr_sectors > 0 &&
+	    !(op == REQ_OP_READ && rc_volume_raid_level == RC_LDT_RAID1) &&
 	    (pos / rc_volume_stripe_sectors) !=
 		((pos + nr_sectors - 1) / rc_volume_stripe_sectors)) {
 		blk_status_t st = rc_volume_dispatch_multi_stripe(hctx, req,
