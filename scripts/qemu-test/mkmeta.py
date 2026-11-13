@@ -224,13 +224,23 @@ def build_metadata_block(device_id: int) -> bytes:
     return bytes(md)
 
 
+def devtype_for(level: str) -> int:
+    """On-disk DeviceType: 0x1BF6 carries 0/1/10 in the counts, parity
+    levels have their own explicit codes (REVERSE_ENGINEERING.md)."""
+    return 0x1BF5 if level == "raid5" else DEVTYPE_VOLUME
+
+
 def counts_for(level: str, members: int):
     """FirstCount (stripe width) x SecondCount (mirror count), as real
-    firmware encodes the level."""
+    firmware encodes the level.  RAID5 cannot be expressed in the counts
+    (the driver identifies it by DeviceType alone), so 1 x N is what the
+    vendor core writes and what the parser ignores."""
     if level == "raid0":
         return members, 1
     if level == "raid1":
         return 1, 2
+    if level == "raid5":
+        return 1, members
     raise ValueError(level)
 
 
@@ -267,7 +277,7 @@ def build_ld_record(level: str, device_ids, capacity: int,
     ld = bytearray(size)
     struct.pack_into("<I", ld, 0x00, DST_LOGICAL_DEVICE)
     struct.pack_into("<I", ld, LD_ELEMENTOFFSET, ELEM_ARRAY_OFFSET)
-    struct.pack_into("<I", ld, LD_DEVICETYPE, DEVTYPE_VOLUME)
+    struct.pack_into("<I", ld, LD_DEVICETYPE, devtype_for(level))
     struct.pack_into("<Q", ld, LD_CAPACITY, capacity)
     struct.pack_into("<I", ld, LD_DEVICES, n)
     struct.pack_into("<I", ld, LD_FIRSTCOUNT, first)
@@ -377,11 +387,10 @@ def main():
     ap.add_argument("images", nargs="+", help="member image files (in position order)")
     args = ap.parse_args()
 
-    if args.level != "raid0" and args.level != "raid1":
-        sys.exit(f"mkmeta: {args.level} metadata is untested — the driver "
-                 "has no dispatch for it yet; add support here alongside")
     if args.level == "raid1" and len(args.images) != 2:
         sys.exit("mkmeta: raid1 wants exactly 2 members")
+    if args.level == "raid5" and len(args.images) < 3:
+        sys.exit("mkmeta: raid5 wants at least 3 members")
     if len(args.images) < 2:
         sys.exit("mkmeta: need at least 2 member images")
 
@@ -410,6 +419,10 @@ def main():
     user_size = (min_sectors - USERDATA_START) // chunk_sectors * chunk_sectors
     if args.level == "raid0":
         capacity = user_size * len(args.images)
+    elif args.level == "raid5":
+        # One member's worth is parity; the driver's capacity cross-check
+        # derives data_cols = devices - 1 for parity levels.
+        capacity = user_size * (len(args.images) - 1)
     else:  # raid1
         capacity = user_size
 
@@ -430,7 +443,8 @@ def main():
     # the ring head, unreferenced by the commit block — exactly how a
     # deleted array's journal entries shadowed the live RAID1 on real
     # hardware.  A first-match parser assembles this and fails the test.
-    decoy_level = "raid1" if args.level == "raid0" else "raid0"
+    decoy_level = "raid1" if args.level in ("raid0", "raid10", "raid5") \
+        else "raid0"
     decoy_capacity = (user_size if decoy_level == "raid1"
                       else user_size * len(args.images))
     decoy_ld = build_ld_record(decoy_level, device_ids, decoy_capacity,

@@ -75,9 +75,11 @@ int  rc_api_snapshot_get(struct rc_api_snapshot *out);
 int  rc_volume_delete_array(void);
 
 /* Stamp a new array on the selected members, in the order given (rc_nvme.c).
- * device_ids == NULL means "every bound member". */
+ * device_ids == NULL means "every bound member"; requested_id is the
+ * logical-device Id rcadm sends as PreferDeviceID and looks up afterwards
+ * (0 means "derive one"). */
 int  rc_volume_create_array(u32 raid_type, u32 first, u32 second,
-			    u32 device_count, u32 size_mb,
+			    u32 device_count, u32 size_mb, u64 requested_id,
 			    const u64 *device_ids, u32 nr_ids);
 
 /* /dev/rc_api registration (rc_api.c). */

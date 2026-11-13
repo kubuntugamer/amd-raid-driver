@@ -63,7 +63,9 @@ created, assembled and read on 2026-11-13, but the firmware-array run in
 **write** dispatch (parity volumes assemble and read today, read-only; a
 firmware-created 3-disk RAID 5 was parsed, assembled and read on 2026-11-08
 — `0x1BF5`, volume `optimal`, reads served, forced read-only — but that
-array no longer exists, so it cannot be re-read),
+array no longer exists, so it cannot be re-read; the QEMU rig re-verified
+parity assembly on 2026-11-13 with a 4-member synthetic fixture, but that
+fixture comes from our own encoder, not vendor-written media),
 hot-plug/rebuild, SMART pass-through,
 multi-volume, array creation from Linux
 beyond RAID0/RAID1/RAID10 (`rcadm -C` now stamps all three levels; the live

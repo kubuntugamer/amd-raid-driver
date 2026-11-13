@@ -593,6 +593,9 @@ static void rc_api_log_create(const struct rc_cfgwrite *r, u32 selected)
 		  c->spare_count, c->size_mb, (unsigned long long)bytes,
 		  c->cache_flags, c->cache_tag_size, c->device_id[0],
 		  selected, c->device_count);
+	rc_printk(RC_WARN,
+		  "/dev/rc_api: CREATE requested logical-device Id 0x%016llx\n",
+		  (unsigned long long)c->prefer_device_id);
 }
 
 static void rc_api_log_delete(const struct rc_cfgwrite *r)
@@ -701,7 +704,8 @@ static long rc_api_config_write(struct sg_io_hdr *hdr, u64 lba, u32 bytes,
 					    req.u.create.first_count,
 					    req.u.create.second_count,
 					    req.u.create.device_count,
-					    req.u.create.size_mb, ids, nr);
+					    req.u.create.size_mb,
+					    req.u.create.prefer_device_id, ids, nr);
 		if (!rc) {
 			rc_printk(RC_NOTE,
 				  "/dev/rc_api: CREATE stamped on the selected member(s); volume appears on the next assembly\n");
@@ -836,9 +840,18 @@ static long rc_api_write(struct file *file, struct sg_io_hdr *hdr,
 
 	if (get_user(window, (u32 __user *)hdr->dxferp + 1))
 		return -EFAULT;
-	rc_printk(RC_NOTE,
-		  "/dev/rc_api: mailbox prepare (command %u, window lba 0x%x, %u bytes)\n",
-		  command, window, want);
+	{
+		u32 readcmd = 0;
+
+		/* Read requests carry RC_ConfigReadCommand at +0x20; it names
+		 * which structure the following read is asking for. */
+		if (get_user(readcmd, (u32 __user *)hdr->dxferp +
+			      RC_API_CR_READCMD / 4))
+			readcmd = 0;
+		rc_printk(RC_NOTE,
+			  "/dev/rc_api: mailbox prepare (command %u, readcmd 0x%x, window lba 0x%x, %u bytes)\n",
+			  command, readcmd, window, want);
+	}
 	hdr->resid = (int)(hdr->dxfer_len - want);
 	return 0;
 }

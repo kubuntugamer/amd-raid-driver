@@ -112,6 +112,8 @@ struct rc_cfgwrite_create {
 	u32 dist_spare;
 	u32 prefer_read_element;
 	u32 task_priority;
+	u8  private_bytes[32];	/* DevicePrivate[32] — the CLI fills this
+				 * in and looks the created LD up by it */
 	u32 nr_spare;		/* identifiers present in the payload, not
 				 * the requested SpareDeviceCount */
 	u32 nr_device;		/* likewise; the 172-byte create form
@@ -239,6 +241,12 @@ static inline int rc_cfgwrite_decode(const u8 *req, u32 len, struct rc_cfgwrite 
 		c->prefer_read_element =
 			rc_cw_le32(p + RC_CW_CR_PREFER_READ);
 		c->task_priority = rc_cw_le32(p + RC_CW_CR_TASK_PRIO);
+		{
+			u32 i;
+
+			for (i = 0; i < sizeof(c->private_bytes); i++)
+				c->private_bytes[i] = p[RC_CW_CR_PRIVATE + i];
+		}
 		rc_cw_copy_ids(c->spare_id, &c->nr_spare,
 			       p + RC_CW_CR_SPARE_LIST,
 			       c->spare_count < 4 ? c->spare_count : 4);

@@ -1070,9 +1070,15 @@ geometry is in `FirstCount`/`SecondCount`:
 Size units differ between the CLI and the payload: `-s` is decimal MB
 (10^6 B) while `SizeInMegabytes` is MiB (2^20 B). `-s 1024` produced 977
 (1024e6 / 2^20, rounded); `-T ... -ss` on the ~16 TB array produced
-15,259,608. `PreferDeviceID` in these captures is not trustworthy: the
-create path was entered through a forced max-size comparison and the field
-held differing uninitialised stack values per run.
+15,259,608. `PreferDeviceID` is the **logical-device Id**:
+`RC_ApiCreateLogicalDevice` writes its u64 argument straight into the
+payload at `+0x20` and, after the config write returns, calls
+`RC_FindLogicalHandle(core, that_id)` to pick the new array back up. A
+writer that stamps an Id of its own makes that lookup fail and rcadm exits 1
+with "error creating array" even though the array assembles — observed on
+2026-11-13 and fixed in `rc_volume_create_array()`. The earlier captures
+showed stack garbage in the field only because the forced capture path never
+set it.
 
 `DELETE` payload (`RC_CW_DeleteLogicalDevice`, 24 B at `0x20`): `All` 0,
 `DeviceCount` 1, `DeviceList[0]` the 16-byte logical-device identifier

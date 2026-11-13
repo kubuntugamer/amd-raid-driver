@@ -156,6 +156,30 @@ fi
 echo "rcraid-test: metadata write probe verified ($probe_ok member probe(s))"
 
 # ---------------------------------------------------------------------------
+# RAID5 fixture: parity volumes are assembly+READ only — the write path
+# deliberately does not exist, so the write/discard/mke2fs battery below
+# does not apply.  Verify the capacity, the level, the read-only flag and
+# that reads across the whole volume are served.
+# ---------------------------------------------------------------------------
+if [ "$expected_level" = "raid5" ]; then
+    mark "raid5 read-only checks"
+    [ "$(cat /sys/block/rcraid0/ro)" = "1" ] || fail "RAID5 volume is not read-only"
+    last_mib=$((size / 2048 - 4))
+    mid_mib=$((size / 2048 / 2))
+    for seek_mib in 0 "$mid_mib" "$last_mib"; do
+        dd if=/dev/rcraid0 of=/dev/null bs=1M skip="$seek_mib" count=4 2>/dev/null \
+            || fail "RAID5 read at ${seek_mib} MiB"
+    done
+    dmesg | grep -q "READ-ONLY" \
+        || fail "driver did not announce the parity volume read-only"
+    echo "rcraid-test: raid5 assembly + reads ok (read-only as designed)"
+    dmesg -n 1 2>/dev/null  # quiet kernel console so the marker cannot be split
+    echo "RCRAID-TEST-PASS"
+    poweroff -f
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
 # Degraded BOOT scenario (degraded_boot=1): one member was never attached;
 # the volume must have assembled via the allow_degraded fallback delay.
 # Focused checks only (the full battery assumes a healthy mirror):

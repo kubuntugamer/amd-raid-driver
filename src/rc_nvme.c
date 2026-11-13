@@ -5902,7 +5902,7 @@ static u32 rc_create_data_cols(u32 raid_type, u32 first, u32 second,
 }
 
 int rc_volume_create_array(u32 raid_type, u32 first, u32 second,
-			   u32 device_count, u32 size_mb,
+			   u32 device_count, u32 size_mb, u64 requested_id,
 			   const u64 *device_ids, u32 nr_ids)
 {
 	const u32 chunk_sectors = 512u;	/* chunk_index 3 = 256 KiB */
@@ -6037,7 +6037,17 @@ int rc_volume_create_array(u32 raid_type, u32 first, u32 second,
 	 * member.  A generation holding only the LD assembles here but is not
 	 * a layout the UEFI utility's parser is known to walk.
 	 */
-	volume_id = (ids[0] ^ (ids[n > 1 ? 1 : 0] << 1)) | 1ULL;
+	/*
+	 * rcadm picks the logical-device Id itself, sends it as PreferDeviceID
+	 * and, once the config write returns, looks the array up by that same
+	 * Id (RC_Core::RC_FindLogicalHandle).  Stamping an Id of our own makes
+	 * that lookup return LOGICAL_DEVICE_NOT_FOUND, which is the "error
+	 * creating array, check arguments" exit 1 — the array is on disk and
+	 * assembles, but the CLI cannot recognise it.  Honour the request;
+	 * derive one only when the payload carries none.
+	 */
+	volume_id = requested_id ? requested_id :
+		    ((ids[0] ^ (ids[n > 1 ? 1 : 0] << 1)) | 1ULL);
 	rec_len = rc_mb_records(rec, PAGE_SIZE, metas, n, first, second, cap,
 				element, 3, volume_id);
 	if (!rec_len || RC_MB_GEN_HEADER + rec_len > PAGE_SIZE) {

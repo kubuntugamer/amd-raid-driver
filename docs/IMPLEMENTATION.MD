@@ -410,7 +410,7 @@ The cost is dominated by three shared pieces, not by the verbs:
 
 | Verb | Code | Payload | Blocked on |
 |---|---|---|---|
-| CREATE | 2 | 172 B, decoded | implemented for RAID 0/1/10 over the disks named with `-d`; hardware-validated 2026-11-13 (RAID 0 ×4 = 16 TB, RAID 0 ×2-of-4 = 8 TB, RAID 1 = 4 TB, RAID 10 ×4 = 8 TB; all assemble `optimal`, read back, and `rcadm` still exits 1 on the missing completion reply — issue #16. The old 16 GiB default came from a misread `GET_CREATE_INFO` reply; max size now reports real free space) |
+| CREATE | 2 | 172 B, decoded | implemented for RAID 0/1/10 over the disks named with `-d`; hardware-validated 2026-11-13 (RAID 0 ×4 = 16 TB, RAID 1 = 4 TB, RAID 10 ×4 = 8 TB; all assemble `optimal` and read back). `PreferDeviceID` is the logical-device Id rcadm looks up after the write and is now stamped, so the CLI and the packet agree on the Id; `rcadm` still exits 1 because its post-write handle lookup uses the in-process config cache and reports `LOGICAL_DEVICE_NOT_FOUND` (10) — issue #16. DELETE exits 0. The old 16 GiB default came from a misread `GET_CREATE_INFO` reply; max size now reports real free space |
 | DELETE | 3 | 24 B, decoded | implemented; hardware-validated 2026-11-13 |
 | TRANSFORM | 8 | 140 B, decoded | OCE/ORLM data movement (phases 3–4) |
 | ACCEPT_CONFIG_CHANGES | 15 | — | persistence (two-phase commit) |
@@ -430,6 +430,16 @@ recorded, not that the command is trivial.
 
 Blockers, in the order they bite:
 
+- **CREATE's exit 1 is down to the CLI's config cache (2026-11-13).**
+  `RC_ApiCreateLogicalDevice` passes its u64 argument into the payload as
+  `PreferDeviceID` and, once the config write succeeds, calls
+  `RC_FindLogicalHandle(core, that_id)`. The writer now stamps that exact Id
+  as the LD `Id` (verified: `-M -qa` shows the requested Id), yet the lookup
+  still returns 0 — it runs against an in-process `RC_Core` whose config
+  predates the mutation, and the driver's 0x1000 re-read does not refresh it.
+  The same packet lists fine in a fresh `rcadm`, and DELETE (which does no
+  post-write lookup) exits 0. Closing this needs the vendor kernel's
+  mutation-reply semantics; the Id mismatch it exposed is fixed.
 - **The LD `State` word was the CREATE blocker (2026-11-13).**
   `RC_LogicalDevice.State` is at `+0x08`, not `+0x74` — the vendor CLI's own
   DWARF enumerates `RC_LOGICAL_STATE_NORMAL = 0x200`, `CRITICAL`, `OFFLINE`,
