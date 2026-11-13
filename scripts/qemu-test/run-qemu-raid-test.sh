@@ -165,7 +165,16 @@ add_binary() {
         install -D "$lib" "$INITRD_DIR$lib" 2>/dev/null || true
     done
 }
-MKE2FS="$(command -v mke2fs || true)"
+# Probe the system paths first: the guest only looks in /usr/sbin and /sbin,
+# so a `mke2fs` that wins on PATH from somewhere else (an Android SDK ships
+# one) gets bundled at its own absolute path and the guest silently skips
+# the sub-page test — the one that catches unmerged PRP segments.
+MKE2FS=""
+for cand in /usr/sbin/mke2fs /sbin/mke2fs "$(command -v mke2fs || true)"; do
+    [ -n "$cand" ] && [ -x "$cand" ] || continue
+    MKE2FS="$cand"
+    break
+done
 if [ -n "$MKE2FS" ]; then
     add_binary "$MKE2FS"
     echo "==> bundled $MKE2FS for the sub-page buffered-write test"

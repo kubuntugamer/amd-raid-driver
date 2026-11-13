@@ -64,3 +64,37 @@ battery, so a regression in the write path cannot pass CI silently.
 --size-mib M            per-member image size (default 256)
 --workdir DIR           keep artifacts somewhere specific
 ```
+
+## Scratch-disk workspace
+
+`--workdir` puts everything a run produces — member images, initramfs,
+console log — under one directory.  On the dev box those live on a
+dedicated disk (`/dev/sdc1`, ext4 label `rclive`, mounted at
+`/mnt/rclive`) so multi-gigabyte arrays and repeated runs do not fill
+the root filesystem, and a failure's artifacts survive a reboot:
+
+```sh
+sudo mount /dev/sdc1 /mnt/rclive
+mkdir -p /mnt/rclive/kernel
+sudo cp /boot/vmlinuz-$(uname -r) /mnt/rclive/kernel/vmlinuz
+chmod 644 /mnt/rclive/kernel/vmlinuz
+
+./scripts/qemu-test/run-qemu-raid-test.sh \
+    --kver "$(uname -r)" \
+    --kernel /mnt/rclive/kernel/vmlinuz \
+    --level raid1 --workdir /mnt/rclive/rig/raid1
+```
+
+The disk is a **data disk, never a boot target**: it carries no bootloader
+entry and no ESP, and a run never reboots the host — `kernel/vmlinuz` is
+only a file handed to QEMU's `-kernel`; the guest unpacks its own root into
+RAM and is gone again in seconds.
+Keep it that way.  This box's root filesystem is on NVMe behind the same PCI
+function the driver claims, so loading the module anywhere except a QEMU
+guest can take the development tree down with it.
+
+Give each run its own subdirectory (`raid0-4x1g`, `raid1-degraded`, ...)
+and delete it once the artifacts are no longer interesting; the rig
+`rm -f`s the member images it is about to reuse, so a stale name only
+costs space.  Exercised this way: 2 x 256 MiB RAID1 and 4 x 1 GiB RAID0
+(a 4044 MiB volume), both `==> PASS`.
