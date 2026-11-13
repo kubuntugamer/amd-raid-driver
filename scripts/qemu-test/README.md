@@ -20,7 +20,10 @@ sudo install -m 644 /boot/vmlinuz-$(uname -r) ~/vmlinuz
 # boundary read-modify-write, and a write straddling two rows:
 ./scripts/qemu-test/run-qemu-raid-test.sh --kernel ~/vmlinuz \
     --level raid5 --members 4 --parity-writes
-    --level raid5 --members 4 --create-test   # delete → create → reassemble
+
+# Delete the synthetic RAID 5, re-create it through the driver, reassemble:
+./scripts/qemu-test/run-qemu-raid-test.sh --kernel ~/vmlinuz \
+    --level raid5 --members 4 --create-test
 ```
 
 Exit 0 iff the guest prints `RCRAID-TEST-PASS`. On failure the workdir
