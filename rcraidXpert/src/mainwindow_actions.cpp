@@ -72,22 +72,34 @@ void MainWindow::handleCreateArray() {
     const int count = indices.size();
     QString problem;
 
+    if (count == 0) {
+        reportFailure("No disks selected",
+                      "Tick the Use box on the disks you want in the array, "
+                      "then press Commit again.");
+        return;
+    }
+
     switch (level) {
     case AMD_ARRAY_LEVEL_RAID0:
         if (count < 2)
-            problem = "RAID 0 needs at least 2 disks.";
+            problem = QString("RAID 0 needs at least 2 disks; %1 selected.")
+                          .arg(count);
         break;
     case AMD_ARRAY_LEVEL_RAID1:
         if (count != 2)
-            problem = "RAID 1 needs exactly 2 disks.";
+            problem = QString("RAID 1 needs exactly 2 disks; %1 selected.")
+                          .arg(count);
         break;
     case AMD_ARRAY_LEVEL_RAID10:
         if (count < 4 || (count % 2) != 0)
-            problem = "RAID 10 needs an even number of at least 4 disks.";
+            problem = QString("RAID 10 needs an even number of at least 4 "
+                              "disks; %1 selected.")
+                          .arg(count);
         break;
     case AMD_ARRAY_LEVEL_RAID5:
         if (count < 3) {
-            problem = "RAID 5 needs at least 3 disks.";
+            problem = QString("RAID 5 needs at least 3 disks; %1 selected.")
+                          .arg(count);
         } else if (ArrayDataController::parityCreateParameter() == 0) {
             problem = "RAID 5 create is disabled: the module was loaded "
                       "without parity_create=1. The writer emits metadata only "
