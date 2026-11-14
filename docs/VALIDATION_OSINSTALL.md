@@ -72,6 +72,54 @@ array the driver presents. The first ISO `initrd` attempt failed for exactly
 that reason — the ISO ships the casper live initramfs, which searches for a
 live medium instead of honouring `root=`.
 
+## Driver in the boot path (2026-11-13)
+
+What this measures: whether an installed Kubuntu 26.10 root on each level
+really boots with `rcraid` as the driver that mounts `/`. This is a separate
+run from the payload measurements above; the array was rebuilt per level and
+the install repeated end to end.
+
+Method, per level:
+
+1. Recreate the array with `rxp2adm` (RAID 5: discard the members, bootstrap
+their device IDs with the rig's `mkmeta.py`, then DELETE and CREATE again
+through the driver's writer), mkfs.ext4, and extract the ISO squashfs.
+2. Copy the 7.3.0-10 kernel tree, install this tree's `rcraid.ko` plus
+`packaging/sbin/rcraid-bind`, the udev rule, the modprobe drop-in
+(`enable_writes=1 parity_writes=1`) and the initramfs hook, then build the
+initramfs inside the target.
+3. Boot that root in QEMU on the host kernel with the level's real member
+disks attached as virtual NVMe and `snapshot=on`, so every guest write went to a
+temporary overlay and the host media was only read. `root=UUID=… rw`;
+the initramfs binds the virtual NVMe functions and mounts the array.
+4. A first-boot systemd unit checks the root source, state and capacity, then
+writes 1 GiB with `O_DIRECT`, drops caches and compares the read-back hash.
+
+| Level | Members | Capacity | Raw write 8 GiB | Raw read 4 GiB | mkfs | Payload (8.47 GB) | Rate | e2fsck | Boot to PASS | Result |
+|---|---|---|---|---|---|---|---|---|---|---|
+| RAID 0 | 4 | 14,902 GiB | 7.27 GiB/s | 8.89 GiB/s | 6.08 s | 5.80 s | 1392 MiB/s | 4.51 s | 41 s | PASS |
+| RAID 1 | 2 | 3,725 GiB | 2.48 GiB/s | 4.17 GiB/s | 2.00 s | 5.80 s | 1392 MiB/s | 2.02 s | 40 s | PASS |
+| RAID 10 | 4 | 7,451 GiB | 4.42 GiB/s | 4.21 GiB/s | 3.41 s | 5.81 s | 1390 MiB/s | 2.22 s | 41 s | PASS |
+| RAID 5 | 4 | 11,177 GiB | 1.56 GiB/s | 4.44 GiB/s | 4.36 s | 16.04 s | 528 MB/s | 3.45 s | 42 s | PASS |
+
+Every level reported `root source: /dev/rcraid0`, `state: optimal`, the
+capacity it was created with, and a matching 1 GiB write/read-back hash.
+
+Limits of this run:
+
+- QEMU's virtual NVMe is `1b36:0010`, so the boot initramfs copy used
+  `allow_foreign_nvme=1` and bound the controllers by PCI class. The installed
+  system's own udev rule keys on `1022:b000`; that rule is the expected path on
+  real hardware but was **not** the mechanism exercised here. A real boot of an
+  installed array still needs the machine rebooted with this initramfs.
+- Writes were absorbed by the QEMU snapshot, so this proves the boot, mount and
+  I/O path, not persistence across a reboot. The installed trees themselves
+  lived on the array and were verified with `e2fsck -fn` after each install.
+- RAID 5 CREATE is metadata-only; parity outside the written regions is still
+  uninitialised, as in the payload runs.
+- Not a run of the Calamares installer: it is the installer's filesystem
+  payload plus the chroot/boot setup, as above.
+
 ## What this is not
 
 - Not a run of the Kubuntu installer (Calamares/subiquity). No partition
@@ -79,7 +127,9 @@ live medium instead of honouring `root=`.
   directly on `/dev/rcraid0` and the root tree copied onto it. A real
   installer run needs a bootable guest whose initramfs carries `rcraid.ko`,
   because the stock Ubuntu initramfs does not.
-- Not a boot test: nothing was booted from the array.
+- Not a firmware boot: firmware still cannot boot an array this driver
+  presents. The QEMU run above boots the installed root with the driver in the
+  initramfs; the host itself was never rebooted onto the array.
 - Not a firmware-created array: every array here was stamped by this driver.
 
 ## Screenshots
