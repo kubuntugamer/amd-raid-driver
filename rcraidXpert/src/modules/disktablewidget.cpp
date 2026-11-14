@@ -40,16 +40,22 @@ void DiskTableWidget::setInventory(const QList<AmdDiskInfo> &disks,
         const AmdDiskInfo &disk = disks.at(row);
         QString memberOf;
 
+        /* Membership comes from the arrays the driver reports, not from
+         * the per-disk is_assigned flag: after a DELETE the driver can
+         * still advertise a slot on a disk no array owns, and a member of
+         * nothing must be selectable for the next CREATE. */
         for (const AmdArrayInfo &array : arrays) {
             if (array.members.contains(disk.index))
                 memberOf = QString("LD %1 (%2)")
                                .arg(array.id)
                                .arg(ArrayDataController::levelName(array.level));
         }
+        const bool memberOfArray = !memberOf.isEmpty();
 
         QTableWidgetItem *use = new QTableWidgetItem;
-        use->setFlags((disk.assigned ? Qt::ItemIsEnabled : Qt::ItemIsEnabled |
-                                                           Qt::ItemIsUserCheckable));
+        use->setFlags(memberOfArray ? Qt::ItemIsEnabled
+                                    : (Qt::ItemIsEnabled |
+                                       Qt::ItemIsUserCheckable));
         use->setCheckState(Qt::Unchecked);
         setItem(row, 0, use);
 
@@ -62,9 +68,8 @@ void DiskTableWidget::setInventory(const QList<AmdDiskInfo> &disks,
         setItem(row, 3, capacity);
 
         QTableWidgetItem *member = new QTableWidgetItem(
-            memberOf.isEmpty() ? (disk.assigned ? "assigned" : "unassigned")
-                               : memberOf);
-        if (disk.assigned)
+            memberOfArray ? memberOf : QStringLiteral("unassigned"));
+        if (memberOfArray)
             member->setForeground(QColor(0x1f, 0x7a, 0xd4));
         setItem(row, 4, member);
 

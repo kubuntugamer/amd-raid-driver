@@ -1338,3 +1338,18 @@ rcraid: rc_volume_timeout: tag=N op=M: issuing NVMe Abort
 The first is the ISR catching CSTS.CFS or a hot-unplug; the second is
 `.timeout` finding a dead controller; the third is the "still looks alive but
 this command is hung" path.
+
+## 2026-11-14 — DELETE releases the member slots
+
+`rc_volume_teardown()` dropped the volume registry but left each adapter's
+`nvme.volume_slot` set, and `AMD_IOCTL_GET_HARDWARE_INVENTORY` reports
+`is_assigned` from that slot. After a DELETE the driver therefore kept
+advertising the old members as `member` on disks that no array owned, and a
+client that trusts the flag (rcraidXpert did) could not select them for the
+next CREATE without reloading the module.
+
+Teardown now clears the slot with the membership, and rcraidXpert derives
+"member of LD n" from the arrays the driver reports rather than from
+`is_assigned` alone. Verified on hardware: CREATE RAID 5 over disks 0/1/2 →
+DELETE → `rxp2adm list` shows all four disks free → CREATE again succeeds →
+DELETE → all free.

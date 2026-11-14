@@ -8287,9 +8287,16 @@ void rc_volume_teardown(void)
 		blk_mq_free_tag_set(&rc_volume_tagset);
 	}
 	for (i = 0; i < RC_VOLUME_MAX_MEMBERS; i++) {
-		if (rc_volume_members[i])
+		if (rc_volume_members[i]) {
 			rc_volume_free_member_dma(i,
 				&rc_volume_members[i]->pdev->dev);
+			/* Ending the volume ends the membership.  DELETE keeps
+			 * the adapters bound, and the inventory reports
+			 * is_assigned from volume_slot: a slot left set here
+			 * would make the deleted array's disks look like members
+			 * of nothing and lock them out of the next CREATE. */
+			rc_volume_members[i]->ctx.nvme.volume_slot = -1;
+		}
 		rc_volume_members[i] = NULL;
 		rc_volume_member_phys_offset[i] = 0;
 		WRITE_ONCE(rc_volume_member_state[i], RC_MEMBER_LIVE);

@@ -121,17 +121,25 @@ void MainWindow::buildTreeFromInventory() {
         createProceduralHbaIcon(),
         QString("Physical Drives (%1)").arg(controller->disks().size()));
     for (const AmdDiskInfo &disk : controller->disks()) {
+        QString owner;
+
+        for (const AmdArrayInfo &array : controller->arrays()) {
+            if (array.members.contains(disk.index))
+                owner = QString("LD %1").arg(array.id);
+        }
+
         QString label = QString("Disk %1 - %2")
                             .arg(disk.index)
                             .arg(formatCapacity(disk.sectors * 512ull));
-        if (disk.assigned)
-            label += " (member)";
+        if (!owner.isEmpty())
+            label += QString(" (%1)").arg(owner);
 
         QStandardItem *item = new QStandardItem(createProceduralDriveIcon(), label);
         item->setToolTip(QString("%1 sectors, %2")
                              .arg(disk.sectors)
-                             .arg(disk.assigned ? "assigned to an array"
-                                                : "unassigned"));
+                             .arg(owner.isEmpty()
+                                      ? "unassigned"
+                                      : owner + " member"));
         physical->appendRow(item);
     }
     root->appendRow(physical);
