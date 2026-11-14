@@ -172,6 +172,12 @@ bool ArrayDataController::refresh()
                 array.members.append(a.member_indices[m]);
         }
         array.name = QString::fromLatin1(a.name, strnlen(a.name, sizeof(a.name)));
+
+        /* The inventory has no read-only field; the block layer does. */
+        QFile ro(QStringLiteral("/sys/block/%1/ro").arg(array.name));
+        if (ro.open(QIODevice::ReadOnly))
+            array.readOnly = ro.readAll().trimmed() != "0";
+
         m_arrays.append(array);
     }
 

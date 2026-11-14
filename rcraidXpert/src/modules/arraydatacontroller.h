@@ -24,6 +24,7 @@ struct AmdArrayInfo {
     quint32 memberCount = 0;
     QVector<quint32> members;
     QString name;
+    bool readOnly = false;
 };
 
 /*

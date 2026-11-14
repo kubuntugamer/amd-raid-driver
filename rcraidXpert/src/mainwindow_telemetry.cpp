@@ -63,12 +63,16 @@ void MainWindow::triggerControllerRescan() {
     if (!controller->arrays().isEmpty()) {
         const AmdArrayInfo &array = controller->arrays().first();
         statusPanel->setMessage(
-            QString("LD %1: %2, %3, %4 member(s), %5.")
+            QString("LD %1: %2, %3, %4 member(s), %5%6.")
                 .arg(array.id)
                 .arg(ArrayDataController::levelName(array.level))
                 .arg(formatCapacity(array.bytes))
                 .arg(array.members.size())
-                .arg(volumeStateText(controller->statusMask())));
+                .arg(volumeStateText(controller->statusMask()))
+                .arg(array.readOnly
+                         ? ", READ-ONLY (reload with enable_writes=1, and "
+                           "parity_writes=1 for RAID 5)"
+                         : QString()));
     } else {
         statusPanel->setMessage(
             "No volume assembled. Select disks in the table, choose a level, "
@@ -123,10 +127,12 @@ void MainWindow::buildTreeFromInventory() {
     for (const AmdArrayInfo &array : controller->arrays()) {
         QStandardItem *ld = new QStandardItem(
             createProceduralDriveIcon(),
-            QString("LD %1 - %2 - %3")
+            QString("LD %1 - %2 - %3%4")
                 .arg(array.id)
                 .arg(ArrayDataController::levelName(array.level))
-                .arg(formatCapacity(array.bytes)));
+                .arg(formatCapacity(array.bytes))
+                .arg(array.readOnly ? QStringLiteral(" (read-only)")
+                                    : QString()));
         ld->setData(QVariant::fromValue(array.id), Qt::UserRole);
 
         QStringList members;
