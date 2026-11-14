@@ -47,6 +47,31 @@ back from the array matched the squashfs content byte for byte.
 - RAID 5 parity is only initialised for the regions actually written. The
   volume as a whole still carries uninitialised parity outside them.
 
+## Boot test (2026-11-14)
+
+Each installed root was booted in QEMU with the array attached as the guest's
+only disk, the host kernel and initrd (`7.3.0-10-generic`, the same Kubuntu
+26.10 userspace) and `root=/dev/vda rw console=ttyS0`.
+
+| Level | Array UUID | Boot result |
+|---|---|---|
+| RAID 0 | `6f8978f1-f3e0-45f8-a0ba-869294e30d3b` | `EXT4-fs (vda): mounted … r/w`, reached `Login Prompts`, `localhost login:` |
+| RAID 1 | `24a2db92-5c04-44e8-96d7-913268f8de28` | same |
+| RAID 10 | `c330c2e2-6300-46cd-9f6e-c703ecb95220` | same |
+| RAID 5 | `455f7da2-0a9f-4a82-a73c-730951907fd1` | same |
+
+**What this proves:** the exact tree written through the array (mkfs → 8.47 GB
+unsquash → read-back → fsck) is a bootable Kubuntu 26.10 root: systemd mounts
+it read-write, reaches `getty.target` and serves a login prompt.
+
+**What it does not prove:** the guest reaches the array through virtio, not
+through `rcraid`. Booting the *driver* at boot time (kernel + initramfs
+carrying `rcraid.ko`, root on `/dev/rcraid0`) is still untested, because no
+initramfs in this tree embeds the module and the firmware cannot boot an
+array the driver presents. The first ISO `initrd` attempt failed for exactly
+that reason — the ISO ships the casper live initramfs, which searches for a
+live medium instead of honouring `root=`.
+
 ## What this is not
 
 - Not a run of the Kubuntu installer (Calamares/subiquity). No partition

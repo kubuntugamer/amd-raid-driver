@@ -1365,3 +1365,10 @@ extracted without errors, a file read back matched the squashfs byte for byte,
 finding, filed as #18; correctness on that level was not affected. Method,
 caveats (payload, not the graphical installer) and per-level screenshots:
 `docs/VALIDATION_OSINSTALL.md`.
+
+All four installed roots also boot: attached as the guest's only disk with the
+host 7.3.0-10 kernel/initrd, each reached `getty.target` and a login prompt
+with the filesystem mounted read-write. That exercises the data, not the
+driver at boot — the guest sees the array through virtio, and no initramfs in
+this tree embeds `rcraid.ko`, so a firmware-less boot chain for `/dev/rcraid0`
+remains untested.
