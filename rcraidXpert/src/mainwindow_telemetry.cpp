@@ -76,14 +76,22 @@ void MainWindow::triggerControllerRescan() {
     }
 
     if (commitButton) {
+        const bool canCreate = controller->driverPresent() &&
+                               controller->arrays().isEmpty() &&
+                               ArrayDataController::privileged();
+
+        commitButton->setEnabled(canCreate);
         if (!controller->arrays().isEmpty())
             commitButton->setToolTip(
-                "A volume is assembled. Delete it before creating another: "
-                "the driver hosts one array box.");
+                "LD " + QString::number(controller->arrays().first().id) +
+                " is assembled. This driver holds one array: delete it "
+                "before creating another.");
         else if (!ArrayDataController::privileged())
             commitButton->setToolTip(
                 "Creating an array needs root (CAP_SYS_ADMIN); start "
                 "rcraidXpert with sudo.");
+        else if (!controller->driverPresent())
+            commitButton->setToolTip("rcraid is not loaded.");
         else
             commitButton->setToolTip(
                 "Writes new array metadata over the ticked disks.");

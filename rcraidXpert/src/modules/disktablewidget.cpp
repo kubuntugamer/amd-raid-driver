@@ -53,10 +53,17 @@ void DiskTableWidget::setInventory(const QList<AmdDiskInfo> &disks,
         const bool memberOfArray = !memberOf.isEmpty();
 
         QTableWidgetItem *use = new QTableWidgetItem;
-        use->setFlags(memberOfArray ? Qt::ItemIsEnabled
-                                    : (Qt::ItemIsEnabled |
-                                       Qt::ItemIsUserCheckable));
-        use->setCheckState(Qt::Unchecked);
+        if (memberOfArray) {
+            /* No CheckStateRole at all: a checkbox that cannot be
+             * toggled reads as "the GUI refuses my click". */
+            use->setFlags(Qt::ItemIsEnabled);
+            use->setText("-\u2009");
+            use->setToolTip("This disk belongs to an array; delete the "
+                            "array to make it selectable.");
+        } else {
+            use->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+            use->setCheckState(Qt::Unchecked);
+        }
         setItem(row, 0, use);
 
         setItem(row, 1, new QTableWidgetItem(QString("Disk %1").arg(disk.index)));
