@@ -84,6 +84,62 @@ The sections below are the dated implementation log — how each piece was built
 kept for forensics. Where an early "Not started" / "Next steps" note has since
 been implemented, it's marked.
 
+## 2026-11-13 — 3-member RAID 5 write stalled in writeback; requeue-contract fix
+
+On the array box, after the 4-member fixture was deleted, a 3-member 256 MiB
+RAID 5 was stamped by this tree's writer (`0x1BF5`, `devices=3`, chunk index
+3 = 256 KiB, capacity `524288` sectors, elements at `0x105000`) and came up
+read-write under `enable_writes=1 parity_writes=1` with 4 hw queues × depth
+239. A buffered `dd … conv=fsync` to `/dev/rcraid0` then wedged: hung-task
+reports ran from 122 s to 614 s with the task in
+`blkdev_fsync → filemap_fdatawait_range → folio_wait_writeback`, and the
+kernel log carried **no** rcraid message after the volume came up — no
+timeout, no `-EBUSY`, no parity error. The reboot that ended the session was
+needed to clear it (shutdown timed out flushing filesystems and SIGKILLed the
+stuck process); it was a symptom cure, not a fix.
+
+**Root cause.** `rc_volume_dispatch_parity_write()` answered a busy parity
+lock (`down_trylock()` failure) with `BLK_STS_DEV_RESOURCE`, as it did for an
+empty parity-buffer pool and for SQ-reservation exhaustion. Per
+`include/linux/blk_types.h`, that status is a promise from the driver that
+**it** will rerun the queue once the resource frees — and there is no
+`blk_mq_run_hw_queue()` / `blk_mq_run_hw_queues()` call anywhere in `src/`.
+The requeued request therefore sat on `hctx->dispatch` with nothing to
+restart it, and the folio above it never left writeback. A single buffered
+writer submits bios on more than one hw queue, so the second bio hits the
+busy lock; a steady stream of new submissions normally re-runs the queue and
+masks the missing kick, which is why the earlier 4-member runs — effectively
+serialized — passed.
+
+**Fix** (`src/rc_nvme.c`). The write path now waits instead of requeueing:
+
+- The full-row dispatch takes `down(&rc_volume_parity_lock)` rather than
+  `down_trylock()`. That is legal because the tagset carries
+  `BLK_MQ_F_BLOCKING` for every parity level, and the matching `up()` still
+  happens in `rc_volume_unmap_request_sg()` from the completion path.
+- An empty parity-buffer pool while the lock is held is a leak, not
+  contention (only this path takes a buffer), so it fails with a logged
+  `BLK_STS_IOERR` instead of being handed back.
+- SQ reservation retries for about 75 ms and only then returns
+  `BLK_STS_RESOURCE`, which the block layer retries itself; `queue_rq` now
+  passes both `BLK_STS_RESOURCE` and `BLK_STS_DEV_RESOURCE` back rather than
+  ending the request with them.
+- The three comments that documented the old "hand it back and requeue"
+  behaviour were corrected, and the session's temporary `parity_debug`
+  counters/sysfs attribute were removed with the fix.
+
+**Verified so far.** Warning-clean `make` against `7.3.0-10-generic`, and the
+QEMU rig (`--level raid5 --members 4 --parity-writes`) passes with full-row,
+in-row, chunk-boundary and cross-row writes verified. The rig's parity test is
+a single O_DIRECT writer, so it is a regression check, **not** a reproduction
+of the stall.
+
+**Still open.** The confirming hardware run: the 3-member array from this
+session still lives on `0000:03/11/15.0`, so a concurrent buffered write to it
+(plus a `fsync`) is the acceptance test once devices are bound by hand.
+Nothing here has been re-run on real hardware since the fix, and the rig has
+no concurrent-writer test to cover it in CI.
+
 ## 2026-11-13 — RAID 5 writes validated on hardware (4 members)
 
 The opt-in RAID 5 write path ran on the array box: 4× Sabrent Rocket Q 4 TB

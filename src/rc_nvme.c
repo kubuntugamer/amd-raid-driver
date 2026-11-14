@@ -501,9 +501,9 @@ static struct blk_mq_tag_set rc_volume_tagset;
 
 /* RAID 5 full-row writes compute P into a driver-owned buffer before the
  * parity member's WRITE command is submitted.  A fixed pool bounds that
- * memory instead of allocating chunk-sized memory on the I/O path; a
- * request that finds the pool empty is handed back to blk-mq as
- * BLK_STS_DEV_RESOURCE and retried once a buffer comes free. */
+ * memory instead of allocating chunk-sized memory on the I/O path.  Only
+ * the serialized write path takes a buffer, so an empty pool while that
+ * lock is held is a leak, and the request fails with a logged error. */
 #define RC_VOLUME_PARITY_BUFS		8
 
 /* Bit i set while buffer i is owned by an in-flight request.  The bit
@@ -516,7 +516,8 @@ static u32 rc_volume_parity_buf_bytes;
  * by this semaphore: RMW reads the old row, patches and rewrites it, so a
  * second write to the same row that read the old bytes too would be lost.
  * One lock for the whole volume is coarse but trivially correct; the
- * async full-row path takes it with down_trylock and requeues.
+ * async full-row path takes it with down(), which the BLK_MQ_F_BLOCKING
+ * tagset allows.
  *
  * One chunk buffer per member (plus a PRP list) is enough because only one
  * RMW runs at a time.  Each buffer lives in its member's IOMMU domain.
@@ -4515,15 +4516,25 @@ static blk_status_t rc_volume_dispatch_parity_write(
 
 	/* Every RAID 5 write is serialized so a partial-row RMW and a
 	 * full-row write can never update one row's P from different old
-	 * bytes.  A busy lock is a clean requeue, not an error. */
-	if (down_trylock(&rc_volume_parity_lock))
-		return BLK_STS_DEV_RESOURCE;
+	 * bytes.  Waiting is legal because the tagset carries
+	 * BLK_MQ_F_BLOCKING for every parity level, and it has to be a real
+	 * wait: BLK_STS_DEV_RESOURCE promises blk-mq that the driver reruns
+	 * the queue once the resource frees, and nothing here does.  A busy
+	 * lock handed back that way parked a buffered write in
+	 * folio_wait_writeback forever — 2026-11-13, 3-member RAID 5. */
+	down(&rc_volume_parity_lock);
 	pdu->parity_locked = true;
 
 	slot = rc_volume_parity_buf_acquire();
 	if (slot < 0) {
+		/* Only this path takes a pool buffer and it now holds the
+		 * lock, so an empty pool is a leak.  Fail it loudly rather
+		 * than requeue a request nothing would restart. */
+		rc_printk(RC_ERROR,
+			  "rc_volume_dispatch_parity_write: parity buffer pool empty under the parity lock — pos=%llu len=%u rejected\n",
+			  (u64)pos, nr_sectors);
 		rc_volume_unmap_request_sg(pdu);
-		return BLK_STS_DEV_RESOURCE;
+		return BLK_STS_IOERR;
 	}
 	parity_va = rc_volume_parity_va[slot];
 	pdu->parity_buf = slot;
@@ -4644,11 +4655,29 @@ static blk_status_t rc_volume_dispatch_parity_write(
 	}
 
 	for (m = 0; m < nm; m++) {
-		if (!rc_nvme_sq_reserve(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num], 1)) {
-			while (m-- > 0)
-				rc_nvme_sq_unreserve(rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num], 1);
+		struct rc_nvme_io_queue *q =
+			rc_volume_members[m]->ctx.nvme.io_queues[hctx->queue_num];
+		int tries;
+
+		/* SQE slots come back from completions, and BLK_MQ_F_BLOCKING
+		 * lets this context wait for them.  BLK_STS_RESOURCE is the
+		 * fallback: the block layer retries that one on its own. */
+		for (tries = 0; tries < 1000; tries++) {
+			if (rc_nvme_sq_reserve(q, 1))
+				break;
+			usleep_range(50, 100);
+		}
+		if (tries == 1000) {
+			int u;
+
+			for (u = 0; u < m; u++)
+				rc_nvme_sq_unreserve(
+					rc_volume_members[u]->ctx.nvme.io_queues[hctx->queue_num], 1);
+			rc_printk(RC_ERROR,
+				  "rc_volume_dispatch_parity_write: member %d SQ full for 75 ms — pos=%llu len=%u requeued\n",
+				  m, (u64)pos, nr_sectors);
 			rc_volume_unmap_request_sg(pdu);
-			return BLK_STS_DEV_RESOURCE;
+			return BLK_STS_RESOURCE;
 		}
 	}
 
@@ -5894,7 +5923,8 @@ static blk_status_t rc_volume_queue_rq(struct blk_mq_hw_ctx *hctx,
 		    rc_volume_parity_full_row(pos, nr_sectors)) {
 			st = rc_volume_dispatch_parity_write(hctx, req, pdu,
 							     pos, nr_sectors);
-			if (st == BLK_STS_DEV_RESOURCE)
+			if (st == BLK_STS_RESOURCE ||
+			    st == BLK_STS_DEV_RESOURCE)
 				return st;
 			if (st != BLK_STS_OK) {
 				blk_mq_start_request(req);
