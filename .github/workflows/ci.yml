@@ -26,6 +26,8 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  # Manual run: lets the gates be started (and re-started) without a push.
+  workflow_dispatch:
 
 permissions:
   contents: read
