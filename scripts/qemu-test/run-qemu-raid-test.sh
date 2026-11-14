@@ -246,6 +246,15 @@ if [ "$PARITY_WRITES" = 1 ]; then
     install -m 0755 "$WORKDIR/rcparitytest" "$INITRD_DIR/rcparitytest"
     echo "==> bundled rcparitytest for the RAID 5 full-row write test"
 fi
+# SG_IO replay harness for /dev/rc_api (issue #13): drives the sequence
+# rcadm issues and asserts the packets field by field, so the read-half ABI
+# is covered without bundling AMD's binary.  Small and always bundled.
+gcc -static -O2 -Wall -Wextra -Werror -o "$WORKDIR/rcapireadtest" \
+    "$SCRIPT_DIR/api-read-test.c" || {
+    echo "failed to build the /dev/rc_api replay harness" >&2
+    exit 1
+}
+install -m 0755 "$WORKDIR/rcapireadtest" "$INITRD_DIR/rcapireadtest"
 if [ "$CREATE_TEST" = 1 ]; then
     gcc -static -O2 -Wall -Wextra -Werror -o "$WORKDIR/rxp2adm" \
         "$REPO_DIR/src/rxp2adm.c" -I"$REPO_DIR/src" || {
@@ -289,7 +298,7 @@ timeout --foreground "${RCRAID_QEMU_TIMEOUT:-300}" qemu-system-x86_64 \
     -M q35 -m 2048 -smp 4 "${ACCEL_ARGS[@]}" \
     -kernel "$KERNEL" \
     -initrd "$WORKDIR/initramfs.gz" \
-    -append "console=ttyS0 rdinit=/init expected_sectors=$EXPECTED_SECTORS expected_level=$LEVEL fail_member=$FAIL_MEMBER degraded_boot=$OMIT_MEMBER parity_write_test=$PARITY_WRITES parity_row_kib=$PARITY_ROW_KIB create_test=$CREATE_TEST panic=-1" \
+    -append "console=ttyS0 rdinit=/init expected_sectors=$EXPECTED_SECTORS expected_level=$LEVEL fail_member=$FAIL_MEMBER degraded_boot=$OMIT_MEMBER parity_write_test=$PARITY_WRITES parity_row_kib=$PARITY_ROW_KIB create_test=$CREATE_TEST api_members=$MEMBERS panic=-1" \
     "${DRIVE_ARGS[@]}" \
     -nographic -no-reboot \
     > "$CONSOLE_LOG" 2>&1 || true   # qemu exit code isn't the verdict

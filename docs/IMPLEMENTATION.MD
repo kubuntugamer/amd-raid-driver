@@ -387,9 +387,22 @@ read half is done (`src/rc_api.c`, `src/rc_cfgwrite.h`): `INQUIRY` EVPD page
 from the volume this driver actually assembled. `--version`, `--show` and
 `--list` are answered from that packet, exercised by hand against a QEMU
 guest running this module with the shipped `rcadm` 9.3.3-00302. The committed
-rig does not bundle `rcadm`, so that run is not reproducible from the tree and
-none of these verbs has an automated test; other read verbs are untested, not
-claimed. Issue #13 tracks the missing coverage.
+rig does not bundle `rcadm`, and should not — that run is not reproducible
+from the tree.
+
+*Status 2026-11-14:* the read surface has automated coverage without AMD's
+binary. `scripts/qemu-test/api-read-test.c` replays the SG_IO sequence inside
+the guest on every run: `INQUIRY` EVPD page `0xD7` (the bare id string), plain
+`INQUIRY`, the 1 KiB descriptor at LBA 0 (channel word, packet header,
+PhysicalDevice records), the `0xC0`→`0xD0`→`0xE0` window walk, the full 64 KiB
+packet (every member and ControllerDevice record), the `GET_CREATE_INFO`
+write/read pair, and the refusal paths — a TRANSFORM frame and an
+undecodable frame must return CHECK CONDITION with an ILLEGAL REQUEST ASC,
+and a zero-length read must be refused rather than answered. Assertions are
+field-level, including the vendor's nonstandard success status `0x01`. The
+harness is skipped on the two degraded scenarios, where a partial member set
+is the expected state. This is issue #13's option 1; mutation *success* paths
+are covered by `raid5-create-delete`, not here.
 
 *Status 2026-11-13:* the controller list (`-q -ct N`) and
 `/proc/rcraid/version` now work on the live 4-member RAID 0; the controller

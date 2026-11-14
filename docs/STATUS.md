@@ -106,6 +106,14 @@ Two things that were written down but never executed now execute.
   untested in CI. A stalled queue now fails the step on a 180 s alarm instead
   of hanging the rig; `raid5-parity-write` passes with it on 4 members.
 
+- **`/dev/rc_api` has automated coverage.** `scripts/qemu-test/api-read-test.c`
+  replays the SG_IO sequence `rcadm` issues and asserts the packets field by
+  field — `INQUIRY` page `0xD7`, the 1 KiB descriptor and window walk, the
+  64 KiB config packet with every PhysicalDevice/ControllerDevice record, the
+  `GET_CREATE_INFO` pair, and CHECK CONDITION + ASC for refused mutation
+  frames. No AMD binary is involved, so the coverage is reproducible from the
+  tree; the two degraded scenarios skip it by design. Issue #13.
+
 What this does not change: the hardware acceptance run for issue #17 (a
 concurrent buffered writer + `fsync` against the 3-member array on
 `0000:03/11/15.0`) is still outstanding, and the container builds are

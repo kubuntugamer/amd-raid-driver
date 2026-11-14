@@ -63,6 +63,14 @@ Design notes:
 `mkmeta.py` writes only what the Linux driver consumes — images it
 produces are for driver testing, not for RAIDXpert or Windows.
 
+**`/dev/rc_api` is replayed, not assumed.**  Every run (except the two
+degraded scenarios) also executes `rcapireadtest`, which issues the same
+SG_IO commands `rcadm` issues and asserts the replies field by field: the
+`0xD7` id string, the 1 KiB descriptor and its `0xC0`→`0xD0`→`0xE0` window
+walk, the full 64 KiB config packet, the `GET_CREATE_INFO` query, and that
+mutation frames come back as CHECK CONDITION with the right sense key/ASC
+instead of success.  AMD's binary is not bundled; the ABI is (`src/rc_api.c`).
+
 **The metadata write path verifies itself.**  This rig always loads the
 module with `meta_write_probe=1 meta_write_probe_junk=1`, so at assembly
 the driver rewrites each member's own RC_MetaData block through its NVMe

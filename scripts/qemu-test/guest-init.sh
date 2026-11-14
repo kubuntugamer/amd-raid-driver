@@ -47,6 +47,7 @@ degraded_boot=0
 parity_write_test=0
 parity_row_kib=0
 create_test=0
+api_members=0
 for arg in $(cat /proc/cmdline); do
     case "$arg" in
         expected_sectors=*) expected_sectors="${arg#expected_sectors=}" ;;
@@ -56,6 +57,7 @@ for arg in $(cat /proc/cmdline); do
         parity_write_test=*) parity_write_test="${arg#parity_write_test=}" ;;
         parity_row_kib=*)   parity_row_kib="${arg#parity_row_kib=}" ;;
         create_test=*)      create_test="${arg#create_test=}" ;;
+        api_members=*)      api_members="${arg#api_members=}" ;;
     esac
 done
 [ -n "$expected_sectors" ] || fail "no expected_sectors= on kernel cmdline"
@@ -162,6 +164,20 @@ if dmesg | grep -q "rc_meta_write_probe: .* mismatch\|rc_meta_write_probe: .* fa
     fail "metadata write probe reported an error"
 fi
 echo "rcraid-test: metadata write probe verified ($probe_ok member probe(s))"
+
+# /dev/rc_api read surface (issue #13): replay the SG_IO sequence rcadm
+# issues and assert the packets field by field — no AMD binary involved.
+# Skipped on the degraded scenarios: an intentionally partial member set is
+# the point there, and the harness asserts a complete one.
+if [ "$api_members" -ge 1 ] 2>/dev/null && [ "$fail_member" != "1" ] \
+        && [ "$degraded_boot" != "1" ]; then
+    mark "rc_api read surface"
+    /rcapireadtest /dev/rc_api "$api_members"
+    api_rc=$?
+    [ "$api_rc" -eq 0 ] \
+        || fail "/dev/rc_api SG_IO replay harness (exit $api_rc)"
+    echo "rcraid-test: rc_api read surface verified ($api_members member(s))"
+fi
 
 # ---------------------------------------------------------------------------
 # RAID5 fixture: parity volumes are assembly+READ only — the write path
