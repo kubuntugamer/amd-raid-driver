@@ -114,10 +114,10 @@ Two things that were written down but never executed now execute.
   frames. No AMD binary is involved, so the coverage is reproducible from the
   tree; the two degraded scenarios skip it by design. Issue #13.
 
-What this does not change: the hardware acceptance run for issue #17 (a
-concurrent buffered writer + `fsync` against the 3-member array on
-`0000:03/11/15.0`) is still outstanding, and the container builds are
-compile-only — no runtime claim moves off the array box.
+What this does not change: no hardware run has exercised the fixed parity
+path yet (a concurrent buffered writer + `fsync` on **any** RAID 5 array
+settles it — member count was never the variable; see the correction in the
+2026-11-13 entry), and the container builds are compile-only.
 
 ## 2026-11-13 — 3-member RAID 5 write stalled in writeback; requeue-contract fix
 
@@ -169,11 +169,17 @@ in-row, chunk-boundary and cross-row writes verified. The rig's parity test is
 a single O_DIRECT writer, so it is a regression check, **not** a reproduction
 of the stall.
 
-**Still open.** The confirming hardware run: the 3-member array from this
-session still lives on `0000:03/11/15.0`, so a concurrent buffered write to it
-(plus a `fsync`) is the acceptance test once devices are bound by hand.
-Nothing here has been re-run on real hardware since the fix, and the rig has
-no concurrent-writer test to cover it in CI.
+**Still open.** One hardware pass with the fixed module: a concurrent
+buffered write plus `fsync`. **Member count is not the variable** — the wedge
+happened to land on the 3-member array, but the defect is a status-contract
+violation that does not depend on N, and the pre-fix 4-member runs passing
+says only that they did not hit the race. Any parity array will do; a 4-member
+one is the convenient choice and gives more contention, not less. Nothing in
+this tree has run on hardware since the fix.
+
+The rig's parity test now forks two buffered writers (see the 2026-11-14
+entry), so the contention shape is covered in CI even though it is not a
+reproduction of the hardware timing.
 
 ## 2026-11-13 — RAID 5 writes validated on hardware (4 members)
 
