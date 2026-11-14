@@ -26,8 +26,6 @@ add_executable(rcraidXpert
     src/modules/dashboardwidget.h
     src/modules/taskmanagerwidget.cpp
     src/modules/taskmanagerwidget.h
-    src/modules/createarraywizard.cpp
-    src/modules/createarraywizard.h
     src/modules/smartmonitorwidget.cpp
     src/modules/smartmonitorwidget.h
     src/modules/backgroundrateswidget.cpp

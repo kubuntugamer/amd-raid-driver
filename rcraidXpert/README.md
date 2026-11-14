@@ -1,62 +1,73 @@
-# AMD RAIDXpert2 User Space Management Console (rcraidXpert)
+# rcraidXpert
 
-This directory contains the un-mocked, pure hardware graphical configuration utility (`rcraidXpert`) designed to interact with the out-of-tree AMD NVMe RAID storage kernel driver via the `/dev/amd_ctl0` interface plane.
+Qt6 graphical console for the out-of-tree `rcraid` driver. Everything it
+shows and everything it changes goes through `/dev/amd_ctl0` using the ABI in
+[`src/amd_raid_uapi.h`](../src/amd_raid_uapi.h); there is no simulation layer
+and no private ioctl.
 
-## Platform Requirements & Driver State
+## What it actually does
 
-This utility communicates strictly with bare-metal hardware. For the user interface to populate categories, discover hard drives, or manage arrays, the system must satisfy the following state conditions:
-1. **Driver Loaded:** The underlying storage driver (`rcraid.ko`) must be actively loaded into kernel memory.
-2. **Device Present:** The control bridge `/dev/amd_ctl0` must exist. It is registered mode 0644: inventory/status reads work as a normal user; member eviction and resync require `CAP_SYS_ADMIN` (run the management action as root).
+| Action | ioctl | Notes |
+|---|---|---|
+| Disk/array inventory | `AMD_IOCTL_GET_HARDWARE_INVENTORY` | Any user. Populates the tree and the disk table. |
+| Volume state | `AMD_IOCTL_GET_STATUS` | Any user. Drives the optimal/degraded/resyncing text. |
+| Create array | `AMD_IOCTL_CREATE_ARRAY` | Root. RAID 0, 1, 10; RAID 5 only when the module was loaded with `parity_create=1`. |
+| Delete array | `AMD_IOCTL_DELETE_ARRAY` | Root. Array ID 0 (the only one the driver assembles). |
 
----
+Not present, on purpose: RAID 6 create (the driver has no Q write or
+initialisation path), rebuild/resync buttons, verify, expand, and
+spare/stripe configuration. The metadata writer chooses the stripe geometry,
+so the chunk-size combo is shown disabled rather than pretending to set it.
 
-## How to Launch the GUI (Automated Method)
+## Requirements
 
-To accommodate testing inside minimal **Live USB environments** (where core graphical libraries are missing out-of-the-box), a self-contained environment configuration script is provided. This script automatically detects the host OS, silently pulls down required dependencies, verifies the driver state, and kicks off the binary interface.
+1. `rcraid.ko` loaded with at least two members bound.
+2. `/dev/amd_ctl0` present (mode 0644: reads are unprivileged; create/delete
+   still need `CAP_SYS_ADMIN`, checked in the driver).
+3. Qt6 Widgets and CMake to build.
 
-Open a terminal inside this directory and execute the following single command string:
+## Build and run
 
-```bash
-./launch-liveusb.sh
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
+./build/rcraidXpert            # inventory only
+sudo ./build/rcraidXpert       # array create/delete enabled
 ```
 
----
+`./launch-liveusb.sh` installs the Qt6 development packages for the detected
+distribution, loads the module if needed, builds into `build/`, and starts the
+GUI. There is no prebuilt binary in the tree.
 
-## Manual Execution Track
+Headless check of the inventory wiring (no display needed):
 
-If you prefer to configure your environment paths manually inside your live session workspace, execute the specific package installation string for your active operating system, ensure the driver is active, and invoke the binary directly:
-
-### 1. Install Runtime Dependencies
-
-* **Ubuntu / Kubuntu / Linux Mint:**
-  ```bash
-  sudo apt update && sudo apt install -y libqt6widgets6 qt6-base-plugins
-  ```
-* **Fedora Linux:**
-  ```bash
-  sudo dnf install -y qt6-qtbase-gui
-  ```
-* **Arch Linux / CachyOS:**
-  ```bash
-  sudo pacman -Sy --noconfirm qt6-base
-  ```
-
-### 2. Verify Driver Infrastructure Bounds
-Ensure your out-of-tree testing driver module is loaded to expose the inter-process communication bridge before launching the interface canvas:
-```bash
-sudo modprobe rcraid
+```sh
+QT_QPA_PLATFORM=offscreen ./build/rcraidXpert --dump-tree
 ```
 
-### 3. Invoke the Production Executable
-```bash
-chmod +x ./rcraidXpert
-./rcraidXpert
-```
+## Using it
 
----
+* **Left tree** — `Logical Drives` lists what the driver assembled (LD id,
+  level, capacity, state in the tooltip); `Physical Drives` lists every bound
+  member with its `disk_index`. If the module is missing the tree says so.
+* **Array Creation tab** — tick `Use` on the free disks (members of an array
+  cannot be ticked), pick a level, optionally type a capacity in MiB, then
+  **Commit Configuration Vector**. **Discard Changes** re-reads live state.
+* **Array menu** — `Refresh Inventory` re-runs the inventory ioctl;
+  `Delete Selected Array...` deletes the logical drive selected in the tree.
+* **Status panel** — driver reachability, disk/volume counts, whether this
+  process can mutate, and the result of the last action.
+* **Dashboard / S.M.A.R.T. tabs** — read the same inventory payload.
 
-## Interface Topology Guide
+## Caveats that matter
 
-* **Left Navigation Tree:** Manages real-time hardware discovery sweeps. If the driver is initialized successfully, it maps `Physical Drives`, `Logical Drives`, and active `Arrays` dynamically.
-* **Array Management Properties:** Provides a 3-column physical layout matrix (`Status`, `ID`, `Capacity`) mapping out-of-tree storage structures cleanly. Assigned disk members render a **Solid Blue Block**, whereas unassigned drives render a **Solid Green Block** to match authentic hardware profiles.
-* **System Events Monitor Console:** Tracks block device events, configuration commits, and hardware exception handling metrics.
+* **RAID 5 create emits metadata only.** Data and parity are not initialised;
+  zero the new block device before putting a filesystem on it. The driver
+  refuses the operation entirely unless loaded with `parity_create=1`, and the
+  GUI says so instead of hiding it.
+* **Delete does not erase member user areas.** It rewrites their metadata so
+  the disks return to the unassigned pool; old data remains on the media.
+* **One array box at a time.** Create is refused while a volume is assembled,
+  matching the driver. Delete first, then create.
+* Create and delete are refused for non-root with an explicit message rather
+  than a silent failure.

@@ -22,9 +22,6 @@ void ArrayOptionsWidget::setupUiLayout() {
 
     // 1. Architecture Profile Selector
     raidTypeCombo = new QComboBox(this);
-    raidTypeCombo->addItem("RAID 0 (Stripe Matrix)");
-    raidTypeCombo->addItem("RAID 1 (Mirror Pair)");
-    raidTypeCombo->addItem("RAID 10 (Nested Striped Mirror)");
     formLayout->addRow("Selected RAID Profile:", raidTypeCombo);
 
     // 2. Dynamic Stripe Size Selectors (Stitch your explicit entry text directly into the list item)
@@ -37,12 +34,11 @@ void ArrayOptionsWidget::setupUiLayout() {
     chunkSizeCombo->setCurrentIndex(1); // Default stays at standard 128KB
     formLayout->addRow("Logical Stripe Chunk Size:", chunkSizeCombo);
 
-    // 3. Computed Capacity Feedback Register Line
+    // 3. Optional capacity limit, passed to CREATE as size_mb (blank = full)
     capacityEdit = new QLineEdit(this);
-    capacityEdit->setReadOnly(true);
-    capacityEdit->setText("0 MB");
-    capacityEdit->setStyleSheet("font-family: 'Monospace'; font-weight: bold; background-color: rgba(0,0,0,0.05);");
-    formLayout->addRow("Aggregated Capacity (MB):", capacityEdit);
+    capacityEdit->setPlaceholderText("full member capacity");
+    capacityEdit->setStyleSheet("font-family: 'Monospace'; font-weight: bold;");
+    formLayout->addRow("Capacity in MiB:", capacityEdit);
 
     rootLayout->addLayout(formLayout);
 }

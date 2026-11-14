@@ -9,16 +9,14 @@
 #include <QPixmap>
 #include <QPainter>
 
-MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), arrayCounter(0) {
-    setWindowTitle("rcraidXpert (Transform)");
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent), controller(new ArrayDataController(this)) {
+    setWindowTitle("rcraidXpert");
     resize(1100, 650);
-    
+
     setupLayout();
     connectActionPipelines();
-    triggerControllerRescan();
     loadStyles();
-    initializeSimulationTimers();
-    connectActionPipelines();
     triggerControllerRescan();
     updateCapacityDisplay();
 }
@@ -26,7 +24,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), arrayCounter(0) {
 MainWindow::~MainWindow() {}
 
 void MainWindow::loadStyles() {
-    // Left as a clean, low-overhead placeholder for native system fallback tracking rules
     QFile styleFile("../assets/styles.qss");
     if (styleFile.exists() && styleFile.open(QFile::ReadOnly)) {
         QString contents = styleFile.readAll();

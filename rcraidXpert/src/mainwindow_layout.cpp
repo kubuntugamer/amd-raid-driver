@@ -64,13 +64,21 @@ void MainWindow::setupLayout() {
 
     arrayOptions = new ArrayOptionsWidget(this);
     arrayOptions->raidTypeCombo->clear();
-    arrayOptions->raidTypeCombo->addItems({
-        "RAID 0 (Striping)", 
-        "RAID 1 (Mirroring)", 
-        "RAID 10 (Striped Mirrors)",
-        "RAID 5 (Single Parity)", 
-        "RAID 6 (Dual Parity)"
-    });
+    arrayOptions->raidTypeCombo->addItem("RAID 0 (Striping)",
+                                         QVariant::fromValue(0u));
+    arrayOptions->raidTypeCombo->addItem("RAID 1 (Mirroring)",
+                                         QVariant::fromValue(1u));
+    arrayOptions->raidTypeCombo->addItem("RAID 10 (Striped Mirrors)",
+                                         QVariant::fromValue(10u));
+    arrayOptions->raidTypeCombo->addItem("RAID 5 (Single Parity)",
+                                         QVariant::fromValue(5u));
+    /* RAID 6 has no metadata writer in this driver; it is not offered. */
+    arrayOptions->chunkSizeCombo->setEnabled(false);
+    arrayOptions->chunkSizeCombo->setToolTip(
+        "Stripe geometry is written by the driver's metadata writer and "
+        "cannot be chosen here.");
+    arrayOptions->capacityEdit->setPlaceholderText(
+        "Capacity in MiB (blank = full member capacity)");
     
     diskTable = new DiskTableWidget(this);
     configLayout->addWidget(arrayOptions, 1);
@@ -104,15 +112,16 @@ void MainWindow::setupLayout() {
     bottomLayout->addWidget(statusPanel);
 
     QHBoxLayout *actionFooterLayout = new QHBoxLayout();
-    enableWritesCheck = new QCheckBox("Opt-In Write Access Mode (enable_writes=1)", this);
     commitButton = new QPushButton("Commit Configuration Vector", this);
     commitButton->setStyleSheet("font-weight: bold; padding: 4px 12px;");
     cancelButton = new QPushButton("Discard Changes", this);
 
-    // Map "Discard Changes" to flush selections and poll real hardware state clean
-    connect(cancelButton, &QPushButton::clicked, this, &MainWindow::triggerControllerRescan);
+    // Commit drives AMD_IOCTL_CREATE_ARRAY; Discard re-reads live state.
+    connect(commitButton, &QPushButton::clicked,
+            this, &MainWindow::handleCreateArray);
+    connect(cancelButton, &QPushButton::clicked,
+            this, &MainWindow::triggerControllerRescan);
 
-    actionFooterLayout->addWidget(enableWritesCheck);
     actionFooterLayout->addStretch();
     actionFooterLayout->addWidget(commitButton);
     actionFooterLayout->addWidget(cancelButton);

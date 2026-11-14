@@ -1,7 +1,9 @@
 #include "disktablewidget.h"
+
 #include <QHeaderView>
-#include <QPainter>
-#include <QPixmap>
+#include <QTableWidgetItem>
+#include <QSignalBlocker>
+#include <QColor>
 
 DiskTableWidget::DiskTableWidget(QWidget *parent) : QTableWidget(parent) {
     setupUiLayout();
@@ -10,31 +12,89 @@ DiskTableWidget::DiskTableWidget(QWidget *parent) : QTableWidget(parent) {
 DiskTableWidget::~DiskTableWidget() {}
 
 void DiskTableWidget::setupUiLayout() {
-    setColumnCount(3);
-    setHorizontalHeaderLabels({"Status", "ID", "Capacity"});
+    setColumnCount(5);
+    setHorizontalHeaderLabels({"Use", "Disk", "Index", "Capacity", "Member of"});
     horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
     setSelectionBehavior(QAbstractItemView::SelectRows);
-    
-    // Starts completely clean and empty. No mock items are populated at launch.
+    setEditTriggers(QAbstractItemView::NoEditTriggers);
     setRowCount(0);
 }
 
-int DiskTableWidget::getCheckedDiskCount() const {
-    int checkedCount = 0;
-    for (int i = 0; i < rowCount(); ++i) {
-        if (item(i, 0) && item(i, 0)->checkState() == Qt::Checked) {
-            checkedCount++;
+QString DiskTableWidget::formatBytes(quint64 bytes) {
+    const double gib = static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
+
+    if (gib >= 1024.0)
+        return QString("%1 TiB").arg(gib / 1024.0, 0, 'f', 2);
+    return QString("%1 GiB").arg(gib, 0, 'f', 1);
+}
+
+void DiskTableWidget::setInventory(const QList<AmdDiskInfo> &disks,
+                                   const QList<AmdArrayInfo> &arrays) {
+    const QSignalBlocker blocker(this);
+
+    clearContents();
+    setRowCount(disks.size());
+
+    for (int row = 0; row < disks.size(); row++) {
+        const AmdDiskInfo &disk = disks.at(row);
+        QString memberOf;
+
+        for (const AmdArrayInfo &array : arrays) {
+            if (array.members.contains(disk.index))
+                memberOf = QString("LD %1 (%2)")
+                               .arg(array.id)
+                               .arg(ArrayDataController::levelName(array.level));
         }
+
+        QTableWidgetItem *use = new QTableWidgetItem;
+        use->setFlags((disk.assigned ? Qt::ItemIsEnabled : Qt::ItemIsEnabled |
+                                                           Qt::ItemIsUserCheckable));
+        use->setCheckState(Qt::Unchecked);
+        setItem(row, 0, use);
+
+        setItem(row, 1, new QTableWidgetItem(QString("Disk %1").arg(disk.index)));
+        setItem(row, 2, new QTableWidgetItem(QString::number(disk.index)));
+
+        const quint64 bytes = disk.sectors * 512ull;
+        QTableWidgetItem *capacity = new QTableWidgetItem(formatBytes(bytes));
+        capacity->setData(Qt::UserRole, QVariant::fromValue(bytes));
+        setItem(row, 3, capacity);
+
+        QTableWidgetItem *member = new QTableWidgetItem(
+            memberOf.isEmpty() ? (disk.assigned ? "assigned" : "unassigned")
+                               : memberOf);
+        if (disk.assigned)
+            member->setForeground(QColor(0x1f, 0x7a, 0xd4));
+        setItem(row, 4, member);
+
+        for (int col = 1; col < columnCount(); col++)
+            item(row, col)->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
     }
-    return checkedCount;
 }
 
-int DiskTableWidget::calculateTotalCheckedCapacity() const {
-    return getCheckedDiskCount() * 512; 
+QVector<quint32> DiskTableWidget::checkedDiskIndices() const {
+    QVector<quint32> indices;
+
+    for (int row = 0; row < rowCount(); row++) {
+        QTableWidgetItem *use = item(row, 0);
+        QTableWidgetItem *idx = item(row, 2);
+
+        if (!use || !idx)
+            continue;
+        if (use->checkState() != Qt::Checked)
+            continue;
+        indices.append(static_cast<quint32>(idx->text().toUInt()));
+    }
+    return indices;
 }
 
-// This is where real scanned drive structures will attach to the layout grid
-void DiskTableWidget::clearAndPopulateInventory(const QString &nodeName, const QString &parentName) {
-    (void)nodeName; (void)parentName;
-    // Real NVMe scans populate rows here dynamically at runtime
+void DiskTableWidget::clearChecks() {
+    const QSignalBlocker blocker(this);
+
+    for (int row = 0; row < rowCount(); row++) {
+        if (QTableWidgetItem *use = item(row, 0))
+            if (use->flags() & Qt::ItemIsUserCheckable)
+                use->setCheckState(Qt::Unchecked);
+    }
 }
