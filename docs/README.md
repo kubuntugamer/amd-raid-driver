@@ -86,8 +86,8 @@ NVMe RAID controller as PCI `1022:B000`, which is fully implemented here.
   so `fsync`, journaling, and `fstrim` behave correctly.
 - **Fast — and true to each RAID level's physics.** Interrupt-driven
   async completion with a scatterlist-native DMA path: the hardware reads
-  and writes your pages directly, no bounce buffers, no memcpy. Numbers
-  below.
+  and writes your pages directly on the fast path (no memcpy); a small
+  bounce pool covers the rare layouts PRPs cannot encode. Numbers below.
 - **Resilient.** 30 s command timeouts, controller health tracking,
   best-effort NVMe Abort, and automatic controller reset on the first
   timeout — with a manual sysfs reset as a fallback.

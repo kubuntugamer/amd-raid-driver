@@ -44,6 +44,8 @@
 #include <linux/highmem.h>
 #include <linux/scatterlist.h>
 #include <linux/dma-mapping.h>
+#include <linux/mempool.h>
+#include <linux/vmalloc.h>
 #include <linux/seq_file.h>
 #include <linux/semaphore.h>
 
@@ -661,6 +663,20 @@ struct rc_volume_pdu {
 	 * block/blk.h (CI qemu-rig). */
 	atomic_t           completed;
 	int                nents;          /* dma_map_sg output count, 0 = not mapped */
+	/* Bounce fallback for layouts NVMe PRPs cannot encode.  bounce is
+	 * the single-member whole-request buffer; ms_bounce is the
+	 * multi-stripe buffer sliced in member-LBA order.  Both are owned by
+	 * this request and freed by rc_volume_unmap_request_sg. */
+	void              *bounce;
+	void              *ms_bounce;
+	u32                ms_bounce_off[RC_VOLUME_MAX_MEMBERS];
+	u32                ms_bounce_len[RC_VOLUME_MAX_MEMBERS];
+	u8                 ms_bounce_slots;
+	/* Set immediately before blk_mq_start_request: a bounce buffer may
+	 * only be copied back to the bio after a real completion, never on
+	 * a pre-submit error path (it would leak uninitialised memory into
+	 * a failed READ's pages). */
+	bool               io_started;
 	/* Multi-stripe (multi-member) dispatch.  When ms_active is true, the
 	 * request was split across multiple members in queue_rq; ms_nents[m]
 	 * and ms_sg[m] hold each member's portion.  members_pending is set to
@@ -3578,6 +3594,179 @@ static inline enum dma_data_direction rc_volume_dma_dir(u8 op)
 	return (op == REQ_OP_READ) ? DMA_FROM_DEVICE : DMA_TO_DEVICE;
 }
 
+/* --- Bounce fallback for layouts NVMe PRPs cannot encode --------------
+ *
+ * The fast paths build scatterlists whose entries after the first start
+ * on page boundaries.  A request can still arrive with a mid-page
+ * fragment in a later entry: XFS log recovery writes a 256 KiB buffer
+ * whose per-member fragments start at arbitrary in-page offsets, and a
+ * request can legally join bios with a page gap.  PRP lists cannot
+ * express those, so such a request is copied through a bounce buffer
+ * whose runs are laid out per member in member-LBA order.  Each run's
+ * SG list has at most one mid-page start (PRP1), which is expressible.
+ *
+ * queue_rq is non-blocking for RAID0/RAID1/RAID10 (only parity levels set
+ * BLK_MQ_F_BLOCKING), so the buffers come from a small preallocated
+ * mempool and the copy uses kmap_local only.  A request that cannot get a
+ * buffer is retried as BLK_STS_RESOURCE rather than failed. */
+#define RC_VOLUME_BOUNCE_BUFS	8
+
+static mempool_t *rc_volume_bounce_pool;
+
+static int rc_volume_bounce_pool_init(void)
+{
+	rc_volume_bounce_pool = mempool_create_kmalloc_pool(RC_VOLUME_BOUNCE_BUFS,
+							   RC_VOLUME_DATA_BYTES);
+	return rc_volume_bounce_pool ? 0 : -ENOMEM;
+}
+
+static void rc_volume_bounce_pool_free(void)
+{
+	if (!rc_volume_bounce_pool)
+		return;
+	mempool_destroy(rc_volume_bounce_pool);
+	rc_volume_bounce_pool = NULL;
+}
+
+static void *rc_volume_bounce_alloc(void)
+{
+	if (!rc_volume_bounce_pool)
+		return NULL;
+	return mempool_alloc(rc_volume_bounce_pool, GFP_ATOMIC);
+}
+
+static void rc_volume_bounce_free(void *buf)
+{
+	if (buf && rc_volume_bounce_pool)
+		mempool_free(buf, rc_volume_bounce_pool);
+}
+
+/* True when every SG entry after the first starts on a page boundary. */
+static bool rc_volume_sg_prp_ready(const struct scatterlist *sgl, u32 used)
+{
+	u32 i;
+
+	for (i = 1; i < used; i++)
+		if (sgl[i].offset)
+			return false;
+	return true;
+}
+
+/* Resolve the page backing a byte in a bounce buffer.  mempool buffers
+ * come from kmalloc, but keep the vmalloc case correct for future users. */
+static struct page *rc_volume_bounce_page(void *addr)
+{
+	return is_vmalloc_addr(addr) ? vmalloc_to_page(addr) : virt_to_page(addr);
+}
+
+/* Build an SG list over an arbitrary run of a bounce buffer.  Only the
+ * first entry may carry an in-page offset, so the result is always
+ * PRP-expressible.  Returns 0 or -EINVAL when the array is too small. */
+static int rc_volume_bounce_sg(struct scatterlist *sgl, u32 max,
+			       void *buf, u32 len, u32 *used)
+{
+	u32 off = offset_in_page(buf);
+	u32 done = 0;
+	u32 n = 0;
+
+	if (!len)
+		return -EINVAL;
+	sg_init_table(sgl, max);
+	while (done < len) {
+		u32 chunk = min_t(u32, len - done, PAGE_SIZE - off);
+		struct page *page;
+
+		if (n >= max)
+			return -EINVAL;
+		page = rc_volume_bounce_page(buf + done);
+		if (!page)
+			return -EINVAL;
+		sg_set_page(&sgl[n++], page, chunk, off);
+		done += chunk;
+		off = 0;
+	}
+	sg_mark_end(&sgl[n - 1]);
+	*used = n;
+	return 0;
+}
+
+/* Copy the whole request to/from a linear buffer in request order. */
+static void rc_volume_bounce_copy(struct request *req, void *buf, bool to_buf)
+{
+	struct req_iterator iter;
+	struct bio_vec bv;
+	u8 *p = buf;
+
+	rq_for_each_segment(bv, req, iter) {
+		u8 *v = kmap_local_page(bv.bv_page);
+
+		if (to_buf)
+			memcpy(p, v + bv.bv_offset, bv.bv_len);
+		else
+			memcpy(v + bv.bv_offset, p, bv.bv_len);
+		kunmap_local(v);
+		p += bv.bv_len;
+	}
+}
+
+/* Copy the request to/from per-member slices of a multi-stripe bounce
+ * buffer.  The chunk geometry is the same walk the dispatcher uses, so
+ * slice[m] + done[m] always names the same byte on the member. */
+static int rc_volume_ms_bounce_copy(struct request *req, void *buf,
+				    const u32 *slice, const u32 *slice_len,
+				    u32 slots, bool to_buf)
+{
+	const u32 stripe = rc_volume_stripe_sectors;
+	sector_t cur_lba = blk_rq_pos(req);
+	struct req_iterator iter;
+	struct bio_vec bv;
+	u32 done[RC_VOLUME_MAX_MEMBERS] = {0};
+	int m;
+
+	if (!stripe || !slots || slots > RC_VOLUME_MAX_MEMBERS)
+		return -EINVAL;
+
+	rq_for_each_segment(bv, req, iter) {
+		u32 seg_len_sectors = bv.bv_len / 512;
+		u32 seg_remaining = bv.bv_len;
+		u32 seg_off = bv.bv_offset;
+		struct page *page = bv.bv_page;
+
+		while (seg_remaining) {
+			sector_t stripe_idx = cur_lba / stripe;
+			u32 to_boundary = (u32)((stripe_idx + 1) * stripe -
+						cur_lba);
+			u32 chunk_sectors = min(seg_len_sectors, to_boundary);
+			u32 chunk_bytes = chunk_sectors * 512u;
+			int mbr = (int)(stripe_idx % (u64)slots);
+			u8 *v;
+
+			if (!chunk_bytes || chunk_bytes > seg_remaining ||
+			    done[mbr] + chunk_bytes > slice_len[mbr])
+				return -EINVAL;
+			v = kmap_local_page(page);
+			if (to_buf)
+				memcpy(buf + slice[mbr] + done[mbr],
+				       v + seg_off, chunk_bytes);
+			else
+				memcpy(v + seg_off,
+				       buf + slice[mbr] + done[mbr],
+				       chunk_bytes);
+			kunmap_local(v);
+			done[mbr] += chunk_bytes;
+			seg_off += chunk_bytes;
+			seg_remaining -= chunk_bytes;
+			seg_len_sectors -= chunk_sectors;
+			cur_lba += chunk_sectors;
+		}
+	}
+
+	for (m = 0; m < (int)slots; m++)
+		if (done[m] != slice_len[m])
+			return -EINVAL;
+	return 0;
+}
+
 /* Map the request's bvecs into a scatterlist DMA-mapped on the target
  * member's pdev.  Stashes nents in the pdu so .complete (and the
  * timeout safety-net) can unmap.  Returns 0 on success or a blk_status_t
@@ -3603,10 +3792,38 @@ static blk_status_t rc_volume_map_request_sg(struct request *req,
 		return BLK_STS_IOERR;
 	}
 
+	if (!rc_volume_sg_prp_ready(pdu->sg, input_nents)) {
+		u32 bytes = blk_rq_bytes(req);
+		u32 used;
+
+		if (!bytes || bytes > RC_VOLUME_DATA_BYTES)
+			return BLK_STS_IOERR;
+		pdu->bounce = rc_volume_bounce_alloc();
+		if (!pdu->bounce) {
+			printk_ratelimited(KERN_ERR
+				"rcraid: %s: no bounce buffer for a %u-byte non-PRP request — retrying\n",
+				rc_volume_disk ? rc_volume_disk->disk_name : "?",
+				bytes);
+			return BLK_STS_RESOURCE;
+		}
+		if (pdu->op == REQ_OP_WRITE)
+			rc_volume_bounce_copy(req, pdu->bounce, true);
+		if (rc_volume_bounce_sg(pdu->sg, RC_VOLUME_DATA_PAGES,
+					pdu->bounce, bytes, &used)) {
+			rc_volume_bounce_free(pdu->bounce);
+			pdu->bounce = NULL;
+			return BLK_STS_IOERR;
+		}
+		input_nents = (int)used;
+	}
+
 	mapped_nents = dma_map_sg(dma_dev, pdu->sg, input_nents,
 				  rc_volume_dma_dir(pdu->op));
-	if (mapped_nents == 0)
+	if (mapped_nents == 0) {
+		rc_volume_bounce_free(pdu->bounce);
+		pdu->bounce = NULL;
 		return BLK_STS_IOERR;
+	}
 
 	pdu->nents = mapped_nents;
 	return BLK_STS_OK;
@@ -3665,20 +3882,47 @@ static void rc_volume_unmap_request_sg(struct rc_volume_pdu *pdu)
 				     rc_volume_dma_dir(pdu->op));
 			pdu->ms_nents[m] = 0;
 		}
+		/* Copy a bounced READ back only after a real completion: the
+		 * buffer is uninitialised until the controller wrote it, and a
+		 * pre-submit error must not leak those pages into the bio. */
+		if (pdu->ms_bounce) {
+			if (pdu->io_started && pdu->op == REQ_OP_READ &&
+			    !pdu->sc_sct &&
+			    !atomic_read(&pdu->members_pending))
+				rc_volume_ms_bounce_copy(
+					blk_mq_rq_from_pdu(pdu), pdu->ms_bounce,
+					pdu->ms_bounce_off, pdu->ms_bounce_len,
+					pdu->ms_bounce_slots, false);
+			rc_volume_bounce_free(pdu->ms_bounce);
+			pdu->ms_bounce = NULL;
+		}
 		pdu->ms_active = false;
 		return;
 	}
 
-	if (!pdu->nents)
+	if (!pdu->nents) {
+		rc_volume_bounce_free(pdu->bounce);
+		pdu->bounce = NULL;
 		return;
+	}
 	if (pdu->member_idx < 0 || pdu->member_idx >= rc_volume_member_count ||
 	    !rc_volume_members[pdu->member_idx]) {
 		pdu->nents = 0;
+		rc_volume_bounce_free(pdu->bounce);
+		pdu->bounce = NULL;
 		return;
 	}
 	dma_dev = &rc_volume_members[pdu->member_idx]->pdev->dev;
 	dma_unmap_sg(dma_dev, pdu->sg, pdu->nents, rc_volume_dma_dir(pdu->op));
 	pdu->nents = 0;
+	if (pdu->bounce) {
+		if (pdu->io_started && pdu->op == REQ_OP_READ && !pdu->sc_sct &&
+		    !atomic_read(&pdu->members_pending))
+			rc_volume_bounce_copy(blk_mq_rq_from_pdu(pdu), pdu->bounce,
+					      false);
+		rc_volume_bounce_free(pdu->bounce);
+		pdu->bounce = NULL;
+	}
 }
 
 /* Enumerate DMA-mapped scatterlist into NVMe PRP1 / PRP2 / PRP list.
@@ -4722,6 +4966,59 @@ err_unmap:
 	return BLK_STS_IOERR;
 }
 
+/* Rebuild the per-member SG lists over slices of one bounce buffer.
+ * Slices follow member-LBA order, so each member's run is contiguous even
+ * when the request's bvec runs are not.  Returns 0, -ENOMEM when no pool
+ * buffer is available, or -EINVAL when the layout does not add up. */
+static int rc_volume_ms_bounce_build(struct request *req,
+				     struct rc_volume_pdu *pdu,
+				     u32 *sg_used,
+				     const u32 *member_sectors,
+				     const bool *member_has_data,
+				     u32 slots, enum req_op op)
+{
+	u32 bytes = blk_rq_bytes(req);
+	u32 off = 0;
+	int m;
+
+	if (!bytes || bytes > RC_VOLUME_DATA_BYTES)
+		return -EINVAL;
+	pdu->ms_bounce = rc_volume_bounce_alloc();
+	if (!pdu->ms_bounce)
+		return -ENOMEM;
+
+	for (m = 0; m < (int)slots; m++) {
+		pdu->ms_bounce_off[m] = off;
+		pdu->ms_bounce_len[m] = member_sectors[m] * 512u;
+		off += pdu->ms_bounce_len[m];
+	}
+	if (off != bytes)
+		goto err;
+	pdu->ms_bounce_slots = (u8)slots;
+
+	if (op == REQ_OP_WRITE &&
+	    rc_volume_ms_bounce_copy(req, pdu->ms_bounce,
+				     pdu->ms_bounce_off, pdu->ms_bounce_len,
+				     slots, true))
+		goto err;
+
+	for (m = 0; m < (int)slots; m++) {
+		if (!member_has_data[m])
+			continue;
+		if (rc_volume_bounce_sg(pdu->ms_sg[m],
+					RC_VOLUME_MS_PAGES_PER_MEMBER,
+					pdu->ms_bounce + pdu->ms_bounce_off[m],
+					pdu->ms_bounce_len[m], &sg_used[m]))
+			goto err;
+	}
+	return 0;
+
+err:
+	rc_volume_bounce_free(pdu->ms_bounce);
+	pdu->ms_bounce = NULL;
+	return -EINVAL;
+}
+
 static blk_status_t rc_volume_dispatch_multi_stripe(
 		struct blk_mq_hw_ctx *hctx, struct request *req,
 		struct rc_volume_pdu *pdu, sector_t pos, u32 nr_sectors,
@@ -4832,6 +5129,29 @@ static blk_status_t rc_volume_dispatch_multi_stripe(
 		return BLK_STS_IOERR;	/* shouldn't reach here for single-member */
 	}
 
+	/* A member's run can start mid-page when the request joins bvec runs
+	 * with a page gap (XFS log recovery does exactly this).  Rebuild all
+	 * members' SG lists over a bounce buffer in that case. */
+	for (m = 0; m < nm; m++) {
+		if (member_has_data[m] &&
+		    !rc_volume_sg_prp_ready(pdu->ms_sg[m], sg_used[m]))
+			break;
+	}
+	if (m < nm) {
+		int bret = rc_volume_ms_bounce_build(req, pdu, sg_used,
+						      member_sectors,
+						      member_has_data, slots, op);
+
+		if (bret == -ENOMEM)
+			return BLK_STS_RESOURCE;
+		if (bret) {
+			rc_printk(RC_ERROR,
+				  "rc_volume_dispatch_multi_stripe: bounce layout failed — pos=%llu len=%u rejected\n",
+				  (u64)pos, nr_sectors);
+			return BLK_STS_IOERR;
+		}
+	}
+
 	/* Mark each member's sg array as the active subset. */
 	for (m = 0; m < nm; m++) {
 		if (!member_has_data[m])
@@ -4869,6 +5189,8 @@ static blk_status_t rc_volume_dispatch_multi_stripe(
 				pdu->ms_nents[m] = 0;
 			}
 			pdu->ms_active = false;
+			rc_volume_bounce_free(pdu->ms_bounce);
+			pdu->ms_bounce = NULL;
 			return BLK_STS_IOERR;
 		}
 		pdu->ms_nents[m] = mapped;
@@ -4929,6 +5251,7 @@ static blk_status_t rc_volume_dispatch_multi_stripe(
 		 * ISR completion racing us would otherwise call
 		 * blk_mq_complete on a request blk-mq doesn't yet consider
 		 * started). */
+		pdu->io_started = true;
 		blk_mq_start_request(req);
 		for (m = 0; m < nm; m++) {
 			if (!pdu->ms_nents[m])
@@ -5206,6 +5529,38 @@ static blk_status_t rc_volume_dispatch_mirror(
 		}
 		if (!used)
 			return BLK_STS_IOERR;
+
+		/* The mirror payload is identical for every target, so one
+		 * whole-request bounce serves every member when the bvec layout
+		 * is not PRP-expressible (same XFS log-recovery class as the
+		 * RAID0 path).  Writes only; mirror READs use the single-member
+		 * path. */
+		if (!rc_volume_sg_prp_ready(pdu->ms_sg[0], used)) {
+			u32 bytes = blk_rq_bytes(req);
+			u32 n;
+			void *buf;
+
+			if (!bytes || bytes > RC_VOLUME_DATA_BYTES)
+				return BLK_STS_IOERR;
+			buf = rc_volume_bounce_alloc();
+			if (!buf)
+				return BLK_STS_RESOURCE;
+			rc_volume_bounce_copy(req, buf, true);
+			for (m = 0; m < nm; m++) {
+				pdu->ms_bounce_off[m] = 0;
+				pdu->ms_bounce_len[m] = bytes;
+				if (rc_volume_bounce_sg(
+					    pdu->ms_sg[m],
+					    RC_VOLUME_MS_PAGES_PER_MEMBER,
+					    buf, bytes, &n)) {
+					rc_volume_bounce_free(buf);
+					return BLK_STS_IOERR;
+				}
+			}
+			pdu->ms_bounce = buf;
+			used = n;
+		}
+
 		for (m = 0; m < nm; m++)
 			sg_mark_end(&pdu->ms_sg[m][used - 1]);
 
@@ -5235,6 +5590,8 @@ static blk_status_t rc_volume_dispatch_mirror(
 					pdu->ms_nents[m] = 0;
 				}
 				pdu->ms_active = false;
+				rc_volume_bounce_free(pdu->ms_bounce);
+				pdu->ms_bounce = NULL;
 				return BLK_STS_IOERR;
 			}
 			pdu->ms_nents[m] = mapped;
@@ -5724,6 +6081,10 @@ static blk_status_t rc_volume_queue_rq(struct blk_mq_hw_ctx *hctx,
 	pdu->op = op;
 	pdu->sc_sct = 0;
 	pdu->nents = 0;
+	pdu->bounce = NULL;
+	pdu->ms_bounce = NULL;
+	pdu->ms_bounce_slots = 0;
+	pdu->io_started = false;
 	pdu->ms_active = false;
 	pdu->parity_buf = -1;
 	pdu->parity_locked = false;
@@ -6165,6 +6526,7 @@ static blk_status_t rc_volume_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 	/* Must call blk_mq_start_request BEFORE submitting — otherwise the
 	 * ISR could complete the request before blk-mq considers it started. */
+	pdu->io_started = true;
 	blk_mq_start_request(req);
 	rc_nvme_io_submit(rc_volume_members[member_idx]->ctx.nvme.io_queues[hctx->queue_num],
 			  &cmd);
@@ -7352,6 +7714,12 @@ static int rc_volume_create_disk(void)
 	if (ret)
 		goto err_free_dma;
 
+	/* Optional: without it, layouts PRPs cannot encode are rejected as
+	 * before.  Never fail volume creation over it. */
+	if (rc_volume_bounce_pool_init())
+		rc_printk(RC_WARN,
+			  "rc_volume_create_disk: bounce pool unavailable — non-PRP layouts will be rejected\n");
+
 	{
 		struct queue_limits lim = {
 			.logical_block_size  = 512,
@@ -7531,6 +7899,7 @@ err_put_disk:
 	rc_volume_disk = NULL;
 err_free_tagset:
 	blk_mq_free_tag_set(&rc_volume_tagset);
+	rc_volume_bounce_pool_free();
 err_free_dma:
 	rc_volume_parity_pool_free();
 	for (i = 0; i < rc_volume_member_count; i++)
@@ -8285,6 +8654,7 @@ void rc_volume_teardown(void)
 		put_disk(rc_volume_disk);
 		rc_volume_disk = NULL;
 		blk_mq_free_tag_set(&rc_volume_tagset);
+		rc_volume_bounce_pool_free();
 	}
 	for (i = 0; i < RC_VOLUME_MAX_MEMBERS; i++) {
 		if (rc_volume_members[i]) {

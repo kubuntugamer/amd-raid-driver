@@ -27,10 +27,12 @@ DKMS. What's live today:
   from a 2× T700 RAID1; KDiskMark SEQ1M Q8T1 20.5 GB/s read /
   11.1 GB/s write on the mirror as rootfs.
 - **Reads and writes** (`enable_writes=1`; installers set it). Writes stage
-  through scatterlist-native DMA — no bounce buffers. The fan-out paths
-  merge physically-contiguous bio fragments before building PRPs
-  (sub-page buffer-head writeback — mkfs metadata — is unexpressible as
-  PRPs otherwise; see the 2026-07-10 log entry).
+  through scatterlist-native DMA on the fast path — no bounce buffers. The
+  fan-out paths merge physically-contiguous bio fragments before building
+  PRPs (sub-page buffer-head writeback — mkfs metadata — is unexpressible as
+  PRPs otherwise; see the 2026-07-10 log entry). Layouts that still cannot
+  be expressed (XFS log recovery, requests with a page gap) fall back to a
+  small mempool of bounce buffers; see the 2026-11-13 entry.
 - **4 I/O queues × depth 256** per controller (blk-mq `nr_hw_queues=4`,
   1024 outstanding), MSI-X, fully interrupt-driven async completion. Each
   hctx has its own PRP-list pool (per-tag-per-member-per-hctx).
@@ -126,6 +128,26 @@ Two things that were written down but never executed now execute.
 
 What this does not change: the container builds are compile-only, and nothing
 here is a boot-from-RAID 5 run.
+
+## 2026-11-13 — XFS log recovery: bounce fallback for non-PRP layouts (#20)
+
+XFS could not be mounted read-write on the 4-member RAID0 array: recovery
+writes a 256 KiB log record that spans chunks, and one member's SG run began
+at in-page offset 3072, which a PRP list cannot encode. The driver already
+merges contiguous bvec fragments (#45), but this layout has a page gap
+between runs, so merging alone cannot fix it.
+
+Added a bounded bounce fallback: a mempool of 8 × 1 MiB buffers allocated at
+volume create. When an SG list has a non-first entry starting mid-page, the
+request is copied through page-aligned per-member slices (RAID0 multi-stripe)
+or one whole-request buffer (single-member and RAID1 writes); READs are
+copied back only after a real completion, never on a pre-submit error. The
+fast path is unchanged and still zero-copy.
+
+Verified on hardware: `mount` read-write after `mkfs.xfs`, 1 GiB
+write/readback hash, 400-file metadata workload, unmount/remount, clean
+`xfs_repair -n`, and a two-iovec `O_DIRECT` round-trip whose second vector
+starts at page offset 3072.
 
 ## 2026-11-13 — 3-member RAID 5 write stalled in writeback; requeue-contract fix
 
