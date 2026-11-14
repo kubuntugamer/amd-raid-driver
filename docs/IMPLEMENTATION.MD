@@ -531,6 +531,17 @@ cost; it only saves the ABI decoding, which is the smallest part.
       best-effort; the NVMe path has the same single-config exposure,
       just undocumented.
 
+      *Status 2026-11-14:* the build half is covered — CI compiles this
+      tree warning-clean inside Fedora, Arch, Ubuntu 24.04 HWE and
+      Ubuntu 26.04 containers on every push and PR, and the QEMU rig
+      boots the module through six array scenarios (`raid0`, `raid1`,
+      `raid1-degraded`, `raid1-degraded-boot`, `raid5-parity-write`,
+      `raid5-create-delete`) plus the guest battery. What that does
+      **not** establish: runtime on anything but the array box's kernel
+      (the container jobs are compile-only), drive models other than the
+      Sabrent/Crucial sets, or member counts above 4 on real hardware.
+      Those stay open, so the bullet stays unticked.
+
 - [ ] **Power-fail / crash-safety validation** — the design is right
       (members' volatile write cache + honest FLUSH/FUA), but nothing
       documents torture evidence: power cut mid-write → journal
@@ -628,7 +639,7 @@ and "in progress" in the other. Near-term priority is the ordered list at the
 bottom of this file; the phases are the long view, and several of them (OCE,
 ORLM, COW, P2PDMA, io_uring, ZNS/FDP) are not on the daily-driver path at all.
 
-| Phase | Feature | Status (2026-11-08) | Enables |
+| Phase | Feature | Status (2026-11-14) | Enables |
 |---|---|---|---|
 | 0 | RAID 0 / 1 / 10 I/O + rebuild | ✅ RAID0 and RAID1 shipped and hardware-validated; RAID10 feature-complete, array-box run pending ([VALIDATION_RAID10.md](VALIDATION_RAID10.md)) | Production baseline |
 | 1 | RAID 5/6 I/O + rebuild | 🟡 Assembly + reads wired; RAID 5 writes opt-in and hardware-validated 2026-11-13, RAID 6 forced read-only; create/delete metadata works in the rig (RAID 5 behind `parity_create=1`); first firmware 3-disk RAID 5 metadata parsed, assembled and read back 2026-11-08 (`0x1BF5`, N=3, `(N-1)` × user size); placement settled from the vendor core, corroboration pending (issue #6); Q generator now the vendor's EVENODD, uncalled (issue #10); RAID 5 degraded reads + manual parity rebuild hardware-validated 2026-11-13 | Inspect and read existing parity arrays |

@@ -4,7 +4,7 @@
 
 </div>
 
-[![CI](https://github.com/joeytroy/amd-raid-driver/actions/workflows/ci.yml/badge.svg)](https://github.com/joeytroy/amd-raid-driver/actions/workflows/ci.yml)
+[![CI](https://github.com/kubuntugamer/amd-raid-driver/actions/workflows/ci.yml/badge.svg)](https://github.com/kubuntugamer/amd-raid-driver/actions/workflows/ci.yml)
 [![License: GPL-2.0-only](https://img.shields.io/badge/License-GPL--2.0--only-blue.svg)](LICENSE)
 [![Kernel](https://img.shields.io/badge/Kernel-%E2%89%A5%206.15-orange.svg)](#quick-start)
 [![RAID](https://img.shields.io/badge/RAID0%20%2B%20RAID1-hardware%20validated-success.svg)](#benchmarks)
@@ -38,7 +38,7 @@ from it**.
 | **Boot from the array** | ✅ Validated on hardware for **both** levels — installer script, DKMS rebuilds, initramfs hook, UEFI fallback entry |
 | **Throughput** (2× T700, PCIe 5.0) | RAID0 **20.6 / 19.7 GB/s** · RAID1 **20.5 / 11.1 GB/s** (seq R/W — [details](#benchmarks)) |
 | **Filesystem safety** | FLUSH · FUA · DISCARD/TRIM — `fsync`, journaling, and `fstrim` behave correctly |
-| **Kernel** | ≥ 6.15, validated through **Linux 7.0** (Kubuntu 26.04). Ubuntu 24.04 needs the HWE stack (6.17+) |
+| **Kernel** | ≥ 6.15, boot-tested through **Linux 7.0** (Kubuntu 26.04) and runtime-validated on **7.3.0-10-generic**; CI builds Fedora, Arch, Ubuntu 24.04 HWE and 26.04. Ubuntu 24.04 needs the HWE stack (6.17+) |
 | **Metadata** | 100 % read from the on-disk RAIDXpert config — nothing hardcoded |
 | **License** | GPL-2.0-only, clean-room under DMCA §1201(f) — aiming for mainline |
 
@@ -400,9 +400,11 @@ open a PR, add yourself to the contributor list, and sign off your
 commits (`git commit -s`). The long-term goal is mainline kernel
 inclusion.
 
-Every PR is gated by CI that not only builds against three kernel
-lines but **boots the driver in QEMU** against synthetic RAID0 and
-RAID1 arrays (`scripts/qemu-test/`). The synthetic metadata is
+Every PR is gated by CI that not only builds against four kernel
+lines (Fedora, Arch, Ubuntu 24.04 HWE, Ubuntu 26.04) but **boots the
+driver in QEMU** against synthetic RAID0, RAID1 and RAID5 arrays
+(`scripts/qemu-test/`) — including the opt-in RAID 5 parity write path
+and a parity delete → create → reassembly cycle. The synthetic metadata is
 deliberately booby-trapped with the failure modes found during
 hardware validation — a stale deleted-array config generation, a raw
 single-disk record with a matching DeviceID — and the guest battery

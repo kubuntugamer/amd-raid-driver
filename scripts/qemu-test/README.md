@@ -3,8 +3,11 @@
 Boots rcraid in a VM against **virtual NVMe drives carrying synthetic
 RAIDCore metadata** — an array that can be created, corrupted, and
 destroyed freely, unlike the dev box's RAID0 (which is the rootfs).
-This is the development rig for RAID1 / failure-handling / rebuild work
-and the intended foundation for CI.
+This is the development rig for RAID1 / failure-handling / rebuild work,
+and it is the CI `qemu-rig` gate: it runs on every push to `main` and
+every PR as six scenarios — `raid0`, `raid1`, `raid1-degraded`,
+`raid1-degraded-boot`, `raid5-parity-write` and `raid5-create-delete` —
+each followed by the guest battery.
 
 ```sh
 # One-time: the Ubuntu kernel image is root-readable only
