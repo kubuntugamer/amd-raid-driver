@@ -114,10 +114,18 @@ Two things that were written down but never executed now execute.
   frames. No AMD binary is involved, so the coverage is reproducible from the
   tree; the two degraded scenarios skip it by design. Issue #13.
 
-What this does not change: no hardware run has exercised the fixed parity
-path yet (a concurrent buffered writer + `fsync` on **any** RAID 5 array
-settles it — member count was never the variable; see the correction in the
-2026-11-13 entry), and the container builds are compile-only.
+- **The requeue fix ran on hardware.** The 3-member 256 MiB array was still
+  stamped on `0000:03`/`11`/`15` (read back read-only first: `devtype=0x1bf5`,
+  `cap=524288`, `devices=3`; `0000:17` carried only its raw-disk record). The
+  module built from this tree was bound to those three members only and took
+  five rounds of four concurrent buffered 16 MiB `conv=fsync` writers plus a
+  4 KiB-block writer: every writer returned 0, all four regions matched after a
+  cache drop, and dmesg carried no hung-task, parity or error line. `rmmod` was
+  clean and the members went back to `nvme`. This is confirmation, not the
+  gate — the fix stands on the status contract and on CI.
+
+What this does not change: the container builds are compile-only, and nothing
+here is a boot-from-RAID 5 run.
 
 ## 2026-11-13 — 3-member RAID 5 write stalled in writeback; requeue-contract fix
 
@@ -179,7 +187,8 @@ this tree has run on hardware since the fix.
 
 The rig's parity test now forks two buffered writers (see the 2026-11-14
 entry), so the contention shape is covered in CI even though it is not a
-reproduction of the hardware timing.
+reproduction of the hardware timing. The hardware pass itself ran on
+2026-11-14 (entry above): 25 concurrent-writer rounds, all clean.
 
 ## 2026-11-13 — RAID 5 writes validated on hardware (4 members)
 

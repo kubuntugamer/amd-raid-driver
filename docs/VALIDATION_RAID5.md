@@ -399,11 +399,14 @@ data nor parity and is not a substitute for a vendor-written fixture.
 | 5 | On-media parity | PASS 2026-11-13 | raw chunks at `0x105000 + row × 256 KiB`: members 0–2 match, member 3 equals their XOR for both rows |
 | 6 | Persistence + default gate | PASS 2026-11-13 | rmmod/reload re-assembles `optimal` at the same capacity; without `parity_writes=1` the volume is `ro=1` and refuses writes; metadata window unchanged |
 | 7 | Boot / install | blocked | installer still treats RAID 5 as read-only; no boot-from-RAID5 run |
+| 8 | Requeue-contract fix under concurrency | PASS 2026-11-14 | 3-member 256 MiB driver-stamped array: 5 rounds × (four concurrent buffered 16 MiB `conv=fsync` writers + one 4 KiB-block writer) — every writer returned 0, all four regions byte-identical after cache drop, no hung-task/parity/error messages; `rmmod` clean and all three members rebound to `nvme` |
 
 Rows 0–2 are the 2026-11-08 evidence from the 3-disk firmware array, which was
 removed on 2026-11-09. Rows 4–6 are the 2026-11-13 run on a driver-stamped
-4-member array. Row 3 still has no vendor-written bytes to check against; row 7
-waits on the installer path.
+4-member array. Row 8 re-ran the write path on the 3-member array after the
+2026-11-13 requeue fix, with the concurrency that triggered the wedge. Row 3
+still has no vendor-written bytes to check against; row 7 waits on the
+installer path.
 
 Not a hardware result: delete → create → reassembly is QEMU-verified on the
 synthetic 4-member fixture (`--create-test`). It does not cover initialising a
