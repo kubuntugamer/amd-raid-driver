@@ -228,7 +228,17 @@ jobs:
       - name: Check SPDX headers
         run: |
           rc=0
-          for f in rc_*.c rc_*.h; do
+          mapfile -t files < <(git ls-files | grep -E '(^|/)rc_[^/]*\.[ch]$')
+          # An unmatched glob used to leave the literal pattern here, so the
+          # gate reported a missing tag on a file named "rc_*.c" and never
+          # looked at a real source.  Fail loudly if discovery finds nothing.
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no rc_*.c / rc_*.h sources found — the SPDX gate would pass vacuously"
+            exit 1
+          fi
+          echo "Checking ${#files[@]} sources:"
+          printf '  %s\n' "${files[@]}"
+          for f in "${files[@]}"; do
             if ! head -1 "$f" | grep -q 'SPDX-License-Identifier: GPL-2.0-only'; then
               echo "::error file=$f::missing 'SPDX-License-Identifier: GPL-2.0-only' on line 1"
               rc=1

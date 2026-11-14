@@ -142,6 +142,7 @@ mok_pair_specs() {
 # Set MOK_KEY / MOK_CERT to the first pair that exists on disk.  Optional $1 is
 # a root prefix, which is how install-livecd.sh looks at the installed system
 # instead of the live session.  Returns 1 when nothing is there.
+# shellcheck disable=SC2120  # optional root-prefix argument; library callers may pass it
 mok_find_pair() {
     local root="${1:-}" key cert
     while read -r key cert; do
@@ -156,6 +157,7 @@ mok_find_pair() {
 
 # Same, but only pairs the firmware already trusts.  Used first so a machine
 # that is already set up never grows a second key and a second MOK prompt.
+# shellcheck disable=SC2120  # optional root-prefix argument; library callers may pass it
 mok_find_enrolled_pair() {
     local root="${1:-}" key cert
     while read -r key cert; do
@@ -172,6 +174,7 @@ mok_find_enrolled_pair() {
 # a root prefix (live USB target).  The certificate is DER because mokutil
 # imports DER only; the 10-year validity keeps kernel-update rebuilds working
 # without a re-enrolment every few years, as DKMS's own key does.
+# shellcheck disable=SC2120  # optional root-prefix argument; library callers may pass it
 mok_create_pair() {
     local root="${1:-}" dir key cert update_policy
     update_policy="$root/usr/sbin/update-secureboot-policy"
@@ -211,6 +214,7 @@ mok_create_pair() {
 # rebuild a kernel update triggers — is signed.  Optional $1 is a root prefix.
 # Returns 1 when that DKMS has no framework.conf.d support, i.e. when the drop-
 # in would be ignored and the distribution default key used instead.
+# shellcheck disable=SC2120  # optional root-prefix argument; library callers may pass it
 mok_write_dkms_conf() {
     local root="${1:-}" conf key cert
     root="${root%/}"

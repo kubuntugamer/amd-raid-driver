@@ -23,7 +23,6 @@ set -o pipefail
 DEV=/dev/rcraid0
 FULL_READ=0
 SAMPLE_MIB=16
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 while [ $# -gt 0 ]; do
     case "$1" in
