@@ -1353,3 +1353,15 @@ Teardown now clears the slot with the membership, and rcraidXpert derives
 `is_assigned` alone. Verified on hardware: CREATE RAID 5 over disks 0/1/2 →
 DELETE → `rxp2adm list` shows all four disks free → CREATE again succeeds →
 DELETE → all free.
+
+## 2026-11-14 — OS payload install on every level
+
+Wrote the full Kubuntu 26.10 root filesystem (8.47 GB, 245,745 entries) onto
+`/dev/rcraid0` at RAID 0, 1, 10 and 5. Every level: `mkfs.ext4` clean, payload
+extracted without errors, a file read back matched the squashfs byte for byte,
+`e2fsck -fn` clean. Raw sequential numbers (8 GiB write / 4 GiB read,
+`O_DIRECT`): RAID 0 8.3 / 9.4 GB/s, RAID 10 5.0 / 4.7 GB/s, RAID 1 2.9 /
+4.8 GB/s, RAID 5 777 MB/s / 3.7 GB/s. The RAID 5 write figure is a parity-path
+finding, filed as #18; correctness on that level was not affected. Method,
+caveats (payload, not the graphical installer) and per-level screenshots:
+`docs/VALIDATION_OSINSTALL.md`.

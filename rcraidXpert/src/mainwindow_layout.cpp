@@ -49,6 +49,8 @@ void MainWindow::setupLayout() {
     treeModel->setHorizontalHeaderLabels({"AMD RAIDXpert2 Managed Tree Topology"});
     arrayTreeView->setModel(treeModel);
     arrayTreeView->header()->setVisible(true);
+    arrayTreeView->header()->setSectionResizeMode(0,
+                                                  QHeaderView::ResizeToContents);
     
     treeModel->clear();
     treeModel->setHorizontalHeaderLabels({"AMD RAIDXpert2 Managed Tree Topology"});
@@ -102,6 +104,7 @@ void MainWindow::setupLayout() {
     upperHorizontalSplitter->addWidget(mainTabs);
     upperHorizontalSplitter->setStretchFactor(0, 1);
     upperHorizontalSplitter->setStretchFactor(1, 3);
+    upperHorizontalSplitter->setSizes({340, 940});
 
     QWidget *bottomLogContainer = new QWidget(this);
     QVBoxLayout *bottomLayout = new QVBoxLayout(bottomLogContainer);
