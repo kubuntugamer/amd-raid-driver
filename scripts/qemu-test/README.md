@@ -20,7 +20,8 @@ sudo install -m 644 /boot/vmlinuz-$(uname -r) ~/vmlinuz
 ./scripts/qemu-test/run-qemu-raid-test.sh --kernel ~/vmlinuz --writer encoder
 
 # Exercise the opt-in RAID 5 write path: a complete row, an in-row and
-# boundary read-modify-write, and a write straddling two rows:
+# boundary read-modify-write, a write straddling two rows, and two
+# concurrent buffered writers (the contention shape behind issue #17):
 ./scripts/qemu-test/run-qemu-raid-test.sh --kernel ~/vmlinuz \
     --level raid5 --members 4 --parity-writes
 

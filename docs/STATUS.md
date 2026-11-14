@@ -84,6 +84,33 @@ The sections below are the dated implementation log — how each piece was built
 kept for forensics. Where an early "Not started" / "Next steps" note has since
 been implemented, it's marked.
 
+## 2026-11-14 — CI gates actually run; the parity rig gains the contention case
+
+Two things that were written down but never executed now execute.
+
+- **CI ran for the first time in this repository.** The fork's workflow gate
+  had suppressed every run since the workflow files landed, so `build`,
+  `warnings`, `qemu-rig`, `spdx`, `whitespace` and `shellcheck` were
+  descriptions rather than gates (the `spdx` job had in fact never matched a
+  file — see `1828272`). With the gate lifted and the SPDX glob repaired,
+  runs [43534608616](https://github.com/kubuntugamer/amd-raid-driver/actions/runs/43534608616)
+  and [43535356259](https://github.com/kubuntugamer/amd-raid-driver/actions/runs/43535356259)
+  are green: four kernel builds, all six QEMU scenarios, and every script
+  gate. `docs/README.md` and `scripts/qemu-test/README.md` said "three kernel
+  lines" and "intended foundation for CI"; both now state what runs.
+- **The RAID 5 rig reproduces the write-stall shape.** `rcparitytest` step 5
+  forks two writers that use buffered `pwrite` + `fsync` over disjoint rows —
+  page-cache writeback reaching RMW concurrently, which is what wedged the
+  3-member array (see the 2026-11-13 entry below). The earlier four steps are
+  single-threaded `O_DIRECT` and cannot contend, so the fix's promise was
+  untested in CI. A stalled queue now fails the step on a 180 s alarm instead
+  of hanging the rig; `raid5-parity-write` passes with it on 4 members.
+
+What this does not change: the hardware acceptance run for issue #17 (a
+concurrent buffered writer + `fsync` against the 3-member array on
+`0000:03/11/15.0`) is still outstanding, and the container builds are
+compile-only — no runtime claim moves off the array box.
+
 ## 2026-11-13 — 3-member RAID 5 write stalled in writeback; requeue-contract fix
 
 On the array box, after the 4-member fixture was deleted, a 3-member 256 MiB

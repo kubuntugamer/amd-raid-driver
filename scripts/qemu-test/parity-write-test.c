@@ -14,16 +14,23 @@
  *      row, including bytes outside the write, is exactly right,
  *   3. overwrite the last 4 KiB of the row (same, at a chunk boundary),
  *   4. write 64 KiB across the row boundary (two rows of RMW),
+ *   5. two forked processes doing buffered writes + fsync to disjoint rows
+ *      (the contention case — see the comment at the step).
  *
  * Exit statuses are distinct so the guest log says which step failed.
  */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
+
+#define CONTEND_PROCS  2
+#define CONTEND_ROUNDS 8
 
 static void fill(unsigned char *p, size_t n, unsigned int seed)
 {
@@ -31,6 +38,48 @@ static void fill(unsigned char *p, size_t n, unsigned int seed)
 
 	for (i = 0; i < n; i++)
 		p[i] = (unsigned char)(i * 31u + seed);
+}
+
+/*
+ * Buffered writer for step 5: pwrite + fsync over disjoint rows, seeded per
+ * process so the parent can predict the final content.  Buffered on purpose —
+ * O_DIRECT would bypass the page cache that produced the field stall.
+ */
+static int contend_child(const char *dev, unsigned long row, int id)
+{
+	unsigned long off = (unsigned long)(2 + id * 2) * row;
+	unsigned char *b;
+	int fd, i;
+
+	alarm(120);
+	fd = open(dev, O_RDWR);
+	if (fd < 0) {
+		perror("open (buffered)");
+		return 30;
+	}
+	if (posix_memalign((void **)&b, 4096, row)) {
+		fprintf(stderr, "posix_memalign failed\n");
+		close(fd);
+		return 30;
+	}
+	for (i = 0; i < CONTEND_ROUNDS; i++) {
+		fill(b, row, 300 + id * 100 + i);
+		if (pwrite(fd, b, row, off) != (ssize_t)row) {
+			perror("concurrent buffered pwrite");
+			free(b);
+			close(fd);
+			return 31;
+		}
+		if (fsync(fd)) {
+			perror("concurrent fsync");
+			free(b);
+			close(fd);
+			return 32;
+		}
+	}
+	free(b);
+	close(fd);
+	return 0;
 }
 
 static int check(int fd, unsigned long off, unsigned long len,
@@ -147,7 +196,63 @@ int main(int argc, char **argv)
 	if (rc)
 		return rc;
 
+	/* 5. Concurrent buffered writers.
+	 *
+	 * The 2026-11-13 field stall was two page-cache writers whose writeback
+	 * reached the parity path at the same moment: dispatch took the parity
+	 * lock with down_trylock() and returned BLK_STS_DEV_RESOURCE, which is a
+	 * promise that the driver will rerun the queue — nothing did, so the
+	 * queue stopped and the writers' fsync() waited indefinitely.  Steps 1-4
+	 * are one thread and O_DIRECT, so they cannot contend; this step uses the
+	 * same buffered writeback + fsync shape as the field failure.
+	 */
+	{
+		pid_t kids[CONTEND_PROCS];
+		int i, bad = 0, status;
+
+		for (i = 0; i < CONTEND_PROCS; i++) {
+			kids[i] = fork();
+			if (kids[i] < 0) {
+				perror("fork");
+				return 14;
+			}
+			if (!kids[i])
+				_exit(contend_child(dev, row, i));
+		}
+
+		/* A wedged queue must surface as a FAIL, not as a hung rig. */
+		alarm(180);
+		for (i = 0; i < CONTEND_PROCS; i++) {
+			if (waitpid(kids[i], &status, 0) < 0) {
+				perror("waitpid");
+				return 15;
+			}
+			if (!WIFEXITED(status) || WEXITSTATUS(status))
+				bad = 1;
+		}
+		alarm(0);
+		if (bad) {
+			fprintf(stderr, "concurrent buffered writers: stalled or I/O "
+				"error under contention\n");
+			return 16;
+		}
+
+		/* Both regions must hold their last round's data. */
+		for (i = 0; i < CONTEND_PROCS; i++) {
+			unsigned long off = (unsigned long)(2 + i * 2) * row;
+
+			fill(buf, row, 300 + i * 100 + (CONTEND_ROUNDS - 1));
+			rc = check(fd, off, row, buf,
+				   "concurrent writer readback");
+			if (rc)
+				return rc;
+		}
+		printf("parity-write-test: concurrent buffered writers (2 procs, "
+		       "%d rounds each) verified\n", CONTEND_ROUNDS);
+	}
+
 	printf("parity-write-test: row=%lu: full-row write, in-row RMW, "
-	       "boundary RMW and cross-row RMW all verified\n", row);
+	       "boundary RMW, cross-row RMW and multi-writer contention all "
+	       "verified\n", row);
 	return 0;
 }

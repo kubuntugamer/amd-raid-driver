@@ -210,8 +210,8 @@ if [ "$expected_level" = "raid5" ]; then
         [ "$parity_row_kib" -gt 0 ] \
             || fail "no parity_row_kib= on kernel cmdline"
         /rcparitytest /dev/rcraid0 $((parity_row_kib * 1024)) \
-            || fail "RAID5 full-row + read-modify-write test"
-        echo "rcraid-test: raid5 full-row + partial-row RMW ok"
+            || fail "RAID5 full-row + read-modify-write + contention test"
+        echo "rcraid-test: raid5 full-row + partial-row RMW + multi-writer contention ok"
         dmesg -n 1 2>/dev/null
         echo "RCRAID-TEST-PASS"
         poweroff -f
