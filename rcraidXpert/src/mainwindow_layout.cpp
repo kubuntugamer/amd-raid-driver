@@ -64,6 +64,9 @@ void MainWindow::setupLayout() {
 
     arrayOptions = new ArrayOptionsWidget(this);
     arrayOptions->raidTypeCombo->clear();
+    /* No preselected level: the commit path refuses an unset level instead
+     * of silently stamping RAID 0 over every ticked disk. */
+    arrayOptions->raidTypeCombo->addItem("Select RAID level...");
     arrayOptions->raidTypeCombo->addItem("RAID 0 (Striping)",
                                          QVariant::fromValue(0u));
     arrayOptions->raidTypeCombo->addItem("RAID 1 (Mirroring)",

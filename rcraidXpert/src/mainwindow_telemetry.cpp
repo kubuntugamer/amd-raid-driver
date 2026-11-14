@@ -6,6 +6,9 @@
 static QString formatCapacity(quint64 bytes) {
     const double gib = static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0);
 
+    if (bytes == 0)
+        return QStringLiteral("0 B");
+
     if (gib >= 1024.0)
         return QString("%1 TiB").arg(gib / 1024.0, 0, 'f', 2);
     if (gib >= 1.0)
@@ -70,6 +73,20 @@ void MainWindow::triggerControllerRescan() {
         statusPanel->setMessage(
             "No volume assembled. Select disks in the table, choose a level, "
             "then Commit Configuration Vector.");
+    }
+
+    if (commitButton) {
+        if (!controller->arrays().isEmpty())
+            commitButton->setToolTip(
+                "A volume is assembled. Delete it before creating another: "
+                "the driver hosts one array box.");
+        else if (!ArrayDataController::privileged())
+            commitButton->setToolTip(
+                "Creating an array needs root (CAP_SYS_ADMIN); start "
+                "rcraidXpert with sudo.");
+        else
+            commitButton->setToolTip(
+                "Writes new array metadata over the ticked disks.");
     }
 }
 
@@ -160,10 +177,11 @@ void MainWindow::updateCapacityDisplay() {
             free += bytes;
     }
 
-    setWindowTitle(QString("rcraidXpert - %1 disk(s), %2 free of %3")
-                       .arg(controller->disks().size())
-                       .arg(formatCapacity(free))
-                       .arg(formatCapacity(total)));
+    setWindowTitle(
+        QString("rcraidXpert - %1 disk(s), %2 total, %3 free")
+            .arg(controller->disks().size())
+            .arg(formatCapacity(total))
+            .arg(free ? formatCapacity(free) : QStringLiteral("none")));
 }
 
 QStringList MainWindow::treeDump() const {
