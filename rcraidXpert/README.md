@@ -45,6 +45,42 @@ Headless check of the inventory wiring (no display needed):
 QT_QPA_PLATFORM=offscreen ./build/rcraidXpert --dump-tree
 ```
 
+## Testing without the driver
+
+With no module loaded the GUI shows `driver not loaded` and an empty disk
+table, which is the honest answer but exercises almost nothing. To drive the
+rest of the interface without loading `rcraid.ko` or binding a device, use the
+shim in `tools/`:
+
+```sh
+./tools/run-fake.sh                        # 4 disks, 3-member RAID 5, one free
+./tools/run-fake.sh --dump-tree            # the same, headless
+FAKE_CTL_LEVEL=10 FAKE_CTL_MEMBERS=4 ./tools/run-fake.sh
+FAKE_CTL_DEGRADED=1 ./tools/run-fake.sh    # degraded status text
+FAKE_CTL_ABSENT=1 ./tools/run-fake.sh      # behave as if the module is gone
+# empty controller, so create is not blocked by an assembled volume
+FAKE_CTL_MEMBERS=0 sudo -E ./tools/run-fake.sh
+FAKE_CTL_MEMBERS=0 FAKE_CTL_CREATE_ERRNO=95 sudo -E ./tools/run-fake.sh
+```
+
+`tools/run-fake.sh` compiles `tools/fake_ctl0.c` into `build/fake_ctl0.so` and
+launches the GUI under `LD_PRELOAD`; the shim answers only
+`/dev/amd_ctl0`'s four ioctls and passes every other syscall through. Nothing
+is written to any disk: CREATE and DELETE just return success (or the errno
+you asked for). The GUI is not linked against it, and it is not part of the
+build.
+
+Useful states to check by hand:
+
+| Goal | How |
+|---|---|
+| Driver missing | run without the shim, or `FAKE_CTL_ABSENT=1` |
+| Free disks selectable, members locked | default shim |
+| Create path reachable | `FAKE_CTL_MEMBERS=0 sudo -E ./tools/run-fake.sh` (no volume assembled, all disks free) |
+| RAID 5 create refused | `FAKE_CTL_MEMBERS=0 FAKE_CTL_CREATE_ERRNO=95 sudo -E ./tools/run-fake.sh` (a module without `parity_create=1` behaves the same) |
+| Non-root create/delete message | run the shim without `sudo` |
+| Degraded volume text | `FAKE_CTL_DEGRADED=1`; hover the logical drive for the tooltip |
+
 ## Using it
 
 * **Left tree** — `Logical Drives` lists what the driver assembled (LD id,
