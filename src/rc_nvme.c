@@ -3304,12 +3304,13 @@ static void rc_volume_register_member(struct rc_adapter *adapter)
 		}
 		/* RAID 5/6 write policy.  RAID 6 has no write path at all (the
 		 * dual P/Q write is not wired), so it stays read-only.  RAID 5
-		 * can write a complete row — every data chunk of the row is in
-		 * the request, so P is a plain XOR — but that path is opt-in
-		 * (parity_writes=1) and still useless for normal filesystem
-		 * traffic until read-modify-write exists.  create_disk makes the
-		 * final read-only call: it also requires trusted geometry and a
-		 * row that fits one request. */
+		 * writes are opt-in (parity_writes=1) and cover both shapes: a
+		 * complete row carries every data chunk, so P is a plain XOR of
+		 * the request; a partial row is read-modify-written — read the
+		 * row, overlay the request, regenerate P, rewrite the touched
+		 * chunks.  create_disk makes the final read-only call: it also
+		 * requires enable_writes=1, trusted geometry and a row that fits
+		 * one request. */
 		if (nvme->ld_level == RC_LDT_RAID6) {
 			rc_printk(RC_WARN,
 				  "rc_volume_register_member: %s RAID 6 recognised — assembly and READS only (dual-parity writes are not implemented) — volume will be READ-ONLY\n",
@@ -3318,7 +3319,7 @@ static void rc_volume_register_member(struct rc_adapter *adapter)
 				"RAID 6 is assembled READ-ONLY: the dual-parity (P/Q) write path is not implemented";
 		} else if (nvme->ld_level == RC_LDT_RAID5) {
 			rc_printk(RC_NOTE,
-				  "rc_volume_register_member: %s RAID 5 recognised — reads always; full-row writes only with enable_writes=1 and parity_writes=1 (partial rows need read-modify-write and are refused)\n",
+				  "rc_volume_register_member: %s RAID 5 recognised — reads always; writes opt-in with enable_writes=1 and parity_writes=1 (full rows generate P, partial rows read-modify-write the row under the parity lock)\n",
 				  pci_name(adapter->pdev));
 		}
 	} else {
